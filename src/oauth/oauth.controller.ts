@@ -103,7 +103,7 @@ export class OAuthController {
 			<body>
 				<div class="container">
 					<div class="success">
-						✅ GREEN-API WhatsApp Integration Installed Successfully!
+						✅ Social Connector Installed Successfully!
 					</div>
 				</div>
 				<script>
@@ -141,9 +141,9 @@ export class OAuthController {
 		const isRussian = language === "ru";
 
 		return {
-			title: isRussian ? "Настройки GREEN-API канала" : "GREEN-API Connector Settings",
+			title: isRussian ? "Настройки канала Social Connector" : "Social Connector Settings",
 			header: {
-				title: isRussian ? "GREEN-API WhatsApp" : "GREEN-API WhatsApp Connector",
+				title: isRussian ? "Social Connector" : "GREEN-API WhatsApp Connector",
 				subtitle: isRussian ? "Настройте ваш WhatsApp инстанс" : "Configure your WhatsApp instance",
 				lineInfo: isRussian ? "Линия:" : "Line:",
 			},
@@ -152,13 +152,13 @@ export class OAuthController {
 					label: isRussian ? "ID Инстанса" : "Instance ID",
 					placeholder: isRussian ? "Например, 7103190270" : "e.g., 7103190270",
 					description: isRussian ? "Получите его в" : "Get from",
-					linkText: isRussian ? "консоли GREEN-API" : "GREEN-API Console",
+					linkText: isRussian ? "консоли green-api.com" : "console.green-api.com",
 				},
 				apiToken: {
 					label: isRussian ? "API Токен" : "API Token",
 					placeholder: isRussian ? "Ваш API токен" : "Your API Token",
 					description: isRussian ? "Получите его в" : "Get from",
-					linkText: isRussian ? "консоли GREEN-API" : "GREEN-API Console",
+					linkText: isRussian ? "консоли green-api.com" : "console.green-api.com",
 				},
 				saveButton: isRussian ? "Сохранить настройки" : "Save Configuration",
 			},

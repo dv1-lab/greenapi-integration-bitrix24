@@ -14,7 +14,7 @@ export class WebhooksController {
 	@Post("green-api")
 	@HttpCode(HttpStatus.OK)
 	async handleGreenApiWebhook(@Body() webhook: GreenApiWebhook, @Res() res: Response): Promise<void> {
-		this.logger.debug(`GREEN-API webhook received: ${webhook.typeWebhook}`);
+		this.logger.debug(`Green API webhook received: ${webhook.typeWebhook}`);
 
 		res.status(HttpStatus.OK).send();
 
@@ -25,7 +25,7 @@ export class WebhooksController {
 				"incomingCall",
 			]);
 		} catch (error: any) {
-			this.logger.error(`Error processing GREEN-API webhook:`, error);
+			this.logger.error(`Error processing Green API webhook:`, error);
 		}
 	}
 

@@ -7,16 +7,16 @@ export class AppController {
 		const isRussian = language === "ru";
 
 		return {
-			title: isRussian ? "GREEN-API WhatsApp Интеграция" : "GREEN-API WhatsApp Integration",
+			title: isRussian ? "Social Connector" : "Social Connector",
 			header: {
-				title: isRussian ? "GREEN-API WhatsApp" : "GREEN-API WhatsApp",
-				subtitle: isRussian ? "Профессиональная WhatsApp интеграция для Bitrix24" : "Professional WhatsApp Integration for Bitrix24",
+				title: isRussian ? "Social Connector" : "Social Connector",
+				subtitle: isRussian ? "Универсальный коннектор мессенджеров для Bitrix24" : "Universal messenger connector for Bitrix24",
 				status: isRussian ? "✅ Приложение успешно установлено и активно" : "✅ Successfully Installed & Active",
 			},
 			quickActions: {
 				configure: {
 					title: isRussian ? "Настроить коннектор" : "Configure Connector",
-					description: isRussian ? "Настройте ваш GREEN-API WhatsApp коннектор в Контакт-центре" : "Set up your GREEN-API WhatsApp connector in Contact Center",
+					description: isRussian ? "Настройте ваш коннектор Social Connector в Контакт-центре" : "Set up your Social Connector in Contact Center",
 				},
 				documentation: {
 					title: isRussian ? "Документация" : "Documentation",
@@ -36,10 +36,10 @@ export class AppController {
 						image: isRussian ? "/images/step1-contact-center-ru.png" : "/images/step1-contact-center.png",
 					},
 					{
-						title: isRussian ? "Шаг 2: Найдите GREEN-API коннектор" : "Step 2: Find GREEN-API Connector",
-						description: isRussian ? "Найдите GREEN-API WhatsApp коннектор в списке доступных коннекторов. Он должен отображаться как установленный и готовый к настройке." : "Look for the GREEN-API WhatsApp connector in your available connectors list. It should show as installed and ready to configure.",
+						title: isRussian ? "Шаг 2: Найдите коннектор Social Connector" : "Step 2: Find Social Connector",
+						description: isRussian ? "Найдите коннектор Social Connector в списке доступных коннекторов. Он должен отображаться как установленный и готовый к настройке." : "Look for the Social Connector in your available connectors list. It should show as installed and ready to configure.",
 						button: isRussian ? "Перейти к коннектору →" : "Go to Connector →",
-						imageLabel: isRussian ? "GREEN-API Коннектор" : "GREEN-API Connector",
+						imageLabel: isRussian ? "коннектор Social Connector" : "Social Connector",
 						image: isRussian ? "/images/step2-connector-ru.png" : "/images/step2-connector.png",
 					},
 					{
@@ -814,7 +814,7 @@ export class AppController {
                 
                 if (typeof BX24 !== 'undefined') {
                     BX24.init(() => {
-                        console.log('GREEN-API app interface loaded');
+                        console.log('Social Connector interface loaded');
                         domain = BX24.getDomain();
                         console.log('Current domain:', domain);
                     });
