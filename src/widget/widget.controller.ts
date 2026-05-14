@@ -1,14 +1,16 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Post, Res } from "@nestjs/common";
+import { All, Body, Controller, HttpException, HttpStatus, Post, Req, Res } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { Response } from "express";
+import { Request, Response } from "express";
 import axios from "axios";
 
 @Controller("widget")
 export class WidgetController {
 	constructor(private readonly config: ConfigService) {}
 
-	@Get("send-first")
-	render(@Res() res: Response) {
+	// B24 placement шлёт POST с form-data, прямой переход из браузера — GET.
+	// Принимаем оба через @All, кроме POST /widget/send (см. ниже).
+	@All("send-first")
+	render(@Req() req: Request, @Res() res: Response) {
 		res.setHeader("X-Frame-Options", "ALLOWALL");
 		res.setHeader("Content-Security-Policy", "frame-ancestors *");
 		res.type("html").send(this.renderHtml());
