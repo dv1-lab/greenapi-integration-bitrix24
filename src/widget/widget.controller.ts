@@ -35,16 +35,48 @@ export class WidgetController {
 		}
 
 		const chatId = `${phone}@c.us`;
+		let idMessage: string | undefined;
 		try {
 			const r = await axios.post(
 				`${apiUrl}/waInstance${idInstance}/sendMessage/${apiToken}`,
 				{ chatId, message: text },
 				{ timeout: 15000 },
 			);
-			return { ok: true, idMessage: r.data?.idMessage, chatId };
+			idMessage = r.data?.idMessage;
 		} catch (err: any) {
 			const msg = err.response?.data || err.message;
 			throw new HttpException(`Green API: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+		}
+
+		// Зеркалим в открытую линию B24 как self-message, чтобы менеджер видел свою
+		// переписку в карточке клиента. Если не настроен — пропускаем без ошибки.
+		const mirrored = await this.mirrorToBitrix(phone, text, idMessage);
+		return { ok: true, idMessage, chatId, mirrored };
+	}
+
+	private async mirrorToBitrix(phone: string, text: string, idMessage?: string): Promise<boolean | string> {
+		const webhookUrl = this.config.get<string>("BITRIX_WEBHOOK_URL");
+		const line = this.config.get<string>("BITRIX_LINE_ID");
+		if (!webhookUrl || !line) return false; // mirror отключён до настройки webhook+LINE
+		try {
+			const r = await axios.post(
+				`${webhookUrl.replace(/\/$/, "")}/imconnector.send.messages`,
+				{
+					CONNECTOR: "social_connector",
+					LINE: Number(line),
+					MESSAGES: [{
+						user: { id: phone, name: `WhatsApp ${phone}`, phone },
+						message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
+						chat: { id: phone, name: `WhatsApp ${phone}`, url: null },
+						extra: { is_self_message: true },
+					}],
+				},
+				{ timeout: 10000 },
+			);
+			if (r.data?.error) return `b24:${r.data.error}`;
+			return true;
+		} catch (err: any) {
+			return `b24 mirror failed: ${err.response?.data?.error_description || err.message}`;
 		}
 	}
 
