@@ -3,6 +3,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { AppModule } from "./app.module";
 import { Settings } from "@green-api/greenapi-integration";
 import helmet from "helmet";
+import { urlencoded } from "express";
 
 declare global {
 	namespace PrismaJson {
@@ -22,6 +23,8 @@ async function bootstrap() {
 		crossOriginResourcePolicy: false,
 	}));
 	app.enableCors();
+	// B24 placement POST шлёт application/x-www-form-urlencoded — без этого @Body пустой.
+	app.use(urlencoded({ extended: true, limit: "5mb" }));
 
 	await app.listen(3000);
 }

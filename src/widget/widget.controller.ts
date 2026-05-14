@@ -10,14 +10,19 @@ export class WidgetController {
 	// B24 placement шлёт POST с form-data, прямой переход из браузера — GET.
 	// Принимаем оба через @All, кроме POST /widget/send (см. ниже).
 	@All("send-first")
-	render(@Req() req: Request, @Res() res: Response) {
+	render(@Req() req: Request, @Body() body: any, @Res() res: Response) {
 		res.setHeader("X-Frame-Options", "ALLOWALL");
 		res.setHeader("Content-Security-Policy", "frame-ancestors *");
-		res.type("html").send(this.renderHtml());
+		// B24 при открытии placement шлёт в body AUTH_ID/REFRESH_ID/DOMAIN — это
+		// свежий OAuth-токен Social Connector app, валиден ~1 час. Передаём в JS,
+		// чтобы виджет мог отправить mirror через application context.
+		const authId = (body && body.AUTH_ID) || "";
+		const domain = (body && body.DOMAIN) || ((req.query.DOMAIN as string) || "");
+		res.type("html").send(this.renderHtml(authId, domain));
 	}
 
 	@Post("send")
-	async send(@Body() body: { phone?: string; text?: string }) {
+	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string }) {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		if (phone.length < 10 || phone.length > 15) {
@@ -50,37 +55,59 @@ export class WidgetController {
 
 		// Зеркалим в открытую линию B24 как self-message, чтобы менеджер видел свою
 		// переписку в карточке клиента. Если не настроен — пропускаем без ошибки.
-		const mirrored = await this.mirrorToBitrix(phone, text, idMessage);
+		const mirrored = await this.mirrorToBitrix(phone, text, idMessage, body.authId, body.domain);
 		return { ok: true, idMessage, chatId, mirrored };
 	}
 
-	private async mirrorToBitrix(phone: string, text: string, idMessage?: string): Promise<boolean | string> {
-		const webhookUrl = this.config.get<string>("BITRIX_WEBHOOK_URL");
+	private async mirrorToBitrix(
+		phone: string, text: string, idMessage?: string,
+		authId?: string, domain?: string,
+	): Promise<boolean | string> {
 		const line = this.config.get<string>("BITRIX_LINE_ID");
-		if (!webhookUrl || !line) return false; // mirror отключён до настройки webhook+LINE
+		if (!line) return false; // нет линии — пропускаем
+
+		const payload = {
+			CONNECTOR: "social_connector",
+			LINE: Number(line),
+			MESSAGES: [{
+				user: { id: phone, name: `WhatsApp ${phone}`, phone },
+				message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
+				chat: { id: phone, name: `WhatsApp ${phone}`, url: null },
+				extra: { is_self_message: true },
+			}],
+		};
+
+		// Приоритет: OAuth-токен Social Connector app (из placement-запроса B24).
+		// Fallback: Inbound Webhook URL (если когда-нибудь B24 разрешит для этого метода).
+		if (authId && domain) {
+			try {
+				const url = `https://${domain}/rest/imconnector.send.messages?auth=${encodeURIComponent(authId)}`;
+				const r = await axios.post(url, payload, { timeout: 10000 });
+				if (r.data?.error) return `b24:${r.data.error}`;
+				return true;
+			} catch (err: any) {
+				return `b24 mirror via OAuth failed: ${err.response?.data?.error_description || err.message}`;
+			}
+		}
+
+		const webhookUrl = this.config.get<string>("BITRIX_WEBHOOK_URL");
+		if (!webhookUrl) return false;
 		try {
 			const r = await axios.post(
 				`${webhookUrl.replace(/\/$/, "")}/imconnector.send.messages`,
-				{
-					CONNECTOR: "social_connector",
-					LINE: Number(line),
-					MESSAGES: [{
-						user: { id: phone, name: `WhatsApp ${phone}`, phone },
-						message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
-						chat: { id: phone, name: `WhatsApp ${phone}`, url: null },
-						extra: { is_self_message: true },
-					}],
-				},
+				payload,
 				{ timeout: 10000 },
 			);
 			if (r.data?.error) return `b24:${r.data.error}`;
 			return true;
 		} catch (err: any) {
-			return `b24 mirror failed: ${err.response?.data?.error_description || err.message}`;
+			return `b24 mirror via webhook failed: ${err.response?.data?.error_description || err.message}`;
 		}
 	}
 
-	private renderHtml(): string {
+	private renderHtml(authId: string = "", domain: string = ""): string {
+		const safe = (s: string) => s.replace(/[<>'"&]/g, "");
+		const authJs = JSON.stringify({ authId: safe(authId), domain: safe(domain) });
 		return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -128,6 +155,7 @@ export class WidgetController {
 </div>
 
 <script>
+const B24_AUTH = ${authJs};
 (function() {
   const $ = id => document.getElementById(id);
   const status = $("status");
@@ -206,7 +234,7 @@ export class WidgetController {
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, text }),
+        body: JSON.stringify({ phone, text, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
