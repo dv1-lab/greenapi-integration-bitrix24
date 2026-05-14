@@ -89,15 +89,24 @@ export class WidgetController {
 
   <button id="send">Отправить</button>
   <div id="status" class="status"></div>
+  <details style="margin-top:14px; font-size:11px; color:#6b7280;">
+    <summary style="cursor:pointer;">debug</summary>
+    <pre id="debug" style="white-space:pre-wrap; word-break:break-all; margin:6px 0 0;"></pre>
+  </details>
 </div>
 
 <script>
 (function() {
   const $ = id => document.getElementById(id);
   const status = $("status");
+  const debug = $("debug");
   const showStatus = (msg, ok) => {
     status.textContent = msg;
     status.className = "status " + (ok ? "ok" : "err");
+  };
+  const dbg = (label, data) => {
+    if (!debug) return;
+    debug.textContent += label + ": " + (typeof data === "string" ? data : JSON.stringify(data, null, 2)) + "\\n";
   };
 
   function setPhone(raw) {
@@ -106,37 +115,51 @@ export class WidgetController {
     if (digits.length >= 10) $("phone").value = digits;
   }
 
-  // Получаем контекст B24 → телефон контакта из карточки
-  if (typeof BX24 !== "undefined") {
-    BX24.init(function() {
-      const info = BX24.placement.info();
-      const opts = info && info.options;
-      if (!opts || !opts.ENTITY_ID || !opts.ENTITY_TYPE_NAME) return;
+  // У B24 для CRM_*_DETAIL_TOOLBAR тип сущности определяется placement-именем,
+  // а entity ID лежит в options.ID.
+  const PLACEMENT_TO_METHOD = {
+    CRM_LEAD_DETAIL_TOOLBAR: "crm.lead.get",
+    CRM_DEAL_DETAIL_TOOLBAR: "crm.deal.get",
+    CRM_CONTACT_DETAIL_TOOLBAR: "crm.contact.get",
+    CRM_COMPANY_DETAIL_TOOLBAR: "crm.company.get",
+  };
 
-      const entityType = String(opts.ENTITY_TYPE_NAME).toLowerCase();
-      const entityId = opts.ENTITY_ID;
-      const method = entityType === "lead" ? "crm.lead.get"
-                   : entityType === "deal" ? "crm.deal.get"
-                   : entityType === "contact" ? "crm.contact.get"
-                   : null;
-      if (!method) return;
-
-      BX24.callMethod(method, { id: entityId }, function(res) {
-        if (res.error()) return;
-        const data = res.data() || {};
-        // PHONE = [{ VALUE: "+79...", ... }]
-        if (Array.isArray(data.PHONE) && data.PHONE[0]) setPhone(data.PHONE[0].VALUE);
-        // Если это сделка — попробуем контакт
-        else if (entityType === "deal" && data.CONTACT_ID) {
-          BX24.callMethod("crm.contact.get", { id: data.CONTACT_ID }, function(r2) {
-            if (r2.error()) return;
-            const d2 = r2.data() || {};
-            if (Array.isArray(d2.PHONE) && d2.PHONE[0]) setPhone(d2.PHONE[0].VALUE);
-          });
-        }
-      });
-    });
+  if (typeof BX24 === "undefined") {
+    dbg("BX24", "SDK не загружен — окно открыто вне B24 iframe");
+    return;
   }
+
+  BX24.init(function() {
+    const info = BX24.placement.info() || {};
+    dbg("placement.info", info);
+
+    const placement = info.placement;
+    const opts = info.options || {};
+    const entityId = opts.ID || opts.ENTITY_ID || opts.id;
+    const method = PLACEMENT_TO_METHOD[placement];
+
+    if (!method) { dbg("method", "unknown placement"); return; }
+    if (!entityId) { dbg("entityId", "не нашли в options"); return; }
+
+    BX24.callMethod(method, { id: entityId }, function(res) {
+      if (res.error()) { dbg(method + " error", res.error_description()); return; }
+      const data = res.data() || {};
+      dbg(method + ".PHONE", data.PHONE);
+      if (Array.isArray(data.PHONE) && data.PHONE[0]) {
+        setPhone(data.PHONE[0].VALUE);
+        return;
+      }
+      // Сделка — подтянем телефон из связанного контакта
+      if (method === "crm.deal.get" && data.CONTACT_ID) {
+        BX24.callMethod("crm.contact.get", { id: data.CONTACT_ID }, function(r2) {
+          if (r2.error()) { dbg("contact error", r2.error_description()); return; }
+          const d2 = r2.data() || {};
+          dbg("contact.PHONE", d2.PHONE);
+          if (Array.isArray(d2.PHONE) && d2.PHONE[0]) setPhone(d2.PHONE[0].VALUE);
+        });
+      }
+    });
+  });
 
   $("send").addEventListener("click", async function() {
     const phone = $("phone").value.trim();
