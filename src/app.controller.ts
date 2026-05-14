@@ -808,7 +808,7 @@ export class AppController {
                 
                 function openConnector() {
                     if (typeof BX24 !== 'undefined' && domain) {
-                        window.top.location.href = \`https://\${domain}/contact_center/connector/?ID=greenapi_whatsapp\`;
+                        window.top.location.href = \`https://\${domain}/contact_center/connector/?ID=social_connector\`;
                     }
                 }
                 

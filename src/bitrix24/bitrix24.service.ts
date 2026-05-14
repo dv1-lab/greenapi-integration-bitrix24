@@ -172,7 +172,7 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 
 			await this.callBitrix24Method(instance.user.portalDomain, "imconnector.send.messages", {
-				CONNECTOR: "greenapi_whatsapp",
+				CONNECTOR: "social_connector",
 				LINE: line,
 				MESSAGES: [messagePayload],
 			});
@@ -216,7 +216,7 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		if (body.PLACEMENT === "SETTING_CONNECTOR") {
 			const configRequest: ConnectorConfigurationRequest = {
-				CONNECTOR: body.CONNECTOR || "greenapi_whatsapp",
+				CONNECTOR: body.CONNECTOR || "social_connector",
 			};
 			return await this.handleConnectorConfiguration(configRequest);
 		}
@@ -481,7 +481,7 @@ export class Bitrix24Service extends BaseAdapter<
 		switch (body.ACTION) {
 			case "CONFIGURATION":
 				const configRequest: ConnectorConfigurationRequest = {
-					CONNECTOR: body.CONNECTOR || "greenapi_whatsapp",
+					CONNECTOR: body.CONNECTOR || "social_connector",
 				};
 				return await this.handleConnectorConfiguration(configRequest);
 			case "SAVE":
@@ -508,7 +508,7 @@ export class Bitrix24Service extends BaseAdapter<
 		this.logger.info("Handling connector configuration", body);
 		const connector = body.CONNECTOR;
 
-		if (connector !== "greenapi_whatsapp") {
+		if (connector !== "social_connector") {
 			throw new Error("Invalid connector type");
 		}
 
@@ -592,7 +592,7 @@ export class Bitrix24Service extends BaseAdapter<
 			);
 
 			await this.callBitrix24Method(domain, "imconnector.activate", {
-				CONNECTOR: "greenapi_whatsapp",
+				CONNECTOR: "social_connector",
 				LINE: line,
 				ACTIVE: true,
 			}, accessToken);
@@ -633,13 +633,13 @@ export class Bitrix24Service extends BaseAdapter<
 		try {
 			const appUrl = this.configService.get<string>("APP_URL");
 			await this.callBitrix24Method(domain, "imconnector.connector.data.set", {
-				CONNECTOR: "greenapi_whatsapp",
+				CONNECTOR: "social_connector",
 				LINE: line,
 				DATA: {
-					id: `greenapi_whatsapp_line_${line}`,
+					id: `social_connector_line_${line}`,
 					url: `${appUrl}/webhooks/bitrix24`,
-					name: "GREEN-API WhatsApp",
-					description: "WhatsApp integration via GREEN-API",
+					name: "Social Connector",
+					description: "Universal messenger connector",
 				},
 			}, accessToken);
 
@@ -848,7 +848,7 @@ export class Bitrix24Service extends BaseAdapter<
 			const externalChatId = originalMessage.chat?.id || "unknown";
 
 			await this.callBitrix24Method(domain, "imconnector.send.status.delivery", {
-				CONNECTOR: "greenapi_whatsapp",
+				CONNECTOR: "social_connector",
 				LINE: line,
 				MESSAGES: [{
 					im: originalMessage.im,

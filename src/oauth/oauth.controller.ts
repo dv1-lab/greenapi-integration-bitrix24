@@ -451,7 +451,7 @@ export class OAuthController {
 		const appUrl = this.configService.get<string>("APP_URL");
 
 		try {
-			const connectorId = "greenapi_whatsapp";
+			const connectorId = "social_connector";
 			this.logger.log(`Registering GREEN-API connector for ${domain}`);
 
 			const icon = `<?xml version="1.0" encoding="UTF-8"?>
@@ -485,7 +485,7 @@ export class OAuthController {
 				`${baseUrl}/imconnector.register?auth=${accessToken}`,
 				{
 					ID: connectorId,
-					NAME: "GREEN-API WhatsApp",
+					NAME: "Social Connector",
 					PLACEMENT_HANDLER: `${appUrl}/oauth/install`,
 					ICON: {
 						DATA_IMAGE: "data:image/svg+xml;charset=US-ASCII," + encodeURIComponent(icon),
