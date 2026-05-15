@@ -248,13 +248,33 @@ const B24_AUTH = ${authJs};
     });
   }).catch(e => dbg("instances fetch error", e.message));
 
-  // У B24 для CRM_*_DETAIL_TOOLBAR тип сущности определяется placement-именем,
-  // а entity ID лежит в options.ID.
+  // У B24 для CRM_*_DETAIL_* тип сущности определяется placement-именем,
+  // а entity ID лежит в options.ID / options.ENTITY_ID / options.entityId.
+  // В LIST_MENU entity id может приходить как options.ID или options.element_id
+  // (открыли меню на конкретной строке списка).
   const PLACEMENT_TO_METHOD = {
+    // DETAIL_TOOLBAR — кнопка в шапке карточки
     CRM_LEAD_DETAIL_TOOLBAR: "crm.lead.get",
     CRM_DEAL_DETAIL_TOOLBAR: "crm.deal.get",
     CRM_CONTACT_DETAIL_TOOLBAR: "crm.contact.get",
     CRM_COMPANY_DETAIL_TOOLBAR: "crm.company.get",
+    // DETAIL_TAB — отдельная вкладка в карточке
+    CRM_LEAD_DETAIL_TAB: "crm.lead.get",
+    CRM_DEAL_DETAIL_TAB: "crm.deal.get",
+    CRM_CONTACT_DETAIL_TAB: "crm.contact.get",
+    CRM_COMPANY_DETAIL_TAB: "crm.company.get",
+    // DETAIL_ACTIVITY — в панели «Что нужно сделать»
+    CRM_LEAD_DETAIL_ACTIVITY: "crm.lead.get",
+    CRM_DEAL_DETAIL_ACTIVITY: "crm.deal.get",
+    CRM_CONTACT_DETAIL_ACTIVITY: "crm.contact.get",
+    CRM_COMPANY_DETAIL_ACTIVITY: "crm.company.get",
+    // ACTIVITY_TIMELINE_MENU — три точки на записи timeline
+    CRM_LEAD_ACTIVITY_TIMELINE_MENU: "crm.lead.get",
+    CRM_DEAL_ACTIVITY_TIMELINE_MENU: "crm.deal.get",
+    // LIST_MENU — три точки у строки в списке лидов/сделок/контактов
+    CRM_LEAD_LIST_MENU: "crm.lead.get",
+    CRM_DEAL_LIST_MENU: "crm.deal.get",
+    CRM_CONTACT_LIST_MENU: "crm.contact.get",
   };
 
   if (typeof BX24 === "undefined") {
@@ -268,7 +288,11 @@ const B24_AUTH = ${authJs};
 
     const placement = info.placement;
     const opts = info.options || {};
-    const entityId = opts.ID || opts.ENTITY_ID || opts.id;
+    // Разные placement-slot'ы B24 кладут entity ID в разные ключи.
+    // TOOLBAR/TAB/ACTIVITY: options.ID
+    // ACTIVITY_TIMELINE_MENU: options.OWNER_ID (тут options.ID = ID активности, не лида)
+    // LIST_MENU: options.ID или options.element_id
+    const entityId = opts.OWNER_ID || opts.ID || opts.ENTITY_ID || opts.id || opts.element_id;
     const method = PLACEMENT_TO_METHOD[placement];
 
     if (!method) { dbg("method", "unknown placement"); return; }
