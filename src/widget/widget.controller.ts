@@ -199,12 +199,15 @@ export class WidgetController {
 		if (!line) return false; // нет линии — пропускаем
 
 		// Для WA idKey = phone (10-15 цифр) → можно сформировать E.164 + user.phone.
-		// Для MAX idKey = chatId (внутренний user_id), телефона нет.
+		// Для MAX/Telegram idKey = chatId (внутренний user_id), телефона нет.
 		const isPhoneLike = provider === "wa" && /^\d{10,15}$/.test(idKey);
 		const phoneE164 = isPhoneLike ? `+${idKey}` : null;
 		// Префикс должен совпадать с тем что adapter ставит при входящих:
-		// WA → wa_<phone>, MAX → sc_<chatId>.
-		const userKey = isPhoneLike ? `wa_${idKey}` : `sc_${idKey}`;
+		//   WA + Telegram → wa_ (legacy compat — Telegram сессии создавались с wa_
+		//   до того как мы добавили sc_ для не-WA). Меняем — будут дубли в B24.
+		//   MAX → sc_
+		const useWaPrefix = isPhoneLike || provider === "telegram";
+		const userKey = useWaPrefix ? `wa_${idKey}` : `sc_${idKey}`;
 		// ВАЖНО: name без пробелов. B24 при создании лида/контакта разбивает
 		// name по пробелу и кладёт хвост в LAST_NAME. «WhatsApp 79228124797»
 		// → NAME=«WhatsApp», LAST_NAME=«79228124797» — мусор в карточке.

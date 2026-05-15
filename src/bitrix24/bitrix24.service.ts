@@ -281,8 +281,11 @@ export class Bitrix24Service extends BaseAdapter<
 				);
 			}
 			// Префикс для user.id/chat.id обходит legacy-кеш B24 (см. историю фикса).
-			// WA → `wa_`, прочие каналы (MAX/TG) → `sc_` — namespace per provider.
-			const userKey = isPhoneLike ? `wa_${message.phone}` : `sc_${message.phone}`;
+			// WA + Telegram → `wa_` (legacy для всех «числовых» каналов, чтобы
+			// не плодить дубли с раннее созданными сессиями Telegram-клиентов).
+			// MAX → `sc_` (там сразу был такой префикс с самого начала).
+			const useWaPrefix = isPhoneLike || instanceProvider === "telegram";
+			const userKey = useWaPrefix ? `wa_${message.phone}` : `sc_${message.phone}`;
 			// fallbackName без пробелов: B24 разбивает по пробелу и хвост идёт в
 			// LAST_NAME — получится «WhatsApp» / «79228124797» в карточке.
 			const fallbackName = isPhoneLike ? (phoneE164 as string) : message.phone;
