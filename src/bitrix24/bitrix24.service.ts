@@ -253,12 +253,18 @@ export class Bitrix24Service extends BaseAdapter<
 
 		const line = instance.bitrixLine;
 
+		// Провайдер инстанса (wa/max/telegram) — определяет нужно ли считать
+		// идентификатор клиента телефоном. Telegram chatId может быть 10 цифр,
+		// что случайно матчится с phone-regex'ом — поэтому нельзя полагаться
+		// только на формат, нужен явный провайдер.
+		const instanceProvider = ((instance.settings as any)?.provider || "wa").toLowerCase();
+
 		try {
-			// Не все каналы передают телефон. WhatsApp всегда даёт чистый номер
-			// 10-15 цифр. MAX/Telegram через Green API дают внутренний user_id
-			// ("8502106", "@username") — это НЕ телефон, и в B24 user.phone его
-			// класть нельзя: валидация отвергнет сообщение целиком.
-			const isPhoneLike = /^\+?\d{10,15}$/.test(message.phone);
+			// Только для WA идентификатор клиента — настоящий телефон.
+			// Для MAX/Telegram это внутренний user_id, в user.phone класть нельзя:
+			// B24 либо отвергнет (если короткий), либо запишет в карточку как phone
+			// (что ещё хуже — оператор будет пытаться звонить на user_id).
+			const isPhoneLike = instanceProvider === "wa" && /^\+?\d{10,15}$/.test(message.phone);
 			const phoneE164 = isPhoneLike
 				? (message.phone.startsWith("+") ? message.phone : `+${message.phone}`)
 				: null;
