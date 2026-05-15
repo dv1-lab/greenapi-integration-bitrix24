@@ -32,6 +32,7 @@ export class WidgetController {
 			bitrixLine: i.bitrixLine,
 			stateInstance: i.stateInstance,
 			label: (i.settings as any)?.label || `Instance ${i.idInstance}`,
+			provider: ((i.settings as any)?.provider || "wa"),
 		}));
 	}
 
@@ -256,7 +257,7 @@ export class WidgetController {
 <body>
 <div class="card">
   <h1>📤 Social Connector</h1>
-  <p class="subtitle">Первое сообщение клиенту через WhatsApp</p>
+  <p class="subtitle" id="subtitle">Первое сообщение клиенту</p>
 
   <label for="instance">Отправить с номера</label>
   <select id="instance">
@@ -379,6 +380,19 @@ const B24_AUTH = ${authJs};
     "1103487233": "WhatsApp +7 958 498-33-54 (1Begovoy)",
     "1101948511": "WhatsApp +7 924 077-85-66",
   };
+  // Карта idInstance → provider для динамического subtitle
+  const PROVIDER_MAP = {};
+  function detectChannelLabel(idInst) {
+    const p = (PROVIDER_MAP[idInst] || "wa").toLowerCase();
+    if (p === "max") return "MAX";
+    if (p === "telegram") return "Telegram";
+    return "WhatsApp";
+  }
+  function updateSubtitle() {
+    const idInst = $("instance").value;
+    const channel = detectChannelLabel(idInst);
+    $("subtitle").textContent = "Первое сообщение клиенту через " + channel;
+  }
   fetch("/widget/instances").then(r => r.json()).then(list => {
     const sel = $("instance");
     sel.innerHTML = "";
@@ -387,12 +401,15 @@ const B24_AUTH = ${authJs};
       return;
     }
     list.forEach(it => {
+      PROVIDER_MAP[it.idInstance] = (it.provider || "wa");
       const opt = document.createElement("option");
       opt.value = it.idInstance;
       // Приоритет: hardcoded label (для WA) → label из БД (для MAX и др.) → ID
       opt.textContent = INSTANCE_LABELS[it.idInstance] || it.label || it.idInstance;
       sel.appendChild(opt);
     });
+    sel.addEventListener("change", updateSubtitle);
+    updateSubtitle();
   }).catch(e => dbg("instances fetch error", e.message));
 
   // У B24 для CRM_*_DETAIL_* тип сущности определяется placement-именем,
