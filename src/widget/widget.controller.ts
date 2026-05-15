@@ -489,20 +489,30 @@ const B24_AUTH = ${authJs};
       : method === "crm.company.get" ? "COMPANY" : "OTHER";
     entityCtx = { type: ENTITY_TYPE, id: String(entityId) };
 
-    // Подтянем известные MAX chatId из existing open-line чатов контакта.
-    // Это спасает «писать первым» когда CheckAccount не находит phone (privacy MAX),
-    // но у нас уже была переписка по этому клиенту — chatId сохранён в B24 user_code.
+    // Подтянем известные MAX chatId из IMOPENLINES_SESSION-активностей этой
+    // CRM-сущности. PROVIDER_PARAMS.USER_CODE содержит формат
+    // "social_connector|<line>|sc_<chatId>|<user_id>", откуда и берём chatId.
+    // (imopenlines.crm.chat.get пустой возвращает для лидов — баг B24 API.)
     function loadExistingMaxChats(crmEntityType, crmEntityId) {
+      const ownerTypeId = crmEntityType === "LEAD" ? 1
+        : crmEntityType === "DEAL" ? 2
+        : crmEntityType === "CONTACT" ? 3
+        : crmEntityType === "COMPANY" ? 4 : null;
+      if (!ownerTypeId) return;
       try {
-        BX24.callMethod("imopenlines.crm.chat.get", {
-          CRM_ENTITY: crmEntityId, CRM_ENTITY_TYPE: crmEntityType,
+        BX24.callMethod("crm.activity.list", {
+          filter: {
+            OWNER_TYPE_ID: ownerTypeId,
+            OWNER_ID: crmEntityId,
+            PROVIDER_ID: "IMOPENLINES_SESSION",
+          },
+          select: ["ID", "PROVIDER_TYPE_ID", "PROVIDER_PARAMS"],
         }, function(rr) {
-          if (rr.error()) return;
+          if (rr.error()) { dbg("activity.list err", rr.error_description()); return; }
           const arr = rr.data() || [];
-          // Формат entries: ["imol|social_connector|<LINE>|sc_<chatId>|<user_id>", ...]
           (Array.isArray(arr) ? arr : Object.values(arr)).forEach(rec => {
-            const code = typeof rec === "string" ? rec : (rec && (rec.user_code || rec.USER_CODE)) || "";
-            const m = code.match(/^imol\\|social_connector\\|(\\d+)\\|sc_([^|]+)/);
+            const code = (rec && rec.PROVIDER_PARAMS && rec.PROVIDER_PARAMS.USER_CODE) || "";
+            const m = code.match(/social_connector\\|(\\d+)\\|sc_([^|]+)/);
             if (m) {
               const line = m[1], chatId = m[2];
               MAX_CHATS_BY_LINE[line] = chatId;
