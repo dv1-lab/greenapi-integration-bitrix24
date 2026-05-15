@@ -86,9 +86,17 @@ export class Bitrix24Service extends BaseAdapter<
 
 		try {
 			const url = `https://${portalDomain}/rest/${method}?auth=${token}`;
-			this.logger.debug(`Calling Bitrix24 method: ${method}`, {url, params});
+			// Маскируем токен в логах — он попадает в docker logs/transcript.
+			const safeUrl = url.replace(/(auth=)[^&]+/, "$1<masked>");
+			this.logger.debug(`Calling Bitrix24 method: ${method}`, {url: safeUrl, params});
 
 			const response = await axios.post(url, params);
+
+			// Логируем результат для диагностики (особенно полезно для imconnector.send.messages,
+			// где B24 возвращает per-message статусы — успех ≠ привязка к CRM).
+			if (method === "imconnector.send.messages") {
+				this.logger.info(`B24 response for ${method}`, {result: response.data?.result});
+			}
 
 			if (response.data.error) {
 				if (response.data.error === "expired_token" && retryCount === 0 && user?.refreshToken) {
