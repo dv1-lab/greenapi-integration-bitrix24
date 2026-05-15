@@ -78,7 +78,9 @@ export class WidgetController {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		const chatIdOverride = (body.chatIdOverride || "").trim();
-		if (phone.length < 10 || phone.length > 15) {
+		// phone обязателен только если нет chatIdOverride (для MAX/Telegram
+		// валидно отправлять без phone, по известному chatId из B24).
+		if (!chatIdOverride && (phone.length < 10 || phone.length > 15)) {
 			throw new HttpException(`Неверный номер: "${body.phone}"`, HttpStatus.BAD_REQUEST);
 		}
 		if (!text) {
@@ -110,13 +112,14 @@ export class WidgetController {
 		// внутренний chatId (CheckAccount). Telegram аналогично — id, не phone.
 		const provider = ((inst.settings as any)?.provider || "wa").toLowerCase();
 		let chatId: string;
-		if (provider === "max") {
+		if (provider === "max" || provider === "telegram") {
 			// Приоритет 1: явный chatId от фронта (виджет нашёл его в B24 open-line
-			// привязке контакта). Это спасает когда у клиента уже была переписка,
-			// но CheckAccount не находит номер (privacy MAX).
+			// привязке контакта). Это работает для всех не-WA провайдеров — Telegram
+			// тоже идентифицирует чаты по внутреннему chatId, не по phone.
 			if (chatIdOverride) {
 				chatId = chatIdOverride;
-				// Кешируем для будущих отправок по тому же phone
+				// Кешируем для будущих отправок (только если есть phone — для Telegram
+				// его обычно нет, тогда кеш пустой и в следующий раз снова придёт через override).
 				if (phone.length >= 10) {
 					await this.prisma.maxContact.upsert({
 						where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
@@ -124,6 +127,12 @@ export class WidgetController {
 						update: { chatId },
 					});
 				}
+			} else if (provider === "telegram") {
+				// Для Telegram нет CheckAccount-аналога — нужен chatId.
+				throw new HttpException(
+					"Telegram: открой виджет в карточке клиента, у которого есть привязанный Telegram-чат, либо введи chatId напрямую (TODO).",
+					HttpStatus.BAD_REQUEST,
+				);
 			} else {
 				// Приоритет 2: локальный кеш phone → chatId
 				let cached = await this.prisma.maxContact.findUnique({
@@ -557,25 +566,34 @@ const B24_AUTH = ${authJs};
   $("send").addEventListener("click", async function() {
     const phone = $("phone").value.trim();
     const text = $("text").value.trim();
-    if (!phone || !text) {
-      showStatus("Введите номер и текст", false);
+    const idInstance = $("instance").value || undefined;
+    // Если виджет знает chatId этого клиента из его B24-карточки — используем его.
+    // Тогда phone оператору вводить не обязательно (для MAX/Telegram phone бесполезен,
+    // там общение по chatId, а phone Green API не отдаёт privacy).
+    let chatIdOverride;
+    const inst = INSTANCE_BY_ID[idInstance];
+    const instProvider = inst ? (inst.provider || "wa").toLowerCase() : "wa";
+    if (inst && instProvider !== "wa" && inst.bitrixLine != null) {
+      const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
+      if (known) {
+        chatIdOverride = known;
+        dbg("using existing chatId for " + instProvider, known);
+      }
+    }
+    if (!text) {
+      showStatus("Введите текст сообщения", false);
+      return;
+    }
+    if (!phone && !chatIdOverride) {
+      const hint = instProvider === "wa"
+        ? "Введите номер телефона клиента"
+        : "Введите номер или открой виджет в карточке клиента — оттуда подтянется chatId";
+      showStatus(hint, false);
       return;
     }
     this.disabled = true;
     showStatus("Отправляю…", true);
     try {
-      const idInstance = $("instance").value || undefined;
-      // Для MAX-инстанса: если знаем chatId из существующих open-line привязок,
-      // передаём как override — пропускаем CheckAccount.
-      let chatIdOverride;
-      const inst = INSTANCE_BY_ID[idInstance];
-      if (inst && (inst.provider || "").toLowerCase() === "max" && inst.bitrixLine != null) {
-        const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
-        if (known) {
-          chatIdOverride = known;
-          dbg("using existing MAX chatId", known);
-        }
-      }
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
