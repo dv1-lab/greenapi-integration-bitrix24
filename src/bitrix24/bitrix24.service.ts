@@ -139,6 +139,110 @@ export class Bitrix24Service extends BaseAdapter<
 		return axios.create();
 	}
 
+	// Простой мьютекс на phone, чтобы два одновременных webhook'а от Green API не
+	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
+	private readonly _ensureLeadLocks = new Map<string, Promise<void>>();
+
+	/**
+	 * Гарантирует что у клиента (по phone) есть открытый лид/сделка к моменту
+	 * отправки сообщения в B24. Закрывает gap между приходом сообщения и
+	 * принятием диалога оператором: B24 imopenlines создаёт лид только при
+	 * принятии диалога, а до этого момента сообщения могут «висеть» без CRM.
+	 *
+	 * Логика:
+	 *   1. Найти контакт по phone (E.164). Нет — выходим (B24 сам создаст лид+контакт).
+	 *   2. Проверить открытые лиды и сделки у контакта.
+	 *   3. Если есть открытое — ничего не делать (новые сообщения прицепятся).
+	 *   4. Если нет — создать лид с привязкой к контакту.
+	 *
+	 * Идемпотентность обеспечивается мьютексом по phone и проверкой 2-3.
+	 */
+	private async ensureOpenLeadForPhone(
+		portalDomain: string,
+		phoneE164: string,
+		senderName: string,
+		lineId: number,
+	): Promise<void> {
+		const lockKey = `${portalDomain}:${phoneE164}`;
+		const existing = this._ensureLeadLocks.get(lockKey);
+		if (existing) {
+			await existing;
+			return;
+		}
+		const task = (async () => {
+			try {
+				// 1. Поиск контакта по phone
+				const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
+					type: "PHONE",
+					values: [phoneE164],
+				});
+				const contactId: number | undefined = dup?.CONTACT?.[0];
+				if (!contactId) {
+					this.logger.info(`ensureLead: no existing contact for ${phoneE164}, leaving creation to B24`);
+					return;
+				}
+
+				// 2. Открытые лиды (фильтр: статус не F=failed, не S=success)
+				const openLeads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+					filter: {
+						CONTACT_ID: contactId,
+						"!STATUS_SEMANTIC_ID": ["F", "S"],
+					},
+					select: ["ID"],
+				});
+				if (Array.isArray(openLeads) && openLeads.length > 0) {
+					this.logger.info(`ensureLead: contact ${contactId} has ${openLeads.length} open lead(s) — no action`);
+					return;
+				}
+
+				// 3. Открытые сделки
+				const openDeals: any = await this.callBitrix24Method(portalDomain, "crm.deal.list", {
+					filter: {
+						CONTACT_ID: contactId,
+						CLOSED: "N",
+					},
+					select: ["ID"],
+				});
+				if (Array.isArray(openDeals) && openDeals.length > 0) {
+					this.logger.info(`ensureLead: contact ${contactId} has ${openDeals.length} open deal(s) — no action`);
+					return;
+				}
+
+				// 4. Создать лид. SOURCE_ID берём из конфига линии (то что у обычных
+				// B24-лидов от open lines). Если не задан — B24 поставит default.
+				let sourceId: string | undefined;
+				try {
+					const config: any = await this.callBitrix24Method(portalDomain, "imopenlines.config.get", {
+						CONFIG_ID: lineId,
+					});
+					sourceId = config?.CRM_SOURCE;
+				} catch (e: any) {
+					this.logger.warn(`ensureLead: failed to read line ${lineId} CRM_SOURCE: ${e.message}`);
+				}
+
+				const fields: Record<string, any> = {
+					TITLE: `${senderName} - WhatsApp (auto)`,
+					NAME: senderName,
+					CONTACT_ID: contactId,
+					PHONE: [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }],
+				};
+				if (sourceId) fields.SOURCE_ID = sourceId;
+
+				const createdId: any = await this.callBitrix24Method(portalDomain, "crm.lead.add", { fields });
+				this.logger.info(`ensureLead: created lead ${createdId} for contact ${contactId} (phone ${phoneE164})`);
+			} catch (err: any) {
+				// Не блокируем доставку сообщения, только логируем
+				this.logger.error(`ensureLead failed: ${err.message}`);
+			}
+		})();
+		this._ensureLeadLocks.set(lockKey, task);
+		try {
+			await task;
+		} finally {
+			this._ensureLeadLocks.delete(lockKey);
+		}
+	}
+
 	async sendToPlatform(message: Bitrix24PlatformMessage, instance: Instance & { user: User }): Promise<void> {
 		this.logger.info(`Sending message to Bitrix24 for instance ${instance.idInstance}`);
 		this.logger.info("Instance", instance);
@@ -154,6 +258,16 @@ export class Bitrix24Service extends BaseAdapter<
 			// формате с ведущим `+`, иначе сессия открытой линии не привязывается к
 			// карточке клиента. Green API отдаёт sender без `+` (`79261705590@c.us`).
 			const phoneE164 = message.phone.startsWith("+") ? message.phone : `+${message.phone}`;
+
+			// До отправки в imconnector — гарантируем что у клиента есть открытый лид.
+			// B24 imopenlines создаёт лид только при принятии диалога оператором,
+			// что оставляет окно «клиент написал, лида ещё нет» — клиент может потеряться.
+			await this.ensureOpenLeadForPhone(
+				instance.user.portalDomain,
+				phoneE164,
+				message.senderName || `WhatsApp ${message.phone}`,
+				line,
+			);
 			// Префикс `wa_` для user.id/chat.id — B24 кеширует imopenlines.user по этим
 			// ключам, и если он уже исторически ассоциирован с закрытыми лидами, новый
 			// лид не создаётся (CRM_CREATE_THIRD не срабатывает). Префикс делает ключи
