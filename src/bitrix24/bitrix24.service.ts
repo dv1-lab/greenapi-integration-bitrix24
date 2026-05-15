@@ -142,11 +142,15 @@ export class Bitrix24Service extends BaseAdapter<
 		const line = instance.bitrixLine;
 
 		try {
+			// B24 ищет CRM-контакт по user.phone — телефон обязан быть в международном
+			// формате с ведущим `+`, иначе сессия открытой линии не привязывается к
+			// карточке клиента. Green API отдаёт sender без `+` (`79261705590@c.us`).
+			const phoneE164 = message.phone.startsWith("+") ? message.phone : `+${message.phone}`;
 			const messagePayload: Bitrix24MessagePayload = {
 				user: {
 					id: message.phone,
 					name: message.senderName || `WhatsApp ${message.phone}`,
-					phone: message.phone,
+					phone: phoneE164,
 				},
 				message: {
 					id: message.id,

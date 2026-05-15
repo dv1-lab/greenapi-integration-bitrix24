@@ -108,11 +108,13 @@ export class WidgetController {
 		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
 
+		// B24 матчит CRM-контакт по user.phone строго в E.164 (с ведущим `+`).
+		const phoneE164 = phone.startsWith("+") ? phone : `+${phone}`;
 		const payload = {
 			CONNECTOR: "social_connector",
 			LINE: Number(line),
 			MESSAGES: [{
-				user: { id: phone, name: `WhatsApp ${phone}`, phone },
+				user: { id: phone, name: `WhatsApp ${phone}`, phone: phoneE164 },
 				message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
 				chat: { id: phone, name: `WhatsApp ${phone}`, url: null },
 				extra: { is_self_message: true },
