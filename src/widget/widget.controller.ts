@@ -207,10 +207,13 @@ export class WidgetController {
   .phone-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; cursor: pointer; transition: border-color .15s; }
   .phone-row:hover { border-color: #9ca3af; }
   .phone-row.active { border-color: #2d8f4e; background: #f0fdf4; }
-  .phone-row input[type=radio] { margin: 0; }
+  .phone-row input[type=radio] { margin: 0; flex-shrink: 0; }
   .phone-row .num { font-size: 14px; font-weight: 500; }
   .phone-row .meta { font-size: 11px; color: #6b7280; margin-left: auto; }
-  .phone-row .custom-input { flex: 1; padding: 6px 8px; border: 0; outline: none; font: inherit; font-size: 14px; background: transparent; }
+  .phone-row.custom { border-style: dashed; }
+  .phone-row.custom .label { font-size: 14px; color: #6b7280; }
+  .phone-row .custom-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 6px; outline: none; font: inherit; font-size: 14px; background: #fff; }
+  .phone-row .custom-input:focus { border-color: #2d8f4e; box-shadow: 0 0 0 2px rgba(45,143,78,0.15); }
 </style>
 </head>
 <body>
@@ -280,8 +283,9 @@ const B24_AUTH = ${authJs};
     });
     // Custom row — «свой номер»
     const customRow = document.createElement("label");
-    customRow.className = "phone-row";
+    customRow.className = "phone-row custom";
     customRow.innerHTML = '<input type="radio" name="phoneSel" value="__custom__">'
+      + '<span class="label">Свой номер:</span>'
       + '<input type="tel" class="custom-input" placeholder="79261234567" autocomplete="off">';
     wrap.appendChild(customRow);
     const customInput = customRow.querySelector(".custom-input");
