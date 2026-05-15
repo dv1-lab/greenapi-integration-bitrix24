@@ -1,11 +1,39 @@
-import { All, Body, Controller, HttpException, HttpStatus, Post, Req, Res } from "@nestjs/common";
+import { All, Body, Controller, Get, HttpException, HttpStatus, Post, Req, Res } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Request, Response } from "express";
 import axios from "axios";
+import { PrismaService } from "../prisma/prisma.service";
+
+// Карта префикса idInstance → API URL Green API. У свежих instance shard в host'е,
+// у старых (вроде 1101948511) — общий api.green-api.com.
+function greenApiUrl(idInstance: string): string {
+	const known: Record<string, string> = {
+		"1103487233": "https://1103.api.green-api.com",
+		"1101948511": "https://api.green-api.com",
+	};
+	return known[idInstance] || "https://api.green-api.com";
+}
 
 @Controller("widget")
 export class WidgetController {
-	constructor(private readonly config: ConfigService) {}
+	constructor(
+		private readonly config: ConfigService,
+		private readonly prisma: PrismaService,
+	) {}
+
+	@Get("instances")
+	async listInstances() {
+		// Используется фронтендом виджета — список доступных инстансов для выбора.
+		const insts = await this.prisma.instance.findMany({
+			select: { idInstance: true, bitrixLine: true, stateInstance: true, settings: true },
+		});
+		return insts.map(i => ({
+			idInstance: i.idInstance.toString(),
+			bitrixLine: i.bitrixLine,
+			stateInstance: i.stateInstance,
+			label: (i.settings as any)?.label || `Instance ${i.idInstance}`,
+		}));
+	}
 
 	// B24 placement шлёт POST с form-data, прямой переход из браузера — GET.
 	// Принимаем оба через @All, кроме POST /widget/send (см. ниже).
@@ -22,7 +50,7 @@ export class WidgetController {
 	}
 
 	@Post("send")
-	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string }) {
+	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string }) {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		if (phone.length < 10 || phone.length > 15) {
@@ -32,12 +60,26 @@ export class WidgetController {
 			throw new HttpException("Текст пуст", HttpStatus.BAD_REQUEST);
 		}
 
-		const apiUrl = this.config.get<string>("GREENAPI_API_URL");
-		const idInstance = this.config.get<string>("GREENAPI_ID_INSTANCE");
-		const apiToken = this.config.get<string>("GREENAPI_TOKEN_INSTANCE");
-		if (!apiUrl || !idInstance || !apiToken) {
-			throw new HttpException("Green API credentials не настроены на сервере", HttpStatus.INTERNAL_SERVER_ERROR);
+		// Поиск Instance по выбору фронта; если не указан — берём первый authorized.
+		let inst;
+		if (body.idInstance) {
+			inst = await this.prisma.instance.findUnique({
+				where: { idInstance: BigInt(body.idInstance) },
+			});
 		}
+		if (!inst) {
+			inst = await this.prisma.instance.findFirst({
+				where: { stateInstance: "authorized" },
+				orderBy: { idInstance: "asc" },
+			});
+		}
+		if (!inst) {
+			throw new HttpException("Нет авторизованных Green API инстансов в БД adapter", HttpStatus.INTERNAL_SERVER_ERROR);
+		}
+
+		const idInstance = inst.idInstance.toString();
+		const apiToken = inst.apiTokenInstance;
+		const apiUrl = greenApiUrl(idInstance);
 
 		const chatId = `${phone}@c.us`;
 		let idMessage: string | undefined;
@@ -53,17 +95,17 @@ export class WidgetController {
 			throw new HttpException(`Green API: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
 		}
 
-		// Зеркалим в открытую линию B24 как self-message, чтобы менеджер видел свою
-		// переписку в карточке клиента. Если не настроен — пропускаем без ошибки.
-		const mirrored = await this.mirrorToBitrix(phone, text, idMessage, body.authId, body.domain);
-		return { ok: true, idMessage, chatId, mirrored };
+		// Зеркалим в ту B24 open line, к которой привязан выбранный инстанс.
+		const lineForMirror = inst.bitrixLine || undefined;
+		const mirrored = await this.mirrorToBitrix(phone, text, idMessage, body.authId, body.domain, lineForMirror);
+		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}
 
 	private async mirrorToBitrix(
 		phone: string, text: string, idMessage?: string,
-		authId?: string, domain?: string,
+		authId?: string, domain?: string, lineOverride?: number,
 	): Promise<boolean | string> {
-		const line = this.config.get<string>("BITRIX_LINE_ID");
+		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
 
 		const payload = {
@@ -122,9 +164,9 @@ export class WidgetController {
   h1 { margin: 0 0 4px; font-size: 18px; color: #2d8f4e; }
   .subtitle { margin: 0 0 20px; font-size: 13px; color: #6b7280; }
   label { display: block; font-size: 13px; font-weight: 500; margin: 12px 0 6px; }
-  input, textarea { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; font-size: 14px; }
+  input, textarea, select { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; font-size: 14px; background: #fff; }
   textarea { min-height: 110px; resize: vertical; }
-  input:focus, textarea:focus { outline: none; border-color: #2d8f4e; box-shadow: 0 0 0 3px rgba(45,143,78,0.15); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: #2d8f4e; box-shadow: 0 0 0 3px rgba(45,143,78,0.15); }
   button { margin-top: 16px; padding: 11px 20px; background: #2d8f4e; color: #fff; border: 0; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
   button:hover { background: #257038; }
   button:disabled { background: #9ca3af; cursor: not-allowed; }
@@ -138,6 +180,11 @@ export class WidgetController {
 <div class="card">
   <h1>📤 Social Connector</h1>
   <p class="subtitle">Первое сообщение клиенту через WhatsApp</p>
+
+  <label for="instance">Отправить с номера</label>
+  <select id="instance">
+    <option value="">загрузка…</option>
+  </select>
 
   <label for="phone">Номер телефона клиента</label>
   <input id="phone" placeholder="79261234567" autocomplete="off">
@@ -174,6 +221,26 @@ const B24_AUTH = ${authJs};
     const digits = String(raw).replace(/[^\\d]/g, "");
     if (digits.length >= 10) $("phone").value = digits;
   }
+
+  // Подгружаем список инстансов (с какого номера слать) из adapter
+  const INSTANCE_LABELS = {
+    "1103487233": "+7 958 498-33-54 (1Begovoy-3354)",
+    "1101948511": "+7 924 077-85-66",
+  };
+  fetch("/widget/instances").then(r => r.json()).then(list => {
+    const sel = $("instance");
+    sel.innerHTML = "";
+    if (!list.length) {
+      sel.innerHTML = '<option value="">(нет инстансов в БД)</option>';
+      return;
+    }
+    list.forEach(it => {
+      const opt = document.createElement("option");
+      opt.value = it.idInstance;
+      opt.textContent = INSTANCE_LABELS[it.idInstance] || it.idInstance;
+      sel.appendChild(opt);
+    });
+  }).catch(e => dbg("instances fetch error", e.message));
 
   // У B24 для CRM_*_DETAIL_TOOLBAR тип сущности определяется placement-именем,
   // а entity ID лежит в options.ID.
@@ -231,10 +298,11 @@ const B24_AUTH = ${authJs};
     this.disabled = true;
     showStatus("Отправляю…", true);
     try {
+      const idInstance = $("instance").value || undefined;
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, text, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
+        body: JSON.stringify({ phone, text, idInstance, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
