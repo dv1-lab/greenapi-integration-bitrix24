@@ -277,7 +277,9 @@ export class Bitrix24Service extends BaseAdapter<
 			// Префикс для user.id/chat.id обходит legacy-кеш B24 (см. историю фикса).
 			// WA → `wa_`, прочие каналы (MAX/TG) → `sc_` — namespace per provider.
 			const userKey = isPhoneLike ? `wa_${message.phone}` : `sc_${message.phone}`;
-			const fallbackName = isPhoneLike ? `WhatsApp ${message.phone}` : `Клиент ${message.phone}`;
+			// fallbackName без пробелов: B24 разбивает по пробелу и хвост идёт в
+			// LAST_NAME — получится «WhatsApp» / «79228124797» в карточке.
+			const fallbackName = isPhoneLike ? (phoneE164 as string) : message.phone;
 			const userBlock: any = {
 				id: userKey,
 				name: message.senderName || fallbackName,

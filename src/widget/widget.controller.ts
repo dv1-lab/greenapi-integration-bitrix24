@@ -196,7 +196,13 @@ export class WidgetController {
 		// Префикс должен совпадать с тем что adapter ставит при входящих:
 		// WA → wa_<phone>, MAX → sc_<chatId>.
 		const userKey = isPhoneLike ? `wa_${idKey}` : `sc_${idKey}`;
-		const userBlock: any = { id: userKey, name: isPhoneLike ? `WhatsApp ${idKey}` : `Клиент ${idKey}` };
+		// ВАЖНО: name без пробелов. B24 при создании лида/контакта разбивает
+		// name по пробелу и кладёт хвост в LAST_NAME. «WhatsApp 79228124797»
+		// → NAME=«WhatsApp», LAST_NAME=«79228124797» — мусор в карточке.
+		// Используем сам идентификатор как display-имя (B24 потом подменит на
+		// настоящее имя клиента когда он впервые сам что-то напишет).
+		const displayName = isPhoneLike ? (phoneE164 as string) : idKey;
+		const userBlock: any = { id: userKey, name: displayName };
 		if (phoneE164) userBlock.phone = phoneE164;
 		const payload = {
 			CONNECTOR: "social_connector",
@@ -204,7 +210,7 @@ export class WidgetController {
 			MESSAGES: [{
 				user: userBlock,
 				message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
-				chat: { id: userKey, name: userBlock.name, url: null },
+				chat: { id: userKey, name: displayName, url: null },
 				extra: { is_self_message: true },
 			}],
 		};
