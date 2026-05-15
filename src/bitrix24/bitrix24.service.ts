@@ -262,12 +262,14 @@ export class Bitrix24Service extends BaseAdapter<
 			// До отправки в imconnector — гарантируем что у клиента есть открытый лид.
 			// B24 imopenlines создаёт лид только при принятии диалога оператором,
 			// что оставляет окно «клиент написал, лида ещё нет» — клиент может потеряться.
-			await this.ensureOpenLeadForPhone(
-				instance.user.portalDomain,
-				phoneE164,
-				message.senderName || `WhatsApp ${message.phone}`,
-				line,
-			);
+			if (line != null) {
+				await this.ensureOpenLeadForPhone(
+					instance.user.portalDomain,
+					phoneE164,
+					message.senderName || `WhatsApp ${message.phone}`,
+					line,
+				);
+			}
 			// Префикс `wa_` для user.id/chat.id — B24 кеширует imopenlines.user по этим
 			// ключам, и если он уже исторически ассоциирован с закрытыми лидами, новый
 			// лид не создаётся (CRM_CREATE_THIRD не срабатывает). Префикс делает ключи
