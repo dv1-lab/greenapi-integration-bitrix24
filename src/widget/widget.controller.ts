@@ -196,8 +196,8 @@ export class WidgetController {
   input, textarea, select { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; font-size: 14px; background: #fff; }
   textarea { min-height: 110px; resize: vertical; }
   input:focus, textarea:focus, select:focus { outline: none; border-color: #2d8f4e; box-shadow: 0 0 0 3px rgba(45,143,78,0.15); }
-  button { margin-top: 16px; padding: 11px 20px; background: #2d8f4e; color: #fff; border: 0; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
-  button:hover { background: #257038; }
+  button { margin-top: 16px; padding: 11px 20px; background: #84cc16; color: #fff; border: 0; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
+  button:hover { background: #65a30d; }
   button:disabled { background: #9ca3af; cursor: not-allowed; }
   .status { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 13px; display: none; }
   .status.ok { display: block; background: #d1fae5; color: #065f46; }
