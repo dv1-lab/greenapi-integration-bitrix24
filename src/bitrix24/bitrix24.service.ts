@@ -170,6 +170,11 @@ export class Bitrix24Service extends BaseAdapter<
 					name: message.senderName || `WhatsApp ${message.phone}`,
 					url: null,
 				},
+				// crm: 'Y' форсит B24 искать/создавать CRM-привязку при каждом сообщении,
+				// а не только при создании сессии. Без этого, если сессия создалась до
+				// того как у user был корректный phone, дубликат не найдётся даже после
+				// прихода нормального phone — потому что imopenlines.user уже закеширован.
+				extra: { crm: "Y" },
 			};
 
 			if (message.attachments && message.attachments.length > 0) {

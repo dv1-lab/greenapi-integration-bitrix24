@@ -40,6 +40,10 @@ export interface Bitrix24MessagePayload {
 		name: string;
 		url: string | null;
 	};
+	extra?: {
+		crm?: "Y" | "N";
+		is_self_message?: boolean;
+	};
 }
 
 export type UserCreateData = Omit<User, "createdAt" | "updatedAt" | "instances">;
