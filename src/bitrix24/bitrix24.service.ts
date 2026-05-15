@@ -254,15 +254,19 @@ export class Bitrix24Service extends BaseAdapter<
 		const line = instance.bitrixLine;
 
 		try {
-			// B24 ищет CRM-контакт по user.phone — телефон обязан быть в международном
-			// формате с ведущим `+`, иначе сессия открытой линии не привязывается к
-			// карточке клиента. Green API отдаёт sender без `+` (`79261705590@c.us`).
-			const phoneE164 = message.phone.startsWith("+") ? message.phone : `+${message.phone}`;
+			// Не все каналы передают телефон. WhatsApp всегда даёт чистый номер
+			// 10-15 цифр. MAX/Telegram через Green API дают внутренний user_id
+			// ("8502106", "@username") — это НЕ телефон, и в B24 user.phone его
+			// класть нельзя: валидация отвергнет сообщение целиком.
+			const isPhoneLike = /^\+?\d{10,15}$/.test(message.phone);
+			const phoneE164 = isPhoneLike
+				? (message.phone.startsWith("+") ? message.phone : `+${message.phone}`)
+				: null;
 
-			// До отправки в imconnector — гарантируем что у клиента есть открытый лид.
-			// B24 imopenlines создаёт лид только при принятии диалога оператором,
-			// что оставляет окно «клиент написал, лида ещё нет» — клиент может потеряться.
-			if (line != null) {
+			// ensureLead имеет смысл только когда есть телефон (через него ищем
+			// существующего контакта). Для MAX/Telegram пропускаем — B24 сам
+			// создаст лид с CRM_CREATE=lead.
+			if (line != null && phoneE164) {
 				await this.ensureOpenLeadForPhone(
 					instance.user.portalDomain,
 					phoneE164,
@@ -270,18 +274,17 @@ export class Bitrix24Service extends BaseAdapter<
 					line,
 				);
 			}
-			// Префикс `wa_` для user.id/chat.id — B24 кеширует imopenlines.user по этим
-			// ключам, и если он уже исторически ассоциирован с закрытыми лидами, новый
-			// лид не создаётся (CRM_CREATE_THIRD не срабатывает). Префикс делает ключи
-			// уникальными для нашего коннектора и обходит legacy-кеш B24 от прежних
-			// тестов / других интеграций по тому же номеру.
-			const userKey = `wa_${message.phone}`;
+			// Префикс для user.id/chat.id обходит legacy-кеш B24 (см. историю фикса).
+			// WA → `wa_`, прочие каналы (MAX/TG) → `sc_` — namespace per provider.
+			const userKey = isPhoneLike ? `wa_${message.phone}` : `sc_${message.phone}`;
+			const fallbackName = isPhoneLike ? `WhatsApp ${message.phone}` : `Клиент ${message.phone}`;
+			const userBlock: any = {
+				id: userKey,
+				name: message.senderName || fallbackName,
+			};
+			if (phoneE164) userBlock.phone = phoneE164;
 			const messagePayload: Bitrix24MessagePayload = {
-				user: {
-					id: userKey,
-					name: message.senderName || `WhatsApp ${message.phone}`,
-					phone: phoneE164,
-				},
+				user: userBlock,
 				message: {
 					id: message.id,
 					date: Math.floor(Date.now() / 1000),
@@ -289,13 +292,9 @@ export class Bitrix24Service extends BaseAdapter<
 				},
 				chat: {
 					id: userKey,
-					name: message.senderName || `WhatsApp ${message.phone}`,
+					name: message.senderName || fallbackName,
 					url: null,
 				},
-				// crm: 'Y' форсит B24 искать/создавать CRM-привязку при каждом сообщении,
-				// а не только при создании сессии. Без этого, если сессия создалась до
-				// того как у user был корректный phone, дубликат не найдётся даже после
-				// прихода нормального phone — потому что imopenlines.user уже закеширован.
 				extra: { crm: "Y" },
 			};
 
