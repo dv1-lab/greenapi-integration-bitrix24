@@ -331,10 +331,11 @@ const B24_AUTH = ${authJs};
     renderChips(saved || (phoneOptions[0] && phoneOptions[0].digits));
   }
 
-  // Подгружаем список инстансов (с какого номера слать) из adapter
+  // Подгружаем список инстансов (с какого номера слать) из adapter.
+  // Hardcoded labels — fallback для старых WA-номеров (БД у них без label).
   const INSTANCE_LABELS = {
-    "1103487233": "+7 958 498-33-54 (1Begovoy-3354)",
-    "1101948511": "+7 924 077-85-66",
+    "1103487233": "WhatsApp +7 958 498-33-54 (1Begovoy)",
+    "1101948511": "WhatsApp +7 924 077-85-66",
   };
   fetch("/widget/instances").then(r => r.json()).then(list => {
     const sel = $("instance");
@@ -346,7 +347,8 @@ const B24_AUTH = ${authJs};
     list.forEach(it => {
       const opt = document.createElement("option");
       opt.value = it.idInstance;
-      opt.textContent = INSTANCE_LABELS[it.idInstance] || it.idInstance;
+      // Приоритет: hardcoded label (для WA) → label из БД (для MAX и др.) → ID
+      opt.textContent = INSTANCE_LABELS[it.idInstance] || it.label || it.idInstance;
       sel.appendChild(opt);
     });
   }).catch(e => dbg("instances fetch error", e.message));
