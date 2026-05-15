@@ -74,9 +74,10 @@ export class WidgetController {
 	}
 
 	@Post("send")
-	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string }) {
+	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string }) {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
+		const chatIdOverride = (body.chatIdOverride || "").trim();
 		if (phone.length < 10 || phone.length > 15) {
 			throw new HttpException(`Неверный номер: "${body.phone}"`, HttpStatus.BAD_REQUEST);
 		}
@@ -110,33 +111,50 @@ export class WidgetController {
 		const provider = ((inst.settings as any)?.provider || "wa").toLowerCase();
 		let chatId: string;
 		if (provider === "max") {
-			// Кеш phone → chatId, чтобы не дёргать CheckAccount каждый раз.
-			let cached = await this.prisma.maxContact.findUnique({
-				where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
-			});
-			if (!cached) {
-				try {
-					const r = await axios.post(
-						`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
-						{ phoneNumber: phone },
-						{ timeout: 15000 },
-					);
-					if (!r.data?.exist || !r.data?.chatId) {
-						throw new HttpException(
-							`У номера +${phone} нет аккаунта MAX (или он не доступен через Green API)`,
-							HttpStatus.NOT_FOUND,
-						);
-					}
-					cached = await this.prisma.maxContact.create({
-						data: { idInstance: BigInt(idInstance), phone, chatId: String(r.data.chatId) },
+			// Приоритет 1: явный chatId от фронта (виджет нашёл его в B24 open-line
+			// привязке контакта). Это спасает когда у клиента уже была переписка,
+			// но CheckAccount не находит номер (privacy MAX).
+			if (chatIdOverride) {
+				chatId = chatIdOverride;
+				// Кешируем для будущих отправок по тому же phone
+				if (phone.length >= 10) {
+					await this.prisma.maxContact.upsert({
+						where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
+						create: { idInstance: BigInt(idInstance), phone, chatId },
+						update: { chatId },
 					});
-				} catch (err: any) {
-					if (err instanceof HttpException) throw err;
-					const msg = err.response?.data || err.message;
-					throw new HttpException(`MAX CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
 				}
+			} else {
+				// Приоритет 2: локальный кеш phone → chatId
+				let cached = await this.prisma.maxContact.findUnique({
+					where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
+				});
+				if (!cached) {
+					// Приоритет 3: CheckAccount у Green API (работает только если
+					// номер в контактах нашего MAX-аккаунта на телефоне).
+					try {
+						const r = await axios.post(
+							`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
+							{ phoneNumber: phone },
+							{ timeout: 15000 },
+						);
+						if (!r.data?.exist || !r.data?.chatId) {
+							throw new HttpException(
+								`MAX: номер +${phone} не найден. Возможно у клиента нет MAX, либо его нет в контактах MAX-аккаунта 79584983354. Если уже была переписка — попробуйте из карточки клиента где привязан MAX-чат.`,
+								HttpStatus.NOT_FOUND,
+							);
+						}
+						cached = await this.prisma.maxContact.create({
+							data: { idInstance: BigInt(idInstance), phone, chatId: String(r.data.chatId) },
+						});
+					} catch (err: any) {
+						if (err instanceof HttpException) throw err;
+						const msg = err.response?.data || err.message;
+						throw new HttpException(`MAX CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+					}
+				}
+				chatId = cached.chatId;
 			}
-			chatId = cached.chatId;
 		} else {
 			chatId = `${phone}@c.us`;
 		}
@@ -380,8 +398,13 @@ const B24_AUTH = ${authJs};
     "1103487233": "WhatsApp +7 958 498-33-54 (1Begovoy)",
     "1101948511": "WhatsApp +7 924 077-85-66",
   };
-  // Карта idInstance → provider для динамического subtitle
+  // Карты для multi-channel UX:
+  //   PROVIDER_MAP — idInstance → provider (wa/max/telegram) для subtitle
+  //   INSTANCE_BY_ID — idInstance → весь Instance объект из API
+  //   MAX_CHATS_BY_LINE — line_id → известный chatId из B24 user_code'ов
   const PROVIDER_MAP = {};
+  const INSTANCE_BY_ID = {};
+  const MAX_CHATS_BY_LINE = {};
   function detectChannelLabel(idInst) {
     const p = (PROVIDER_MAP[idInst] || "wa").toLowerCase();
     if (p === "max") return "MAX";
@@ -402,6 +425,7 @@ const B24_AUTH = ${authJs};
     }
     list.forEach(it => {
       PROVIDER_MAP[it.idInstance] = (it.provider || "wa");
+      INSTANCE_BY_ID[it.idInstance] = it;
       const opt = document.createElement("option");
       opt.value = it.idInstance;
       // Приоритет: hardcoded label (для WA) → label из БД (для MAX и др.) → ID
@@ -465,14 +489,39 @@ const B24_AUTH = ${authJs};
       : method === "crm.company.get" ? "COMPANY" : "OTHER";
     entityCtx = { type: ENTITY_TYPE, id: String(entityId) };
 
+    // Подтянем известные MAX chatId из existing open-line чатов контакта.
+    // Это спасает «писать первым» когда CheckAccount не находит phone (privacy MAX),
+    // но у нас уже была переписка по этому клиенту — chatId сохранён в B24 user_code.
+    function loadExistingMaxChats(crmEntityType, crmEntityId) {
+      try {
+        BX24.callMethod("imopenlines.crm.chat.get", {
+          CRM_ENTITY: crmEntityId, CRM_ENTITY_TYPE: crmEntityType,
+        }, function(rr) {
+          if (rr.error()) return;
+          const arr = rr.data() || [];
+          // Формат entries: ["imol|social_connector|<LINE>|sc_<chatId>|<user_id>", ...]
+          (Array.isArray(arr) ? arr : Object.values(arr)).forEach(rec => {
+            const code = typeof rec === "string" ? rec : (rec && (rec.user_code || rec.USER_CODE)) || "";
+            const m = code.match(/^imol\\|social_connector\\|(\\d+)\\|sc_([^|]+)/);
+            if (m) {
+              const line = m[1], chatId = m[2];
+              MAX_CHATS_BY_LINE[line] = chatId;
+              dbg("existing MAX chat", { line, chatId });
+            }
+          });
+        });
+      } catch (e) { dbg("loadExistingMaxChats err", e.message); }
+    }
+
     BX24.callMethod(method, { id: entityId }, function(res) {
       if (res.error()) { dbg(method + " error", res.error_description()); loadPrefAndRender(); return; }
       const data = res.data() || {};
       dbg(method + ".PHONE", data.PHONE);
       collectPhonesFromCrmRow(data, ENTITY_TYPE === "LEAD" ? "лид" : ENTITY_TYPE === "DEAL" ? "сделка" : "контакт");
 
-      // Сделка — подтянем телефоны из связанного контакта
+      // Сделка — подтянем телефоны и MAX-чаты из связанного контакта
       if (method === "crm.deal.get" && data.CONTACT_ID) {
+        loadExistingMaxChats("CONTACT", data.CONTACT_ID);
         BX24.callMethod("crm.contact.get", { id: data.CONTACT_ID }, function(r2) {
           if (r2.error()) { dbg("contact error", r2.error_description()); loadPrefAndRender(); return; }
           const d2 = r2.data() || {};
@@ -481,10 +530,13 @@ const B24_AUTH = ${authJs};
           loadPrefAndRender();
         });
       } else {
+        // Для CONTACT/LEAD/COMPANY — ищем MAX-чаты в самой сущности
+        loadExistingMaxChats(ENTITY_TYPE, entityId);
         loadPrefAndRender();
       }
     });
   });
+
 
   $("send").addEventListener("click", async function() {
     const phone = $("phone").value.trim();
@@ -497,10 +549,21 @@ const B24_AUTH = ${authJs};
     showStatus("Отправляю…", true);
     try {
       const idInstance = $("instance").value || undefined;
+      // Для MAX-инстанса: если знаем chatId из существующих open-line привязок,
+      // передаём как override — пропускаем CheckAccount.
+      let chatIdOverride;
+      const inst = INSTANCE_BY_ID[idInstance];
+      if (inst && (inst.provider || "").toLowerCase() === "max" && inst.bitrixLine != null) {
+        const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
+        if (known) {
+          chatIdOverride = known;
+          dbg("using existing MAX chatId", known);
+        }
+      }
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, text, idInstance, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
+        body: JSON.stringify({ phone, text, idInstance, chatIdOverride, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
