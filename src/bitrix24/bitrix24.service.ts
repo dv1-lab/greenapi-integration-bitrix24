@@ -154,9 +154,15 @@ export class Bitrix24Service extends BaseAdapter<
 			// формате с ведущим `+`, иначе сессия открытой линии не привязывается к
 			// карточке клиента. Green API отдаёт sender без `+` (`79261705590@c.us`).
 			const phoneE164 = message.phone.startsWith("+") ? message.phone : `+${message.phone}`;
+			// Префикс `wa_` для user.id/chat.id — B24 кеширует imopenlines.user по этим
+			// ключам, и если он уже исторически ассоциирован с закрытыми лидами, новый
+			// лид не создаётся (CRM_CREATE_THIRD не срабатывает). Префикс делает ключи
+			// уникальными для нашего коннектора и обходит legacy-кеш B24 от прежних
+			// тестов / других интеграций по тому же номеру.
+			const userKey = `wa_${message.phone}`;
 			const messagePayload: Bitrix24MessagePayload = {
 				user: {
-					id: message.phone,
+					id: userKey,
 					name: message.senderName || `WhatsApp ${message.phone}`,
 					phone: phoneE164,
 				},
@@ -166,7 +172,7 @@ export class Bitrix24Service extends BaseAdapter<
 					text: message.message,
 				},
 				chat: {
-					id: message.phone,
+					id: userKey,
 					name: message.senderName || `WhatsApp ${message.phone}`,
 					url: null,
 				},

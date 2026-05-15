@@ -110,13 +110,17 @@ export class WidgetController {
 
 		// B24 матчит CRM-контакт по user.phone строго в E.164 (с ведущим `+`).
 		const phoneE164 = phone.startsWith("+") ? phone : `+${phone}`;
+		// Префикс `wa_` — см. комментарий в bitrix24.service.ts (обход legacy-кеша
+		// imopenlines.user). Ключи user/chat должны совпадать с теми что шлёт adapter
+		// при входящих, иначе исходящий mirror создаст отдельную сессию.
+		const userKey = `wa_${phone}`;
 		const payload = {
 			CONNECTOR: "social_connector",
 			LINE: Number(line),
 			MESSAGES: [{
-				user: { id: phone, name: `WhatsApp ${phone}`, phone: phoneE164 },
+				user: { id: userKey, name: `WhatsApp ${phone}`, phone: phoneE164 },
 				message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
-				chat: { id: phone, name: `WhatsApp ${phone}`, url: null },
+				chat: { id: userKey, name: `WhatsApp ${phone}`, url: null },
 				extra: { is_self_message: true },
 			}],
 		};
