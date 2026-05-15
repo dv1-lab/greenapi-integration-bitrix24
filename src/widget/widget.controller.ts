@@ -238,7 +238,11 @@ const B24_AUTH = ${authJs};
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
-        showStatus("✓ Отправлено. idMessage: " + (j.idMessage || "—"), true);
+        const mirrorMsg = j.mirrored === true ? "mirror в B24: ✓"
+                        : j.mirrored === false ? "mirror отключён"
+                        : "mirror: " + j.mirrored;
+        showStatus("✓ Отправлено (" + (j.idMessage || "—") + ") · " + mirrorMsg, true);
+        dbg("response", j);
         $("text").value = "";
       } else {
         showStatus("✗ " + (j.message || r.statusText), false);
