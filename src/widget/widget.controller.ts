@@ -527,7 +527,9 @@ const B24_AUTH = ${authJs};
           const arr = rr.data() || [];
           (Array.isArray(arr) ? arr : Object.values(arr)).forEach(rec => {
             const code = (rec && rec.PROVIDER_PARAMS && rec.PROVIDER_PARAMS.USER_CODE) || "";
-            const m = code.match(/social_connector\\|(\\d+)\\|sc_([^|]+)/);
+            // sc_ — современный префикс (для всех не-WA), wa_ — legacy от
+            // ранних версий adapter где Telegram chatId 10 цифр считались phone.
+            const m = code.match(/social_connector\\|(\\d+)\\|(?:sc_|wa_)([^|]+)/);
             if (m) {
               const line = m[1], chatId = m[2];
               MAX_CHATS_BY_LINE[line] = chatId;
