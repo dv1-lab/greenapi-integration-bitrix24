@@ -203,17 +203,12 @@ export class WidgetController {
   .status.ok { display: block; background: #d1fae5; color: #065f46; }
   .status.err { display: block; background: #fee2e2; color: #991b1b; }
   .hint { font-size: 12px; color: #6b7280; margin-top: 4px; }
-  .phone-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
-  .phone-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; cursor: pointer; transition: border-color .15s; }
-  .phone-row:hover { border-color: #9ca3af; }
-  .phone-row.active { border-color: #2d8f4e; background: #f0fdf4; }
-  .phone-row input[type=radio] { margin: 0; flex-shrink: 0; }
-  .phone-row .num { font-size: 14px; font-weight: 500; }
-  .phone-row .meta { font-size: 11px; color: #6b7280; margin-left: auto; }
-  .phone-row.custom { border-style: dashed; }
-  .phone-row.custom .label { font-size: 14px; color: #6b7280; }
-  .phone-row .custom-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 6px; outline: none; font: inherit; font-size: 14px; background: #fff; }
-  .phone-row .custom-input:focus { border-color: #2d8f4e; box-shadow: 0 0 0 2px rgba(45,143,78,0.15); }
+  .chips { display: flex !important; flex-wrap: wrap !important; gap: 6px !important; margin-bottom: 8px !important; }
+  .chip { display: inline-flex !important; align-items: center !important; gap: 6px !important; padding: 6px 10px !important; border: 1px solid #d1d5db !important; border-radius: 999px !important; background: #fff !important; cursor: pointer !important; font-size: 13px !important; user-select: none !important; transition: all .15s !important; }
+  .chip:hover { border-color: #2d8f4e !important; background: #f0fdf4 !important; }
+  .chip.active { border-color: #2d8f4e !important; background: #2d8f4e !important; color: #fff !important; }
+  .chip .chip-meta { font-size: 11px !important; opacity: 0.75 !important; }
+  .chips-empty { font-size: 12px !important; color: #9ca3af !important; padding: 4px 0 !important; }
 </style>
 </head>
 <body>
@@ -227,9 +222,9 @@ export class WidgetController {
   </select>
 
   <label>Номер телефона клиента</label>
-  <div id="phoneList" class="phone-list"></div>
-  <input id="phone" placeholder="79261234567" autocomplete="off" style="display:none;">
-  <div class="hint">Только цифры, с кодом страны (без +)</div>
+  <div id="phoneChips" class="chips"></div>
+  <input id="phone" placeholder="79261234567" autocomplete="off" inputmode="numeric">
+  <div class="hint">Кликни нужный номер из списка выше или введи свой (цифры, с кодом страны без +)</div>
 
   <label for="text">Сообщение</label>
   <textarea id="text" placeholder="Здравствуйте! Это менеджер «Первый Беговой»…"></textarea>
@@ -263,62 +258,49 @@ const B24_AUTH = ${authJs};
     if (digits.length >= 10) $("phone").value = digits;
   }
 
-  // Список телефонов карточки: рендерим radio-rows + всегда последняя «Свой номер».
-  // entityCtx — { type, id } для запоминания выбора в БД adapter.
+  // Список телефонов из карточки CRM: рендерим чипами (pills).
+  // Клик по чипу — подставляет в input #phone. Поле input всегда видимое,
+  // если оператору нужен другой номер — просто очищает чип и пишет руками.
   let entityCtx = null;
-  let phoneOptions = []; // [{digits, label, source}]
+  let phoneOptions = []; // [{digits, label}]
   function normalize(raw) { return String(raw || "").replace(/[^\\d]/g, ""); }
-  function renderPhoneList(preselectDigits) {
-    const wrap = $("phoneList");
+  function renderChips(preselectDigits) {
+    const wrap = $("phoneChips");
     wrap.innerHTML = "";
     const selected = preselectDigits || (phoneOptions[0] && phoneOptions[0].digits) || "";
-    phoneOptions.forEach((p, i) => {
-      const row = document.createElement("label");
-      row.className = "phone-row" + (p.digits === selected ? " active" : "");
-      row.innerHTML = '<input type="radio" name="phoneSel" value="' + p.digits + '">'
-        + '<span class="num">+' + p.digits + '</span>'
-        + (p.label ? '<span class="meta">' + p.label + '</span>' : '');
-      wrap.appendChild(row);
-      row.querySelector("input").addEventListener("change", () => onPick(p.digits));
-    });
-    // Custom row — «свой номер»
-    const customRow = document.createElement("label");
-    customRow.className = "phone-row custom";
-    customRow.innerHTML = '<input type="radio" name="phoneSel" value="__custom__">'
-      + '<span class="label">Свой номер:</span>'
-      + '<input type="tel" class="custom-input" placeholder="79261234567" autocomplete="off">';
-    wrap.appendChild(customRow);
-    const customInput = customRow.querySelector(".custom-input");
-    customRow.querySelector("input[type=radio]").addEventListener("change", () => {
-      onPick("__custom__");
-      customInput.focus();
-    });
-    customInput.addEventListener("input", () => {
-      const d = normalize(customInput.value);
-      $("phone").value = d;
-      customRow.classList.add("active");
-      [...wrap.querySelectorAll(".phone-row")].forEach(r => { if (r !== customRow) r.classList.remove("active"); });
-      const r = customRow.querySelector("input[type=radio]"); r.checked = true;
+    if (!phoneOptions.length) {
+      const empty = document.createElement("div");
+      empty.className = "chips-empty";
+      empty.textContent = "У клиента в CRM нет сохранённых номеров — введите ниже";
+      wrap.appendChild(empty);
+    }
+    phoneOptions.forEach(p => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chip" + (p.digits === selected ? " active" : "");
+      btn.innerHTML = '<span>+' + p.digits + '</span>'
+        + (p.label ? '<span class="chip-meta">· ' + p.label + '</span>' : '');
+      btn.addEventListener("click", () => {
+        $("phone").value = p.digits;
+        [...wrap.querySelectorAll(".chip")].forEach(c => c.classList.remove("active"));
+        btn.classList.add("active");
+      });
+      wrap.appendChild(btn);
     });
     if (selected) {
-      const checked = wrap.querySelector('input[type=radio][value="' + selected + '"]');
-      if (checked) checked.checked = true;
       $("phone").value = selected;
     }
   }
-  function onPick(value) {
-    [...$("phoneList").querySelectorAll(".phone-row")].forEach(r => r.classList.remove("active"));
-    if (value === "__custom__") {
-      const last = $("phoneList").lastElementChild;
-      if (last) last.classList.add("active");
-      const ci = last && last.querySelector(".custom-input");
-      $("phone").value = ci ? normalize(ci.value) : "";
-    } else {
-      const row = $("phoneList").querySelector('input[type=radio][value="' + value + '"]');
-      if (row) row.closest(".phone-row").classList.add("active");
-      $("phone").value = value;
-    }
-  }
+  // При ручном вводе в #phone снимаем active с чипов (если введён другой номер)
+  // или подсвечиваем совпадающий чип
+  $("phone").addEventListener("input", () => {
+    const d = normalize($("phone").value);
+    const chips = [...$("phoneChips").querySelectorAll(".chip")];
+    chips.forEach(c => {
+      const num = c.querySelector("span").textContent.replace("+", "");
+      if (num === d) c.classList.add("active"); else c.classList.remove("active");
+    });
+  });
   function collectPhonesFromCrmRow(data, sourceLabel) {
     if (!data || !Array.isArray(data.PHONE)) return;
     data.PHONE.forEach(p => {
@@ -346,7 +328,7 @@ const B24_AUTH = ${authJs};
     if (saved && !phoneOptions.find(x => x.digits === saved)) {
       phoneOptions.unshift({ digits: saved, label: "ранее" });
     }
-    renderPhoneList(saved || (phoneOptions[0] && phoneOptions[0].digits));
+    renderChips(saved || (phoneOptions[0] && phoneOptions[0].digits));
   }
 
   // Подгружаем список инстансов (с какого номера слать) из adapter
@@ -412,8 +394,8 @@ const B24_AUTH = ${authJs};
     const entityId = opts.OWNER_ID || opts.ID || opts.ENTITY_ID || opts.id || opts.element_id;
     const method = PLACEMENT_TO_METHOD[placement];
 
-    if (!method) { dbg("method", "unknown placement"); renderPhoneList(""); return; }
-    if (!entityId) { dbg("entityId", "не нашли в options"); renderPhoneList(""); return; }
+    if (!method) { dbg("method", "unknown placement"); renderChips(""); return; }
+    if (!entityId) { dbg("entityId", "не нашли в options"); renderChips(""); return; }
 
     // Определяем тип сущности для pref-ключа
     const ENTITY_TYPE = method === "crm.lead.get" ? "LEAD"
