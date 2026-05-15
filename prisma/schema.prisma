@@ -46,3 +46,17 @@ model Instance {
 
   @@unique([userId, bitrixLine])
 }
+
+// Запоминаем последний выбранный номер для каждой CRM-сущности (lead/deal/contact),
+// чтобы при повторном открытии виджета подставлялся тот же телефон.
+model EntityPhonePref {
+  id           BigInt   @id @default(autoincrement())
+  portalDomain String   @db.VarChar(190)
+  entityType   String   @db.VarChar(20)
+  entityId     String   @db.VarChar(40)
+  phone        String   @db.VarChar(32)
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  @@unique([portalDomain, entityType, entityId])
+}

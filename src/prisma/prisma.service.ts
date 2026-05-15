@@ -113,4 +113,28 @@ export class PrismaService
 			},
 		});
 	}
+
+	async getEntityPhonePref(
+		portalDomain: string,
+		entityType: string,
+		entityId: string,
+	): Promise<string | null> {
+		const row = await this.entityPhonePref.findUnique({
+			where: {portalDomain_entityType_entityId: {portalDomain, entityType, entityId}},
+		});
+		return row?.phone ?? null;
+	}
+
+	async setEntityPhonePref(
+		portalDomain: string,
+		entityType: string,
+		entityId: string,
+		phone: string,
+	): Promise<void> {
+		await this.entityPhonePref.upsert({
+			where: {portalDomain_entityType_entityId: {portalDomain, entityType, entityId}},
+			create: {portalDomain, entityType, entityId, phone},
+			update: {phone},
+		});
+	}
 }
