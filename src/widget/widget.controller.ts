@@ -104,7 +104,42 @@ export class WidgetController {
 		const apiToken = inst.apiTokenInstance;
 		const apiUrl = greenApiUrl(idInstance);
 
-		const chatId = `${phone}@c.us`;
+		// Определяем провайдера. WhatsApp использует chatId=phone@c.us, MAX —
+		// внутренний chatId (CheckAccount). Telegram аналогично — id, не phone.
+		const provider = ((inst.settings as any)?.provider || "wa").toLowerCase();
+		let chatId: string;
+		if (provider === "max") {
+			// Кеш phone → chatId, чтобы не дёргать CheckAccount каждый раз.
+			let cached = await this.prisma.maxContact.findUnique({
+				where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
+			});
+			if (!cached) {
+				try {
+					const r = await axios.post(
+						`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
+						{ phoneNumber: phone },
+						{ timeout: 15000 },
+					);
+					if (!r.data?.exist || !r.data?.chatId) {
+						throw new HttpException(
+							`У номера +${phone} нет аккаунта MAX (или он не доступен через Green API)`,
+							HttpStatus.NOT_FOUND,
+						);
+					}
+					cached = await this.prisma.maxContact.create({
+						data: { idInstance: BigInt(idInstance), phone, chatId: String(r.data.chatId) },
+					});
+				} catch (err: any) {
+					if (err instanceof HttpException) throw err;
+					const msg = err.response?.data || err.message;
+					throw new HttpException(`MAX CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+				}
+			}
+			chatId = cached.chatId;
+		} else {
+			chatId = `${phone}@c.us`;
+		}
+
 		let idMessage: string | undefined;
 		try {
 			const r = await axios.post(
@@ -119,31 +154,38 @@ export class WidgetController {
 		}
 
 		// Зеркалим в ту B24 open line, к которой привязан выбранный инстанс.
+		// Для MAX используем chatId (внутренний) как ключ user/chat — тот же,
+		// что adapter ставит для входящих, иначе будет два разных диалога.
 		const lineForMirror = inst.bitrixLine || undefined;
-		const mirrored = await this.mirrorToBitrix(phone, text, idMessage, body.authId, body.domain, lineForMirror);
+		const mirrorKey = provider === "max" ? chatId : phone;
+		const mirrored = await this.mirrorToBitrix(mirrorKey, text, idMessage, body.authId, body.domain, lineForMirror, provider);
 		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}
 
 	private async mirrorToBitrix(
-		phone: string, text: string, idMessage?: string,
+		idKey: string, text: string, idMessage?: string,
 		authId?: string, domain?: string, lineOverride?: number,
+		provider: string = "wa",
 	): Promise<boolean | string> {
 		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
 
-		// B24 матчит CRM-контакт по user.phone строго в E.164 (с ведущим `+`).
-		const phoneE164 = phone.startsWith("+") ? phone : `+${phone}`;
-		// Префикс `wa_` — см. комментарий в bitrix24.service.ts (обход legacy-кеша
-		// imopenlines.user). Ключи user/chat должны совпадать с теми что шлёт adapter
-		// при входящих, иначе исходящий mirror создаст отдельную сессию.
-		const userKey = `wa_${phone}`;
+		// Для WA idKey = phone (10-15 цифр) → можно сформировать E.164 + user.phone.
+		// Для MAX idKey = chatId (внутренний user_id), телефона нет.
+		const isPhoneLike = provider === "wa" && /^\d{10,15}$/.test(idKey);
+		const phoneE164 = isPhoneLike ? `+${idKey}` : null;
+		// Префикс должен совпадать с тем что adapter ставит при входящих:
+		// WA → wa_<phone>, MAX → sc_<chatId>.
+		const userKey = isPhoneLike ? `wa_${idKey}` : `sc_${idKey}`;
+		const userBlock: any = { id: userKey, name: isPhoneLike ? `WhatsApp ${idKey}` : `Клиент ${idKey}` };
+		if (phoneE164) userBlock.phone = phoneE164;
 		const payload = {
 			CONNECTOR: "social_connector",
 			LINE: Number(line),
 			MESSAGES: [{
-				user: { id: userKey, name: `WhatsApp ${phone}`, phone: phoneE164 },
+				user: userBlock,
 				message: { id: idMessage || String(Date.now()), date: Math.floor(Date.now() / 1000), text },
-				chat: { id: userKey, name: `WhatsApp ${phone}`, url: null },
+				chat: { id: userKey, name: userBlock.name, url: null },
 				extra: { is_self_message: true },
 			}],
 		};

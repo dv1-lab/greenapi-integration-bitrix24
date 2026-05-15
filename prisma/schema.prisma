@@ -47,6 +47,20 @@ model Instance {
   @@unique([userId, bitrixLine])
 }
 
+// Кеш phone → chatId для MAX-инстансов. В MAX чаты идентифицируются
+// внутренним chatId, не телефоном. Green API метод CheckAccount возвращает
+// chatId по phone — кешируем, чтобы не дёргать API при каждой отправке.
+model MaxContact {
+  id         BigInt   @id @default(autoincrement())
+  idInstance BigInt
+  phone      String   @db.VarChar(32)
+  chatId     String   @db.VarChar(64)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([idInstance, phone])
+}
+
 // Запоминаем последний выбранный номер для каждой CRM-сущности (lead/deal/contact),
 // чтобы при повторном открытии виджета подставлялся тот же телефон.
 model EntityPhonePref {
