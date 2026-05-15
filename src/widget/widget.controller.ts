@@ -182,10 +182,10 @@ export class WidgetController {
 		}
 
 		// Зеркалим в ту B24 open line, к которой привязан выбранный инстанс.
-		// Для MAX используем chatId (внутренний) как ключ user/chat — тот же,
+		// Для MAX/Telegram используем chatId (внутренний) как ключ user/chat — тот же,
 		// что adapter ставит для входящих, иначе будет два разных диалога.
 		const lineForMirror = inst.bitrixLine || undefined;
-		const mirrorKey = provider === "max" ? chatId : phone;
+		const mirrorKey = (provider === "max" || provider === "telegram") ? chatId : phone;
 		const mirrored = await this.mirrorToBitrix(mirrorKey, text, idMessage, body.authId, body.domain, lineForMirror, provider);
 		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}
