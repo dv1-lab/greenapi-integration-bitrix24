@@ -562,7 +562,7 @@ export class Bitrix24Service extends BaseAdapter<
 
 		try {
 			await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
-				CONNECTOR: "i2crm",
+				CONNECTOR: "social_connector",
 				LINE: lineId,
 				MESSAGES: [messagePayload],
 			});
@@ -1268,7 +1268,7 @@ export class Bitrix24Service extends BaseAdapter<
 			// отсутствует в webhook (старые версии B24), проверяем по LINE.
 			const lineDirect = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
 			const lineComment = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_COMMENT"));
-			if (connector === "i2crm" || lineNumber === lineDirect || lineNumber === lineComment) {
+			if (connector === "i2crm" || connector === "social_connector" && (lineNumber === lineDirect || lineNumber === lineComment) || lineNumber === lineDirect || lineNumber === lineComment) {
 				this.logger.info(`Routing outbound to i2crm pipeline (line=${lineNumber}, connector=${connector})`);
 				const result = await this.handleI2crmOutgoing(webhook, lineNumber);
 				if (result.success) {
@@ -1279,7 +1279,7 @@ export class Bitrix24Service extends BaseAdapter<
 						{
 							idMessage: (result.data as any)?.externalMessageId || `i2crm_${Date.now()}`,
 						} as SendResponse,
-						"i2crm",
+						"social_connector",
 					);
 				}
 				return result;
