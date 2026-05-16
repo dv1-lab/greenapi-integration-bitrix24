@@ -282,7 +282,7 @@ export class WidgetController {
 <script src="//api.bitrix24.com/api/v1/"></script>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: #f5f7fa; color: #1a1a1a; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px 24px 80px; background: #f5f7fa; color: #1a1a1a; }
   .card { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
   h1 { margin: 0 0 4px; font-size: 18px; color: #2d8f4e; }
   .subtitle { margin: 0 0 20px; font-size: 13px; color: #6b7280; }
@@ -461,7 +461,7 @@ const B24_AUTH = ${authJs};
         document.documentElement.scrollHeight,
         600
       );
-      BX24.resizeWindow(0, h + 80);
+      BX24.resizeWindow(0, h + 120);
     } catch (e) {
       dbg("resizeWindow err", String(e));
     }
