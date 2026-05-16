@@ -502,9 +502,10 @@ export class Bitrix24Service extends BaseAdapter<
 		// Текст для B24. Для comment-канала добавляем контекст что это коммент,
 		// поскольку Direct и Comment могут идти от одного клиента и нужно различать.
 		const isComment = channel === "instcom";
-		const postUrl = payload?.post_url || payload?.media_url || "";
+		// src — основной URL поста в i2crm payload (для instcom). post_url/media_url — fallback.
+		const igPostUrl = isComment ? (payload?.src || payload?.post_url || payload?.media_url || "") : "";
 		const finalText = isComment
-			? `[Instagram комментарий${postUrl ? " к посту " + postUrl : ""}]\n${text}`
+			? `[Instagram комментарий${igPostUrl ? " к посту " + igPostUrl : ""}]\n${text}`
 			: text;
 
 		const userKey = `i2crm_ig_${clientId}`;
@@ -579,8 +580,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// Передаём session/chat для карточки клиента в TG-mirror.
 		// URL поста (src в payload) приходит для комментариев — пишем в стандартный
 		// мультифилд LINK с типом LINK0 («активная ссылка на пост источника лида»).
-		const postUrl = channel === "instcom" ? (payload?.src || payload?.post_url || "") : "";
-		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, postUrl).catch((e) => {
+		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, igPostUrl).catch((e) => {
 			this.logger.warn(`i2crm: backfill UF failed (non-fatal): ${e.message}`);
 		});
 
@@ -671,23 +671,19 @@ export class Bitrix24Service extends BaseAdapter<
 						const existingLinks: any[] = Array.isArray(lead?.LINK) ? lead.LINK : [];
 						const link0 = existingLinks.find((l) => l?.VALUE_TYPE === "LINK0");
 						if (!link0 || link0.VALUE !== postUrl) {
-							// Сохраняем остальные значения LINK (не LINK0) + обновляем LINK0
-							const newLinks = existingLinks
+							// Сохраняем остальные значения LINK (не LINK0) + добавляем/обновляем LINK0
+							const newLinks: any[] = existingLinks
 								.filter((l) => l?.VALUE_TYPE !== "LINK0")
 								.map((l) => ({ ID: l.ID, VALUE: l.VALUE, VALUE_TYPE: l.VALUE_TYPE }));
 							newLinks.push({ VALUE: postUrl, VALUE_TYPE: "LINK0" });
-							const updWithLink = upd || {};
-							updWithLink.LINK = newLinks;
-							const wasNull = upd === null;
-							if (wasNull) {
-								// Только LINK0 — без UF
+							if (upd) {
+								(upd as any).LINK = newLinks;
+							} else {
 								await this.callBitrix24Method(portalDomain, "crm.lead.update", {
 									id: ownerId,
 									fields: { LINK: newLinks },
 								});
 								this.logger.info(`i2crm: updated lead ${ownerId} LINK0=${postUrl}`);
-							} else {
-								(upd as any).LINK = newLinks;
 							}
 						}
 					}
