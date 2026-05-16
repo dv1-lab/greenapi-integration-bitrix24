@@ -496,26 +496,8 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: ensureLead failed (non-fatal): ${e.message}`);
 		}
 
-		// Сохраним username отдельно (косметика, ссылка @user).
-		if (username) {
-			try {
-				const dup: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
-					filter: { UF_CRM_IG_CHAT_ID: String(clientId) },
-					select: ["ID", "UF_CRM_IG_USERNAME"],
-				});
-				if (Array.isArray(dup) && dup.length > 0) {
-					const cid = dup[0].ID;
-					if (!dup[0].UF_CRM_IG_USERNAME) {
-						await this.callBitrix24Method(portalDomain, "crm.contact.update", {
-							id: cid,
-							fields: { UF_CRM_IG_USERNAME: username },
-						});
-					}
-				}
-			} catch (e: any) {
-				this.logger.warn(`i2crm: failed to set IG_USERNAME: ${e.message}`);
-			}
-		}
+		// Username записывается через backfillIgUfFields после imconnector.send.messages
+		// (когда B24 уже создал лид/контакт и можно к нему обратиться).
 
 		// Текст для B24. Для comment-канала добавляем контекст что это коммент,
 		// поскольку Direct и Comment могут идти от одного клиента и нужно различать.
@@ -580,7 +562,97 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
 		});
 
+		// Backfill UF_CRM_IG_CHAT_ID/USERNAME на созданный B24 лид и контакт.
+		// B24 создаёт CRM-сущности через open-line асинхронно (с задержкой 1-3с),
+		// поэтому опрашиваем crm.activity с retry. Без этого UF остаётся пустым
+		// → нельзя матчить контакт по chatId при следующих сообщениях, что
+		// ломает кросс-канальную связку (пример: тот же IG-клиент звонит по
+		// phone → создаётся второй контакт без связи с IG).
+		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel).catch((e) => {
+			this.logger.warn(`i2crm: backfill UF failed (non-fatal): ${e.message}`);
+		});
+
 		return { success: true };
+	}
+
+	private async backfillIgUfFields(
+		portalDomain: string,
+		clientId: string,
+		username: string,
+		channelLabel: string,
+	): Promise<void> {
+		const userCode = `i2crm_ig_${clientId}`;
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+		for (let attempt = 1; attempt <= 6; attempt++) {
+			await sleep(attempt === 1 ? 1500 : 2000);
+			try {
+				// Ищем CRM-активность типа «Сессия открытой линии», в которой
+				// USER_CODE содержит наш chat-user. PROVIDER_PARAMS — JSON-строка
+				// с полем USER_CODE формата `social_connector|18|i2crm_ig_<id>|...`.
+				const activities: any = await this.callBitrix24Method(portalDomain, "crm.activity.list", {
+					filter: {
+						PROVIDER_TYPE_ID: "IMOPENLINE",
+						"%PROVIDER_PARAMS": userCode,
+					},
+					select: ["ID", "OWNER_ID", "OWNER_TYPE_ID", "PROVIDER_PARAMS"],
+					order: { ID: "DESC" },
+				});
+
+				const list = Array.isArray(activities) ? activities : [];
+				if (list.length === 0) {
+					this.logger.debug(`i2crm: backfill attempt ${attempt}/6 — no activity yet for ${userCode}`);
+					continue;
+				}
+
+				// Берём самую свежую активность по этому user_code
+				const act = list[0];
+				const ownerType = parseInt(act.OWNER_TYPE_ID, 10);
+				const ownerId = parseInt(act.OWNER_ID, 10);
+
+				const ufFields: Record<string, string> = { UF_CRM_IG_CHAT_ID: clientId };
+				if (username) ufFields.UF_CRM_IG_USERNAME = username;
+
+				let contactId: number | undefined;
+				if (ownerType === 1) {
+					// LEAD
+					const lead: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: ownerId });
+					contactId = lead?.CONTACT_ID ? parseInt(lead.CONTACT_ID, 10) : undefined;
+					if (!lead?.UF_CRM_IG_CHAT_ID) {
+						await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+							id: ownerId,
+							fields: ufFields,
+						});
+						this.logger.info(`i2crm: backfilled UF on lead ${ownerId} (${channelLabel} ${clientId})`);
+					}
+				} else if (ownerType === 3) {
+					// CONTACT (редкий случай — обычно owner это лид)
+					contactId = ownerId;
+				} else if (ownerType === 2) {
+					// DEAL — на сделке тоже запишем
+					await this.callBitrix24Method(portalDomain, "crm.deal.update", {
+						id: ownerId,
+						fields: ufFields,
+					});
+					this.logger.info(`i2crm: backfilled UF on deal ${ownerId} (${channelLabel} ${clientId})`);
+				}
+
+				if (contactId) {
+					const contact: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
+					if (!contact?.UF_CRM_IG_CHAT_ID) {
+						await this.callBitrix24Method(portalDomain, "crm.contact.update", {
+							id: contactId,
+							fields: ufFields,
+						});
+						this.logger.info(`i2crm: backfilled UF on contact ${contactId} (${channelLabel} ${clientId})`);
+					}
+				}
+				return;
+			} catch (e: any) {
+				this.logger.warn(`i2crm: backfill attempt ${attempt}/6 errored: ${e.message}`);
+			}
+		}
+		this.logger.warn(`i2crm: backfill UF timed out after 6 attempts for ${userCode}`);
 	}
 
 	async handleStateInstanceWebhook(webhook: StateInstanceWebhook): Promise<void> {

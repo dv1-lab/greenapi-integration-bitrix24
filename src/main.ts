@@ -1,9 +1,10 @@
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
 import { AppModule } from "./app.module";
-import { Settings } from "@green-api/greenapi-integration";
+import { Settings, GreenApiLogger } from "@green-api/greenapi-integration";
 import helmet from "helmet";
 import { urlencoded } from "express";
+import { mask, maskString } from "./common/mask";
 
 declare global {
 	namespace PrismaJson {
@@ -12,7 +13,26 @@ declare global {
 	}
 }
 
+// Перехватываем logEntry GreenApiLogger чтобы все логи (наши + из SDK)
+// автоматически маскировали accessToken/refreshToken/applicationToken/
+// apiTokenInstance/api-keys/passwords. SDK логирует Instance целиком при
+// каждом B24 REST-вызове — без этого патча токены попадают в docker logs.
+function patchGreenApiLogger() {
+	const proto: any = (GreenApiLogger as any).prototype;
+	if (!proto || proto.__maskingPatched) return;
+	const origLogEntry = proto.logEntry;
+	proto.logEntry = function (level: string, message: any, additionalContext: any = {}) {
+		const safeMessage = typeof message === "string" ? maskString(message) : message;
+		const safeContext = additionalContext && typeof additionalContext === "object"
+			? mask(additionalContext)
+			: additionalContext;
+		return origLogEntry.call(this, level, safeMessage, safeContext);
+	};
+	proto.__maskingPatched = true;
+}
+
 async function bootstrap() {
+	patchGreenApiLogger();
 	const app = await NestFactory.create(AppModule, {});
 	app.useGlobalPipes(new ValidationPipe());
 	app.use(helmet({
