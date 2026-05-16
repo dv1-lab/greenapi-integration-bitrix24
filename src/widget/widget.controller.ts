@@ -75,6 +75,57 @@ export class WidgetController {
 		res.type("html").send(this.renderHtml(authId, domain));
 	}
 
+	@Post("check-account")
+	async checkAccount(@Body() body: { phone?: string; idInstance?: string }) {
+		const phone = (body.phone || "").replace(/[^\d]/g, "");
+		if (phone.length < 10 || phone.length > 15) {
+			throw new HttpException(`Неверный номер: "${body.phone}"`, HttpStatus.BAD_REQUEST);
+		}
+		if (!body.idInstance) {
+			throw new HttpException("idInstance required", HttpStatus.BAD_REQUEST);
+		}
+		const inst = await this.prisma.instance.findUnique({
+			where: { idInstance: BigInt(body.idInstance) },
+		});
+		if (!inst) {
+			throw new HttpException("Instance не найден в БД", HttpStatus.NOT_FOUND);
+		}
+		const idInstance = inst.idInstance.toString();
+		const apiToken = inst.apiTokenInstance;
+		const apiUrl = greenApiUrl(idInstance);
+		const provider = ((inst.settings as any)?.provider || "wa").toLowerCase();
+
+		try {
+			if (provider === "wa") {
+				const r = await axios.post(
+					`${apiUrl}/waInstance${idInstance}/checkWhatsapp/${apiToken}`,
+					{ phoneNumber: Number(phone) },
+					{ timeout: 15000 },
+				);
+				return { exist: !!r.data?.existsWhatsapp, provider, phone };
+			}
+			// MAX-shard принимает string, Telegram-shard — integer.
+			const phoneForApi = provider === "telegram" ? Number(phone) : phone;
+			const r = await axios.post(
+				`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
+				{ phoneNumber: phoneForApi },
+				{ timeout: 15000 },
+			);
+			return {
+				exist: !!r.data?.exist,
+				chatId: r.data?.chatId || null,
+				provider,
+				phone,
+			};
+		} catch (err: any) {
+			const msg = err.response?.data || err.message;
+			throw new HttpException(
+				`Green API check: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`,
+				HttpStatus.BAD_GATEWAY,
+			);
+		}
+	}
+
 	@Post("send")
 	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string }) {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
@@ -318,8 +369,12 @@ export class WidgetController {
 
   <label>Номер телефона клиента</label>
   <div id="phoneChips" class="chips"></div>
-  <input id="phone" placeholder="+79261234567 или 79261234567" autocomplete="off" inputmode="tel">
-  <div class="hint">Кликни нужный номер из списка выше или введи свой (с кодом страны, можно с + или без)</div>
+  <div style="display:flex; gap:8px; align-items:stretch;">
+    <input id="phone" placeholder="+79261234567 или 79261234567" autocomplete="off" inputmode="tel" style="flex:1;">
+    <button type="button" id="checkBtn" title="Проверить наличие WhatsApp / Telegram / MAX по номеру" style="margin-top:0; width:auto; padding: 10px 14px; background:#0ea5e9;">🔍 Проверить</button>
+  </div>
+  <div class="hint">Кликни нужный номер из списка выше или введи свой (с кодом страны, можно с + или без). Кнопка «Проверить» — запрос к мессенджеру по выбранному инстансу.</div>
+  <div id="checkResult" class="status" style="margin-top:6px;"></div>
 
   <div id="tgUsernameBlock" style="display:none; margin-top:8px;">
     <label for="tgUsername">@username <span id="tgUsernameChannel">Telegram</span> <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
@@ -654,6 +709,64 @@ const B24_AUTH = ${authJs};
     });
   });
 
+
+  // Кнопка «🔍 Проверить» — спрашивает у выбранного мессенджера, есть ли
+  // аккаунт с этим номером. Для WA → checkWhatsapp, для MAX/TG → CheckAccount.
+  $("checkBtn").addEventListener("click", async function() {
+    const phone = $("phone").value.replace(/[^\\d]/g, "");
+    const idInstance = $("instance").value || undefined;
+    const out = $("checkResult");
+    out.className = "status";
+    if (!phone || phone.length < 10) {
+      out.textContent = "Введите номер (с кодом страны)";
+      out.className = "status err";
+      return;
+    }
+    if (!idInstance) {
+      out.textContent = "Выберите инстанс из списка «Отправить с номера»";
+      out.className = "status err";
+      return;
+    }
+    const inst = INSTANCE_BY_ID[idInstance];
+    const provider = inst ? (inst.provider || "wa").toLowerCase() : "wa";
+    const channelName = detectChannelLabel(idInstance);
+    out.textContent = "Проверяю…";
+    out.className = "status ok";
+    this.disabled = true;
+    try {
+      const r = await fetch("/widget/check-account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, idInstance }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        out.textContent = "✗ " + (j.message || r.statusText);
+        out.className = "status err";
+        return;
+      }
+      if (j.exist) {
+        let msg = "✓ " + channelName + " найден у +" + phone;
+        if (j.chatId) msg += " (chatId: " + j.chatId + ")";
+        out.textContent = msg;
+        out.className = "status ok";
+      } else {
+        const hint = provider === "telegram"
+          ? " (либо номера нет в адресной книге Telegram-аккаунта, либо у клиента privacy «найти по номеру» = «Мои контакты»)"
+          : provider === "max"
+            ? " (либо номера нет в адресной книге MAX-аккаунта)"
+            : "";
+        out.textContent = "✗ " + channelName + " НЕ найден у +" + phone + hint;
+        out.className = "status err";
+      }
+    } catch (e) {
+      out.textContent = "✗ Сетевая ошибка: " + e.message;
+      out.className = "status err";
+    } finally {
+      this.disabled = false;
+      resizeB24();
+    }
+  });
 
   $("send").addEventListener("click", async function() {
     const phone = $("phone").value.trim();
