@@ -270,10 +270,12 @@ export class WidgetController {
 		const isPhoneLike = provider === "wa" && /^\d{10,15}$/.test(idKey);
 		const phoneE164 = isPhoneLike ? `+${idKey}` : null;
 		// Префикс должен совпадать с тем что adapter ставит при входящих:
-		//   WA + Telegram → wa_ (legacy compat — Telegram сессии создавались с wa_
-		//   до того как мы добавили sc_ для не-WA). Меняем — будут дубли в B24.
-		//   MAX → sc_
-		const useWaPrefix = isPhoneLike || provider === "telegram";
+		//   WA → wa_ (там идентификатор реально телефон).
+		//   MAX и Telegram → sc_. Раньше Telegram использовал wa_ для legacy
+		//   compat — но из-за этого B24 авто-генерил TITLE «<id> WhatsApp - …»
+		//   (видел wa_ → решил что это WhatsApp). Перешли на sc_ в adapter
+		//   2026-05-16, виджет синхронизирован.
+		const useWaPrefix = isPhoneLike;
 		const userKey = useWaPrefix ? `wa_${idKey}` : `sc_${idKey}`;
 		// ВАЖНО: name без пробелов. B24 при создании лида/контакта разбивает
 		// name по пробелу и кладёт хвост в LAST_NAME. «WhatsApp 79228124797»

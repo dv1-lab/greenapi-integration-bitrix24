@@ -324,11 +324,13 @@ export class Bitrix24Service extends BaseAdapter<
 					channelLabel,
 				);
 			}
-			// Префикс для user.id/chat.id обходит legacy-кеш B24 (см. историю фикса).
-			// WA + Telegram → `wa_` (legacy для всех «числовых» каналов, чтобы
-			// не плодить дубли с раннее созданными сессиями Telegram-клиентов).
-			// MAX → `sc_` (там сразу был такой префикс с самого начала).
-			const useWaPrefix = isPhoneLike || instanceProvider === "telegram";
+			// Префикс для user.id/chat.id. WA → `wa_` (там идентификатор реально
+			// телефон). MAX и Telegram → `sc_`. Раньше Telegram использовал `wa_`
+			// для legacy compat, но из-за этого B24 авто-генерил TITLE лида типа
+			// «6748117222 WhatsApp - Telegram 79584983354» (видел `wa_` → решил
+			// что это WhatsApp-чат). Минус: открытые TG-сессии с прошлым `wa_`
+			// префиксом получат новый chat-user — старые останутся в архиве.
+			const useWaPrefix = isPhoneLike;
 			const userKey = useWaPrefix ? `wa_${message.phone}` : `sc_${message.phone}`;
 			// fallbackName без пробелов: B24 разбивает по пробелу и хвост идёт в
 			// LAST_NAME — получится «WhatsApp» / «79228124797» в карточке.
