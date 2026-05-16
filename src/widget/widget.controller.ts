@@ -150,9 +150,16 @@ export class WidgetController {
 					// privacy "находить по номеру" не запретил.
 					const providerLabel = provider === "max" ? "MAX" : "Telegram";
 					try {
+						// Telegram-shard валидирует phoneNumber как integer (выкидывает
+						// "Validation failed" на string). MAX-shard принимает string.
+						// Приводим к int если это валидное число — иначе ошибка пользователю.
+						const phoneNumeric = Number(phone);
+						const phoneForApi = provider === "telegram"
+							? (Number.isFinite(phoneNumeric) ? phoneNumeric : phone)
+							: phone;
 						const r = await axios.post(
 							`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
-							{ phoneNumber: phone },
+							{ phoneNumber: phoneForApi },
 							{ timeout: 15000 },
 						);
 						if (!r.data?.exist || !r.data?.chatId) {
