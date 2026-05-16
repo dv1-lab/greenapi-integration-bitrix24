@@ -609,42 +609,87 @@ export class Bitrix24Service extends BaseAdapter<
 				const ownerType = parseInt(act.OWNER_TYPE_ID, 10);
 				const ownerId = parseInt(act.OWNER_ID, 10);
 
-				const ufFields: Record<string, string> = { UF_CRM_IG_CHAT_ID: clientId };
-				if (username) ufFields.UF_CRM_IG_USERNAME = username;
+				// CHAT_ID — стабильный, пишем только если поле пустое. USERNAME —
+				// может меняться (клиент сменил @ник), обновляем при каждом сообщении
+				// если значение отличается от того что сохранено в B24.
+				const buildUpdate = (currentChatId: any, currentUsername: any): Record<string, string> | null => {
+					const fields: Record<string, string> = {};
+					if (!currentChatId) fields.UF_CRM_IG_CHAT_ID = clientId;
+					if (username && String(currentUsername || "") !== username) {
+						fields.UF_CRM_IG_USERNAME = username;
+					}
+					return Object.keys(fields).length > 0 ? fields : null;
+				};
+
+				// Если ранее уже был сохранён username и он изменился — оператору
+				// нужно знать что клиент сменил @ник (для безопасности и контекста).
+				// Шлём notification-сообщение в чат той же сессии через imconnector.send.messages.
+				let usernameChange: { oldName: string; newName: string } | null = null;
 
 				let contactId: number | undefined;
+				let crmLineId: number | undefined;
 				if (ownerType === 1) {
 					// LEAD
 					const lead: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: ownerId });
 					contactId = lead?.CONTACT_ID ? parseInt(lead.CONTACT_ID, 10) : undefined;
-					if (!lead?.UF_CRM_IG_CHAT_ID) {
+					if (username && lead?.UF_CRM_IG_USERNAME && String(lead.UF_CRM_IG_USERNAME) !== username) {
+						usernameChange = { oldName: String(lead.UF_CRM_IG_USERNAME), newName: username };
+					}
+					const upd = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME);
+					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.lead.update", {
 							id: ownerId,
-							fields: ufFields,
+							fields: upd,
 						});
-						this.logger.info(`i2crm: backfilled UF on lead ${ownerId} (${channelLabel} ${clientId})`);
+						this.logger.info(`i2crm: backfilled UF on lead ${ownerId} (${channelLabel} ${clientId}, fields: ${Object.keys(upd).join(",")})`);
 					}
 				} else if (ownerType === 3) {
 					// CONTACT (редкий случай — обычно owner это лид)
 					contactId = ownerId;
 				} else if (ownerType === 2) {
 					// DEAL — на сделке тоже запишем
-					await this.callBitrix24Method(portalDomain, "crm.deal.update", {
-						id: ownerId,
-						fields: ufFields,
-					});
-					this.logger.info(`i2crm: backfilled UF on deal ${ownerId} (${channelLabel} ${clientId})`);
+					const deal: any = await this.callBitrix24Method(portalDomain, "crm.deal.get", { id: ownerId });
+					if (username && deal?.UF_CRM_IG_USERNAME && String(deal.UF_CRM_IG_USERNAME) !== username) {
+						usernameChange = usernameChange || { oldName: String(deal.UF_CRM_IG_USERNAME), newName: username };
+					}
+					const upd = buildUpdate(deal?.UF_CRM_IG_CHAT_ID, deal?.UF_CRM_IG_USERNAME);
+					if (upd) {
+						await this.callBitrix24Method(portalDomain, "crm.deal.update", {
+							id: ownerId,
+							fields: upd,
+						});
+						this.logger.info(`i2crm: backfilled UF on deal ${ownerId} (${channelLabel} ${clientId}, fields: ${Object.keys(upd).join(",")})`);
+					}
 				}
 
 				if (contactId) {
 					const contact: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
-					if (!contact?.UF_CRM_IG_CHAT_ID) {
+					if (username && contact?.UF_CRM_IG_USERNAME && String(contact.UF_CRM_IG_USERNAME) !== username) {
+						usernameChange = usernameChange || { oldName: String(contact.UF_CRM_IG_USERNAME), newName: username };
+					}
+					const upd = buildUpdate(contact?.UF_CRM_IG_CHAT_ID, contact?.UF_CRM_IG_USERNAME);
+					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.contact.update", {
 							id: contactId,
-							fields: ufFields,
+							fields: upd,
 						});
-						this.logger.info(`i2crm: backfilled UF on contact ${contactId} (${channelLabel} ${clientId})`);
+						this.logger.info(`i2crm: backfilled UF on contact ${contactId} (${channelLabel} ${clientId}, fields: ${Object.keys(upd).join(",")})`);
 					}
+				}
+
+				if (usernameChange) {
+					// Из USER_CODE достаём line: `social_connector|<line>|i2crm_ig_<id>|<userId>`
+					const m = (act?.PROVIDER_PARAMS?.USER_CODE || "").match(/^social_connector\|(\d+)\|/);
+					if (m) crmLineId = parseInt(m[1], 10);
+					await this.notifyUsernameChange(
+						portalDomain,
+						clientId,
+						usernameChange.oldName,
+						usernameChange.newName,
+						crmLineId,
+						username,
+						{ leadId: ownerType === 1 ? ownerId : undefined, contactId },
+					);
 				}
 				return;
 			} catch (e: any) {
@@ -652,6 +697,89 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 		this.logger.warn(`i2crm: backfill UF timed out after 6 attempts for ${userCode}`);
+	}
+
+	// Уведомление о смене @username клиента: 1) системное сообщение в чат
+	// сессии IMOPENLINES, 2) запись в COMMENTS контакта (или лида если контакта
+	// ещё нет) — для постоянной истории смен ника.
+	private async notifyUsernameChange(
+		portalDomain: string,
+		clientId: string,
+		oldUsername: string,
+		newUsername: string,
+		lineId: number | undefined,
+		displayName: string,
+		owners: { leadId?: number; contactId?: number },
+	): Promise<void> {
+		this.logger.info(`i2crm: username changed for client ${clientId}: @${oldUsername} → @${newUsername}`);
+
+		const noticeText = `🔄 Клиент сменил Instagram-логин: @${oldUsername} → @${newUsername}\n(client_id: ${clientId} — не меняется, можно безопасно продолжать диалог)`;
+
+		// 1. Сообщение в чат через imconnector.send.messages — оператор увидит
+		// в той же сессии. Отправляем как «from client», чтобы в ленте появилось
+		// сразу под последним сообщением клиента.
+		if (lineId) {
+			try {
+				const userKey = `i2crm_ig_${clientId}`;
+				await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+					CONNECTOR: "social_connector",
+					LINE: lineId,
+					MESSAGES: [{
+						user: {
+							id: userKey,
+							name: displayName,
+							url: `https://instagram.com/${newUsername}`,
+						},
+						message: {
+							id: `username_change_${clientId}_${Date.now()}`,
+							date: Math.floor(Date.now() / 1000),
+							text: noticeText,
+						},
+						chat: {
+							id: userKey,
+							name: displayName,
+							url: `https://instagram.com/${newUsername}`,
+						},
+						extra: { crm: "Y" },
+					}],
+				});
+				this.logger.info(`i2crm: username-change notice posted to chat (line=${lineId})`);
+			} catch (e: any) {
+				this.logger.warn(`i2crm: failed to post username-change notice to chat: ${e.message}`);
+			}
+		}
+
+		// 2. Запись в COMMENTS контакта (если есть) или лида — постоянная история.
+		// Добавляем в начало (новые сверху). Дату — в МСК для удобства оператора.
+		const now = new Date();
+		const mskParts = new Intl.DateTimeFormat("ru-RU", {
+			timeZone: "Europe/Moscow",
+			day: "2-digit", month: "2-digit", year: "numeric",
+			hour: "2-digit", minute: "2-digit",
+		}).format(now);
+		const historyLine = `${mskParts} МСК: Instagram @${oldUsername} → @${newUsername}`;
+
+		const target = owners.contactId
+			? { entity: "contact" as const, id: owners.contactId }
+			: owners.leadId
+				? { entity: "lead" as const, id: owners.leadId }
+				: null;
+		if (!target) return;
+
+		try {
+			const cur: any = await this.callBitrix24Method(portalDomain, `crm.${target.entity}.get`, { id: target.id });
+			const existing = String(cur?.COMMENTS || "").trim();
+			const updated = existing
+				? `${historyLine}\n\n${existing}`
+				: historyLine;
+			await this.callBitrix24Method(portalDomain, `crm.${target.entity}.update`, {
+				id: target.id,
+				fields: { COMMENTS: updated },
+			});
+			this.logger.info(`i2crm: username-change appended to ${target.entity} ${target.id} COMMENTS`);
+		} catch (e: any) {
+			this.logger.warn(`i2crm: failed to append username-change to ${target.entity} ${target.id} COMMENTS: ${e.message}`);
+		}
 	}
 
 	async handleStateInstanceWebhook(webhook: StateInstanceWebhook): Promise<void> {
