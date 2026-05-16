@@ -164,7 +164,8 @@ def normalize(raw):
 
 
 def migrate_entity(bx, entity):
-    print(f"\n=== migrating {entity} ===")
+    """Batched-вариант — собираем 50 update-команд в один HTTP-запрос B24 batch."""
+    print(f"\n=== migrating {entity} ===", flush=True)
     start = 0
     migrated_username = 0
     canonicalized_url = 0
@@ -183,7 +184,7 @@ def migrate_entity(bx, entity):
                 "start": start,
             })
         except Exception as e:
-            print(f"  list error at start={start}: {e}")
+            print(f"  list error at start={start}: {e}", flush=True)
             errors += 1
             time.sleep(5)
             continue
@@ -192,7 +193,11 @@ def migrate_entity(bx, entity):
             break
         if total is None:
             total = r.get("total", 0)
-            print(f"  total={total}")
+            print(f"  total={total}", flush=True)
+
+        # Собираем cmd[] для batch
+        batch_cmds = []
+        batch_meta = []  # (need_username, need_url)
         for it in items:
             url_raw = it.get("UF_CRM_INSTAGRAM")
             cur_username = it.get("UF_CRM_IG_USERNAME")
@@ -200,39 +205,51 @@ def migrate_entity(bx, entity):
             if not username:
                 skipped_no_username += 1
                 continue
-
-            fields = {}
-            if not cur_username:
-                fields["fields[UF_CRM_IG_USERNAME]"] = username
-            # Каноничный URL для кликабельности. Если в поле уже лежит точно
-            # такой же — не трогаем (минус один лишний запрос).
+            need_username = not cur_username
             canonical_url = f"https://instagram.com/{username}/"
-            if str(url_raw or "").strip() != canonical_url:
-                fields["fields[UF_CRM_INSTAGRAM]"] = canonical_url
-
-            if not fields:
+            need_url = str(url_raw or "").strip() != canonical_url
+            if not need_username and not need_url:
                 skipped_already += 1
                 continue
+            # B24 batch.cmd[] параметр — строка-команда
+            parts = [f"crm.{entity}.update?id={it['ID']}"]
+            if need_username:
+                parts.append(f"fields[UF_CRM_IG_USERNAME]={requests.utils.quote(username)}")
+            if need_url:
+                parts.append(f"fields[UF_CRM_INSTAGRAM]={requests.utils.quote(canonical_url)}")
+            batch_cmds.append("&".join(parts))
+            batch_meta.append((need_username, need_url))
+
+        # Шлём batch chunks по 50
+        for ci in range(0, len(batch_cmds), 50):
+            chunk = batch_cmds[ci:ci+50]
+            chunk_meta = batch_meta[ci:ci+50]
             if DRY_RUN:
-                if "fields[UF_CRM_IG_USERNAME]" in fields:
-                    migrated_username += 1
-                if "fields[UF_CRM_INSTAGRAM]" in fields:
-                    canonicalized_url += 1
+                for nu, nl in chunk_meta:
+                    if nu: migrated_username += 1
+                    if nl: canonicalized_url += 1
                 continue
+            params = {f"cmd[c{i}]": cmd for i, cmd in enumerate(chunk)}
+            params["halt"] = "0"
             try:
-                bx.call(f"crm.{entity}.update", {
-                    "id": it["ID"],
-                    **fields,
-                })
-                if "fields[UF_CRM_IG_USERNAME]" in fields:
-                    migrated_username += 1
-                if "fields[UF_CRM_INSTAGRAM]" in fields:
-                    canonicalized_url += 1
+                resp = bx.call("batch", params)
+                result_data = resp.get("result", {})
+                batch_errors = result_data.get("result_error", {}) or {}
+                for i, (nu, nl) in enumerate(chunk_meta):
+                    if f"c{i}" in batch_errors:
+                        errors += 1
+                        if errors <= 5:
+                            print(f"  batch error c{i}: {batch_errors[f'c{i}']}", flush=True)
+                    else:
+                        if nu: migrated_username += 1
+                        if nl: canonicalized_url += 1
             except Exception as e:
-                errors += 1
-                print(f"  update error {entity} {it['ID']}: {e}")
-            time.sleep(RATE_DELAY)
-        # progress
+                errors += len(chunk)
+                print(f"  batch call failed: {e}", flush=True)
+                time.sleep(2)
+            # B24 batch допускает 2 req/s — пауза между chunks
+            time.sleep(0.5)
+
         print(f"  page start={start}: migrated_username={migrated_username} "
               f"canonicalized_url={canonicalized_url} skipped_already={skipped_already} "
               f"skipped_no_username={skipped_no_username} errors={errors}", flush=True)
