@@ -1,6 +1,18 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosInstance } from "axios";
+
+// Маппинг префикса idInstance → API URL. Дублирует helper из widget.controller.ts.
+// При появлении новых shard'ов дополнять оба места.
+function greenApiUrlForInstance(idInstance: string): string {
+	const known: Record<string, string> = {
+		"1103487233": "https://1103.api.green-api.com",
+		"1101948511": "https://api.green-api.com",
+		"3100621187": "https://3100.api.green-api.com",
+		"4100621194": "https://4100.api.green-api.com",
+	};
+	return known[idInstance] || "https://api.green-api.com";
+}
 import {
 	BaseAdapter,
 	IntegrationError,
@@ -162,6 +174,7 @@ export class Bitrix24Service extends BaseAdapter<
 		phoneE164: string,
 		senderName: string,
 		lineId: number,
+		channelLabel: string = "WhatsApp",
 	): Promise<void> {
 		const lockKey = `${portalDomain}:${phoneE164}`;
 		const existing = this._ensureLeadLocks.get(lockKey);
@@ -221,7 +234,7 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 
 				const fields: Record<string, any> = {
-					TITLE: `${senderName} - WhatsApp (auto)`,
+					TITLE: `${senderName} - ${channelLabel} (auto)`,
 					NAME: senderName,
 					CONTACT_ID: contactId,
 					PHONE: [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }],
@@ -258,6 +271,10 @@ export class Bitrix24Service extends BaseAdapter<
 		// что случайно матчится с phone-regex'ом — поэтому нельзя полагаться
 		// только на формат, нужен явный провайдер.
 		const instanceProvider = ((instance.settings as any)?.provider || "wa").toLowerCase();
+		const channelLabel =
+			instanceProvider === "max" ? "MAX" :
+			instanceProvider === "telegram" ? "Telegram" :
+			"WhatsApp";
 
 		try {
 			// Только для WA идентификатор клиента — настоящий телефон.
@@ -265,19 +282,46 @@ export class Bitrix24Service extends BaseAdapter<
 			// B24 либо отвергнет (если короткий), либо запишет в карточку как phone
 			// (что ещё хуже — оператор будет пытаться звонить на user_id).
 			const isPhoneLike = instanceProvider === "wa" && /^\+?\d{10,15}$/.test(message.phone);
-			const phoneE164 = isPhoneLike
+			let phoneE164: string | null = isPhoneLike
 				? (message.phone.startsWith("+") ? message.phone : `+${message.phone}`)
 				: null;
 
+			// Для MAX/Telegram phone в webhook senderData не приходит, но Green API
+			// его знает (если клиент в адресной книге нашего MAX/TG-аккаунта) —
+			// добираем через getContactInfo. Если phone есть — используем для
+			// ensureOpenLeadForPhone и проставляем в user.phone B24 mirror'а.
+			if (!phoneE164 && instanceProvider !== "wa") {
+				try {
+					const apiUrl = greenApiUrlForInstance(instance.idInstance.toString());
+					const r = await axios.post(
+						`${apiUrl}/waInstance${instance.idInstance}/getContactInfo/${instance.apiTokenInstance}`,
+						{ chatId: message.phone },
+						{ timeout: 10000 },
+					);
+					const pn = r.data?.phoneNumber;
+					if (pn && Number(pn) > 0) {
+						phoneE164 = `+${String(pn).replace(/^\+/, "")}`;
+						this.logger.info(
+							`getContactInfo: resolved phone ${phoneE164} for ${channelLabel} chatId=${message.phone}`,
+						);
+					}
+				} catch (e: any) {
+					this.logger.warn(
+						`getContactInfo failed for ${channelLabel} chatId=${message.phone}: ${e.message}`,
+					);
+				}
+			}
+
 			// ensureLead имеет смысл только когда есть телефон (через него ищем
-			// существующего контакта). Для MAX/Telegram пропускаем — B24 сам
-			// создаст лид с CRM_CREATE=lead.
+			// существующего контакта). Если phone достали через getContactInfo —
+			// он тоже сюда попадёт. Иначе B24 сам создаст лид с CRM_CREATE=lead.
 			if (line != null && phoneE164) {
 				await this.ensureOpenLeadForPhone(
 					instance.user.portalDomain,
 					phoneE164,
-					message.senderName || `WhatsApp ${message.phone}`,
+					message.senderName || `${channelLabel} ${message.phone}`,
 					line,
+					channelLabel,
 				);
 			}
 			// Префикс для user.id/chat.id обходит legacy-кеш B24 (см. историю фикса).
