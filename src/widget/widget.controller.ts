@@ -31,13 +31,30 @@ export class WidgetController {
 		const insts = await this.prisma.instance.findMany({
 			select: { idInstance: true, bitrixLine: true, stateInstance: true, settings: true },
 		});
-		return insts.map(i => ({
+		const list = insts.map(i => ({
 			idInstance: i.idInstance.toString(),
 			bitrixLine: i.bitrixLine,
 			stateInstance: i.stateInstance,
 			label: (i.settings as any)?.label || `Instance ${i.idInstance}`,
 			provider: ((i.settings as any)?.provider || "wa"),
 		}));
+
+		// Виртуальный инстанс Instagram через i2crm Public API. У 1begovoy.ru
+		// гибридное подключение — Direct работает без 24h-окна Meta.
+		const igAccountId = this.config.get<string>("I2CRM_INSTAGRAM_ACCOUNT_ID");
+		const igKey = this.config.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
+		const igLineDirect = this.config.get<string>("I2CRM_LINE_ID_IG_DIRECT");
+		if (igAccountId && igKey) {
+			list.push({
+				idInstance: `i2crm:${igAccountId}`,
+				bitrixLine: igLineDirect ? Number(igLineDirect) : null,
+				stateInstance: "authorized",
+				label: `Instagram Direct — @1begovoy.ru`,
+				provider: "instagram",
+			} as any);
+		}
+
+		return list;
 	}
 
 	@Get("entity-phone")
@@ -137,6 +154,21 @@ export class WidgetController {
 		// chatIdOverride (числовой user_id из B24-привязки). Сами @ срезаем —
 		// добавим позже в нужном формате под Green API.
 		const usernameOverride = (body.usernameOverride || "").trim().replace(/^@/, "");
+
+		// Virtual idInstance `i2crm:<accountId>` → Instagram через i2crm Public API.
+		// Отдельный pipeline (не Green API). Делаем здесь до проверки phone/Instance.
+		if (body.idInstance && body.idInstance.startsWith("i2crm:")) {
+			if (!text) {
+				throw new HttpException("Текст пуст", HttpStatus.BAD_REQUEST);
+			}
+			return this.sendInstagramDirect({
+				clientId: chatIdOverride || usernameOverride,
+				text,
+				authId: body.authId,
+				domain: body.domain,
+			});
+		}
+
 		// phone обязателен только если нет chatIdOverride/usernameOverride
 		// (для MAX/Telegram валидно отправлять без phone, по известному chatId/username).
 		if (!chatIdOverride && !usernameOverride && (phone.length < 10 || phone.length > 15)) {
@@ -286,6 +318,82 @@ export class WidgetController {
 		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}
 
+	// Отправка в Instagram Direct через i2crm Public API. Для клиентов, чей
+	// client_id уже сохранён в UF_CRM_IG_CHAT_ID (записан automatic backfill
+	// после incoming через webhook). Без client_id i2crm не примет — username
+	// не resolveится через их API.
+	private async sendInstagramDirect(input: {
+		clientId: string;
+		text: string;
+		authId?: string;
+		domain?: string;
+	}): Promise<any> {
+		const clientId = (input.clientId || "").trim().replace(/^@/, "");
+		if (!clientId) {
+			throw new HttpException(
+				"Не нашли Instagram client_id у клиента. Открой карточку лида созданного из Instagram (там IG_CHAT_ID есть), либо введи числовой client_id вручную.",
+				HttpStatus.BAD_REQUEST,
+			);
+		}
+		// client_id у Instagram — числовой. Если ввели @username, мы не сможем
+		// его сразу резолвить (нет такого endpoint у i2crm). Заставим ввести
+		// именно client_id.
+		if (!/^\d+$/.test(clientId)) {
+			throw new HttpException(
+				`Instagram client_id должен быть числом, получено "${clientId}". Либо открой карточку лида с Instagram — там UF_CRM_IG_CHAT_ID подставится автоматически.`,
+				HttpStatus.BAD_REQUEST,
+			);
+		}
+
+		const apiBase = this.config.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
+		const targetKey = this.config.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
+		const accountId = this.config.get<string>("I2CRM_INSTAGRAM_ACCOUNT_ID");
+		const lineDirect = Number(this.config.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+		if (!targetKey || !accountId) {
+			throw new HttpException("I2CRM не настроен (TARGET_KEY/ACCOUNT_ID)", HttpStatus.INTERNAL_SERVER_ERROR);
+		}
+
+		const body = {
+			domain: "instagram",
+			source: String(accountId),
+			client: String(clientId),
+			type: "direct",
+			text: input.text,
+		};
+
+		let idMessage: string | undefined;
+		try {
+			const r = await axios.post(`${apiBase}/target/feedback`, body, {
+				params: { key: targetKey },
+				timeout: 15000,
+				validateStatus: () => true,
+			});
+			const result = r.data;
+			if (result?.error) {
+				const errMsg = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
+				throw new HttpException(`i2crm: ${errMsg}`, HttpStatus.BAD_GATEWAY);
+			}
+			idMessage = String(result?.data?.id || result?.data?.external_ids?.[0] || `i2crm_${Date.now()}`);
+		} catch (err: any) {
+			if (err instanceof HttpException) throw err;
+			throw new HttpException(`i2crm transport: ${err.message}`, HttpStatus.BAD_GATEWAY);
+		}
+
+		// Зеркалим в B24 open line (Instagram Direct = 18) — как для других каналов.
+		// Это создаст карточку диалога в B24 чтобы оператор видел свою же отправку.
+		const mirrored = await this.mirrorToBitrix(
+			`i2crm_ig_${clientId}`,
+			input.text,
+			idMessage,
+			input.authId,
+			input.domain,
+			lineDirect || undefined,
+			"instagram",
+		);
+
+		return { ok: true, idMessage, chatId: `i2crm_ig_${clientId}`, idInstance: `i2crm:${accountId}`, line: lineDirect, mirrored };
+	}
+
 	private async mirrorToBitrix(
 		idKey: string, text: string, idMessage?: string,
 		authId?: string, domain?: string, lineOverride?: number,
@@ -304,8 +412,14 @@ export class WidgetController {
 		//   compat — но из-за этого B24 авто-генерил TITLE «<id> WhatsApp - …»
 		//   (видел wa_ → решил что это WhatsApp). Перешли на sc_ в adapter
 		//   2026-05-16, виджет синхронизирован.
+		// Instagram: adapter в handleI2crmIncoming уже формирует user.id как
+		// `i2crm_ig_<clientId>`. Если idKey уже с этим префиксом — используем
+		// без добавления `sc_`, иначе будет mismatch с входящими (B24 видит
+		// как разных chat-users → создаст дубль лида).
 		const useWaPrefix = isPhoneLike;
-		const userKey = useWaPrefix ? `wa_${idKey}` : `sc_${idKey}`;
+		const userKey = provider === "instagram" && idKey.startsWith("i2crm_ig_")
+			? idKey
+			: useWaPrefix ? `wa_${idKey}` : `sc_${idKey}`;
 		// ВАЖНО: name без пробелов. B24 при создании лида/контакта разбивает
 		// name по пробелу и кладёт хвост в LAST_NAME. «WhatsApp 79228124797»
 		// → NAME=«WhatsApp», LAST_NAME=«79228124797» — мусор в карточке.
@@ -535,6 +649,7 @@ const B24_AUTH = ${authJs};
     const p = (PROVIDER_MAP[idInst] || "wa").toLowerCase();
     if (p === "max") return "MAX";
     if (p === "telegram") return "Telegram";
+    if (p === "instagram") return "Instagram Direct";
     return "WhatsApp";
   }
   // B24 placement iframe имеет фиксированную высоту. У разных типов placement
@@ -560,20 +675,24 @@ const B24_AUTH = ${authJs};
   // Значения UF-полей из карточки клиента — подставим в @username input
   // в зависимости от выбранного провайдера (Telegram → UF_CRM_IM_TELEGRAM,
   // MAX → UF_CRM_MAX). Заполняется при загрузке crm.{lead,deal,contact}.get.
-  const entityUsernames = { telegram: "", max: "" };
+  const entityUsernames = { telegram: "", max: "", instagram: "" };
   // Стабильный chatId клиента (внутренний user_id мессенджера). Приоритет
   // выше username — chatId не меняется при смене ника. Заполняется тем же
-  // путём (UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID на сущности).
-  const entityChatIds = { telegram: "", max: "" };
+  // путём (UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID / UF_CRM_IG_CHAT_ID на сущности).
+  const entityChatIds = { telegram: "", max: "", instagram: "" };
   function collectUsernames(data) {
     const tg = (data && data.UF_CRM_IM_TELEGRAM) ? String(data.UF_CRM_IM_TELEGRAM).replace(/^@/, "") : "";
     const mx = (data && data.UF_CRM_MAX) ? String(data.UF_CRM_MAX).replace(/^@/, "") : "";
+    const ig = (data && data.UF_CRM_IG_USERNAME) ? String(data.UF_CRM_IG_USERNAME).replace(/^@/, "") : "";
     if (tg && !entityUsernames.telegram) entityUsernames.telegram = tg;
     if (mx && !entityUsernames.max) entityUsernames.max = mx;
+    if (ig && !entityUsernames.instagram) entityUsernames.instagram = ig;
     const tgId = (data && data.UF_CRM_TG_CHAT_ID) ? String(data.UF_CRM_TG_CHAT_ID) : "";
     const mxId = (data && data.UF_CRM_MAX_CHAT_ID) ? String(data.UF_CRM_MAX_CHAT_ID) : "";
+    const igId = (data && data.UF_CRM_IG_CHAT_ID) ? String(data.UF_CRM_IG_CHAT_ID) : "";
     if (tgId && !entityChatIds.telegram) entityChatIds.telegram = tgId;
     if (mxId && !entityChatIds.max) entityChatIds.max = mxId;
+    if (igId && !entityChatIds.instagram) entityChatIds.instagram = igId;
   }
   function applyUsernameFromUf() {
     const idInst = $("instance").value;
@@ -582,18 +701,35 @@ const B24_AUTH = ${authJs};
     if (!input || input.value.trim()) return; // оператор уже ввёл — не перетираем
     if (p === "telegram" && entityUsernames.telegram) input.value = entityUsernames.telegram;
     else if (p === "max" && entityUsernames.max) input.value = entityUsernames.max;
+    else if (p === "instagram" && entityUsernames.instagram) input.value = entityUsernames.instagram;
   }
 
   function updateSubtitle() {
     const idInst = $("instance").value;
     const channel = detectChannelLabel(idInst);
     $("subtitle").textContent = "Первое сообщение клиенту через " + channel;
-    // Telegram и MAX поддерживают @username, у WhatsApp — нет.
+    // Telegram, MAX, Instagram поддерживают @username; у WhatsApp — нет.
     const p = (PROVIDER_MAP[idInst] || "").toLowerCase();
-    const hasUsername = p === "telegram" || p === "max";
+    const hasUsername = p === "telegram" || p === "max" || p === "instagram";
     $("tgUsernameBlock").style.display = hasUsername ? "block" : "none";
     const ch = $("tgUsernameChannel");
-    if (ch) ch.textContent = p === "max" ? "MAX" : "Telegram";
+    if (ch) ch.textContent = p === "max" ? "MAX" : p === "instagram" ? "Instagram" : "Telegram";
+    // Для Instagram phone не нужен (i2crm не оперирует phone). Скрываем чипы
+    // и поле phone+check, ввод идёт по UF_CRM_IG_CHAT_ID (auto) или вручную
+    // @username (Instagram гибридное подключение i2crm — без 24h-окна Meta).
+    const isInsta = p === "instagram";
+    const phoneRow = $("phone")?.parentElement;
+    if (phoneRow) phoneRow.style.display = isInsta ? "none" : "flex";
+    const chipsEl = $("phoneChips");
+    if (chipsEl) chipsEl.style.display = isInsta ? "none" : "";
+    // Подсказка под полем телефона — скрыть для IG
+    const hintAll = phoneRow ? phoneRow.parentElement.querySelectorAll(".hint") : [];
+    if (hintAll && hintAll[0]) hintAll[0].style.display = isInsta ? "none" : "";
+    const checkResult = $("checkResult");
+    if (checkResult) checkResult.style.display = isInsta ? "none" : "";
+    // Labels: для Instagram переименуем поля
+    const phoneLabel = document.querySelector('label[for="phone"]');
+    if (phoneLabel) phoneLabel.style.display = isInsta ? "none" : "";
     // При смене инстанса — подставим значение из соответствующего UF-поля,
     // если есть и оператор ещё не вводил руками.
     applyUsernameFromUf();
@@ -826,7 +962,10 @@ const B24_AUTH = ${authJs};
     } else if (instProvider === "max" && entityChatIds.max) {
       chatIdOverride = entityChatIds.max;
       dbg("using UF_CRM_MAX_CHAT_ID", chatIdOverride);
-    } else if (inst && instProvider !== "wa" && inst.bitrixLine != null) {
+    } else if (instProvider === "instagram" && entityChatIds.instagram) {
+      chatIdOverride = entityChatIds.instagram;
+      dbg("using UF_CRM_IG_CHAT_ID", chatIdOverride);
+    } else if (inst && instProvider !== "wa" && instProvider !== "instagram" && inst.bitrixLine != null) {
       const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
       if (known) {
         chatIdOverride = known;
@@ -842,7 +981,9 @@ const B24_AUTH = ${authJs};
         ? "Введите номер телефона клиента"
         : instProvider === "telegram"
           ? "Введите номер или @username клиента, либо открой виджет в карточке где привязан Telegram-чат"
-          : "Введите номер или открой виджет в карточке клиента — оттуда подтянется chatId";
+          : instProvider === "instagram"
+            ? "У клиента в карточке нет UF_CRM_IG_CHAT_ID. Открой карточку лида, который пришёл из Instagram (там IG_CHAT_ID записан автоматически), либо введи @username клиента вручную (но i2crm обычно требует client_id, не username)"
+            : "Введи номер или открой виджет в карточке клиента — оттуда подтянется chatId";
       showStatus(hint, false);
       return;
     }
