@@ -38,10 +38,11 @@ NON_USER_SEGMENTS = {
     "accounts", "developer", "about", "press",
 }
 
-URL_RE = re.compile(
-    r"^\s*(?:https?://)?(?:www\.|m\.)?instagr(?:am)?(?:\.com)?/+([^/?#\s]+)/?",
-    re.IGNORECASE,
-)
+# Извлекает первый сегмент после instagram.com/. Точки в username — норма
+# (sergei.031, _p.r.i.m.a.v.e.r.a_), поэтому проверку «есть точка → значит URL»
+# делать нельзя.
+URL_RE = re.compile(r"instagr(?:am)?(?:\.com)?/+([^/?#\s]+)", re.IGNORECASE)
+USERNAME_RE = re.compile(r"^[a-z0-9._]+$")
 
 
 def load_env():
@@ -143,21 +144,23 @@ def normalize(raw):
     """URL/строка → чистый @username (lowercased, без @). None если непохоже на профиль."""
     if not raw:
         return None
-    s = str(raw).strip()
+    s = str(raw).strip().lstrip("@").lower()
     if not s:
         return None
-    # Простая строка-username без / и точки
-    if "/" not in s and "." not in s and not s.startswith("http"):
-        return s.lstrip("@").lower() or None
-    m = URL_RE.match(s)
-    if not m:
+    # Если выглядит как URL (есть «/», «http» или «instagram») — извлекаем
+    # username через regex; иначе считаем что вся строка — это уже username.
+    if "/" in s or s.startswith("http") or "instagr" in s:
+        m = URL_RE.search(s)
+        if not m:
+            return None
+        candidate = m.group(1).lstrip("@")
+    else:
+        candidate = s
+    if candidate in NON_USER_SEGMENTS:
         return None
-    username = m.group(1).lstrip("@").lower()
-    if username in NON_USER_SEGMENTS:
+    if not USERNAME_RE.match(candidate):
         return None
-    if not re.match(r"^[a-z0-9._]+$", username):
-        return None
-    return username
+    return candidate
 
 
 def migrate_entity(bx, entity):
