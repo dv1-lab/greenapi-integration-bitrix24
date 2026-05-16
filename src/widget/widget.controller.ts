@@ -166,6 +166,7 @@ export class WidgetController {
 				text,
 				authId: body.authId,
 				domain: body.domain,
+				username: usernameOverride || undefined,
 			});
 		}
 
@@ -327,6 +328,7 @@ export class WidgetController {
 		text: string;
 		authId?: string;
 		domain?: string;
+		username?: string;
 	}): Promise<any> {
 		const clientId = (input.clientId || "").trim().replace(/^@/, "");
 		if (!clientId) {
@@ -381,6 +383,11 @@ export class WidgetController {
 
 		// Зеркалим в B24 open line (Instagram Direct = 18) — как для других каналов.
 		// Это создаст карточку диалога в B24 чтобы оператор видел свою же отправку.
+		// displayName = @username клиента (без пробелов) — иначе B24 покажет
+		// «i2crm_ig_<id>» в имени chat-user.
+		const displayName = input.username && !/\s/.test(input.username)
+			? input.username
+			: undefined;
 		const mirrored = await this.mirrorToBitrix(
 			`i2crm_ig_${clientId}`,
 			input.text,
@@ -389,6 +396,7 @@ export class WidgetController {
 			input.domain,
 			lineDirect || undefined,
 			"instagram",
+			displayName,
 		);
 
 		return { ok: true, idMessage, chatId: `i2crm_ig_${clientId}`, idInstance: `i2crm:${accountId}`, line: lineDirect, mirrored };
@@ -398,6 +406,7 @@ export class WidgetController {
 		idKey: string, text: string, idMessage?: string,
 		authId?: string, domain?: string, lineOverride?: number,
 		provider: string = "wa",
+		displayNameOverride?: string,
 	): Promise<boolean | string> {
 		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
@@ -423,9 +432,12 @@ export class WidgetController {
 		// ВАЖНО: name без пробелов. B24 при создании лида/контакта разбивает
 		// name по пробелу и кладёт хвост в LAST_NAME. «WhatsApp 79228124797»
 		// → NAME=«WhatsApp», LAST_NAME=«79228124797» — мусор в карточке.
-		// Используем сам идентификатор как display-имя (B24 потом подменит на
-		// настоящее имя клиента когда он впервые сам что-то напишет).
-		const displayName = isPhoneLike ? (phoneE164 as string) : idKey;
+		// Для Instagram передаём username клиента (UF_CRM_IG_USERNAME) через
+		// displayNameOverride, иначе оператор увидит «i2crm_ig_<id>» вместо
+		// dima_kuznetsov.
+		const displayName = (displayNameOverride && !/\s/.test(displayNameOverride))
+			? displayNameOverride
+			: (isPhoneLike ? (phoneE164 as string) : idKey);
 		const userBlock: any = { id: userKey, name: displayName };
 		if (phoneE164) userBlock.phone = phoneE164;
 		const payload = {
