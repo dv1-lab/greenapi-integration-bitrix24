@@ -471,6 +471,25 @@ const B24_AUTH = ${authJs};
       dbg("resize err", String(e));
     }
   }
+  // Значения UF-полей из карточки клиента — подставим в @username input
+  // в зависимости от выбранного провайдера (Telegram → UF_CRM_IM_TELEGRAM,
+  // MAX → UF_CRM_MAX). Заполняется при загрузке crm.{lead,deal,contact}.get.
+  const entityUsernames = { telegram: "", max: "" };
+  function collectUsernames(data) {
+    const tg = (data && data.UF_CRM_IM_TELEGRAM) ? String(data.UF_CRM_IM_TELEGRAM).replace(/^@/, "") : "";
+    const mx = (data && data.UF_CRM_MAX) ? String(data.UF_CRM_MAX).replace(/^@/, "") : "";
+    if (tg && !entityUsernames.telegram) entityUsernames.telegram = tg;
+    if (mx && !entityUsernames.max) entityUsernames.max = mx;
+  }
+  function applyUsernameFromUf() {
+    const idInst = $("instance").value;
+    const p = (PROVIDER_MAP[idInst] || "").toLowerCase();
+    const input = $("tgUsername");
+    if (!input || input.value.trim()) return; // оператор уже ввёл — не перетираем
+    if (p === "telegram" && entityUsernames.telegram) input.value = entityUsernames.telegram;
+    else if (p === "max" && entityUsernames.max) input.value = entityUsernames.max;
+  }
+
   function updateSubtitle() {
     const idInst = $("instance").value;
     const channel = detectChannelLabel(idInst);
@@ -481,6 +500,9 @@ const B24_AUTH = ${authJs};
     $("tgUsernameBlock").style.display = hasUsername ? "block" : "none";
     const ch = $("tgUsernameChannel");
     if (ch) ch.textContent = p === "max" ? "MAX" : "Telegram";
+    // При смене инстанса — подставим значение из соответствующего UF-поля,
+    // если есть и оператор ещё не вводил руками.
+    applyUsernameFromUf();
     resizeB24();
   }
   fetch("/widget/instances").then(r => r.json()).then(list => {
@@ -608,21 +630,26 @@ const B24_AUTH = ${authJs};
       const data = res.data() || {};
       dbg(method + ".PHONE", data.PHONE);
       collectPhonesFromCrmRow(data, ENTITY_TYPE === "LEAD" ? "лид" : ENTITY_TYPE === "DEAL" ? "сделка" : "контакт");
+      collectUsernames(data);
+      dbg("UF usernames", entityUsernames);
 
       // Сделка — подтянем телефоны и MAX-чаты из связанного контакта
       if (method === "crm.deal.get" && data.CONTACT_ID) {
         loadExistingMaxChats("CONTACT", data.CONTACT_ID);
         BX24.callMethod("crm.contact.get", { id: data.CONTACT_ID }, function(r2) {
-          if (r2.error()) { dbg("contact error", r2.error_description()); loadPrefAndRender(); return; }
+          if (r2.error()) { dbg("contact error", r2.error_description()); loadPrefAndRender(); applyUsernameFromUf(); return; }
           const d2 = r2.data() || {};
           dbg("contact.PHONE", d2.PHONE);
           collectPhonesFromCrmRow(d2, "контакт");
+          collectUsernames(d2);
           loadPrefAndRender();
+          applyUsernameFromUf();
         });
       } else {
         // Для CONTACT/LEAD/COMPANY — ищем MAX-чаты в самой сущности
         loadExistingMaxChats(ENTITY_TYPE, entityId);
         loadPrefAndRender();
+        applyUsernameFromUf();
       }
     });
   });
