@@ -32,13 +32,17 @@ export class WebhooksController {
 	@Post("i2crm")
 	@HttpCode(HttpStatus.OK)
 	async handleI2crmWebhook(@Body() body: any, @Res() res: Response): Promise<void> {
-		// Заглушка для первого подключения Instagram через i2crm Public API.
-		// Логируем полный payload чтобы определить реальный формат incoming
-		// (OpenAPI spec описывает только outgoing FeedbackRequest, для incoming
-		// формат неявный). После первого реального сообщения от клиента —
-		// перепишу handler на основе живого payload.
-		this.logger.info("[i2crm webhook] payload (stub for first-message inspection):", body);
-		res.status(HttpStatus.OK).json({ success: true, note: "stub-receiver, full handler TBD" });
+		this.logger.info("[i2crm webhook] payload", body);
+		// Сразу 200 чтобы i2crm не ретраил при долгой обработке
+		res.status(HttpStatus.OK).json({ success: true });
+		try {
+			const result = await this.bitrix24Service.handleI2crmIncoming(body);
+			if (!result.success) {
+				this.logger.warn(`[i2crm webhook] skipped: ${result.reason}`);
+			}
+		} catch (error: any) {
+			this.logger.error("[i2crm webhook] handler error", error);
+		}
 	}
 
 	@Post("bitrix24")

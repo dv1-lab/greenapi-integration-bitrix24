@@ -197,15 +197,20 @@ export class Bitrix24Service extends BaseAdapter<
 					});
 					contactId = dup?.CONTACT?.[0];
 				}
-				if (!contactId && chatId && (channelLabel === "Telegram" || channelLabel === "MAX")) {
-					const ufName = channelLabel === "MAX" ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+				const chatIdUfMap: Record<string, string> = {
+					"Telegram": "UF_CRM_TG_CHAT_ID",
+					"MAX": "UF_CRM_MAX_CHAT_ID",
+					"Instagram": "UF_CRM_IG_CHAT_ID",
+				};
+				const chatIdUf = chatIdUfMap[channelLabel];
+				if (!contactId && chatId && chatIdUf) {
 					const found: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
-						filter: { [ufName]: chatId },
+						filter: { [chatIdUf]: chatId },
 						select: ["ID"],
 					});
 					if (Array.isArray(found) && found.length > 0) {
 						contactId = parseInt(found[0].ID, 10);
-						this.logger.info(`ensureLead: contact ${contactId} found via ${ufName}=${chatId}`);
+						this.logger.info(`ensureLead: contact ${contactId} found via ${chatIdUf}=${chatId}`);
 					}
 				}
 				if (!contactId) {
@@ -215,17 +220,16 @@ export class Bitrix24Service extends BaseAdapter<
 				// Если нашли контакт И есть chatId — сохраняем chatId в UF контакта
 				// (только если поле сейчас пустое). Это даст матч по chatId для
 				// будущих сообщений когда phone недоступен.
-				if (chatId && (channelLabel === "Telegram" || channelLabel === "MAX")) {
-					const ufName = channelLabel === "MAX" ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+				if (chatId && chatIdUf) {
 					try {
 						const contactData: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
-						const existingValue = contactData?.[ufName];
+						const existingValue = contactData?.[chatIdUf];
 						if (!existingValue) {
 							await this.callBitrix24Method(portalDomain, "crm.contact.update", {
 								id: contactId,
-								fields: { [ufName]: chatId },
+								fields: { [chatIdUf]: chatId },
 							});
-							this.logger.info(`ensureLead: saved ${ufName}=${chatId} on contact ${contactId}`);
+							this.logger.info(`ensureLead: saved ${chatIdUf}=${chatId} on contact ${contactId}`);
 						}
 					} catch (e: any) {
 						this.logger.warn(`ensureLead: failed to save chatId on contact ${contactId}: ${e.message}`);
@@ -422,6 +426,151 @@ export class Bitrix24Service extends BaseAdapter<
 		} catch (error: any) {
 			this.logger.error(`Failed to send message to Bitrix24: ${error.message}`);
 			throw error;
+		}
+	}
+
+	// Incoming Instagram-сообщение от i2crm Public API.
+	// Линии 18 (Direct) и 22 (Comment) уже зарегистрированы за CONNECTOR=i2crm
+	// в B24 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Отправляем через imconnector.send.messages
+	// напрямую, минуя Green API pipeline (i2crm — не Green API инстанс).
+	async handleI2crmIncoming(payload: any): Promise<{ success: boolean; reason?: string }> {
+		// Эхо: outgoing от оператора возвращается нам обратно — игнорируем.
+		if (payload?.incoming === false) {
+			return { success: true, reason: "outgoing-echo-ignored" };
+		}
+
+		const channel = String(payload?.channel || "");
+		const clientId = payload?.client_id;
+		const messageId = payload?.message_id;
+		const text = payload?.text || "";
+		const type = String(payload?.type || "text");
+		const username = payload?.client_username || "";
+		const clientName = payload?.client_name || username || `IG_${clientId}`;
+		const phone = payload?.phone_number || "";
+		const externalId = payload?.external_id || "";
+		const datetime = payload?.datetime;
+
+		if (!clientId || !messageId) {
+			return { success: false, reason: "missing client_id or message_id" };
+		}
+		if (channel !== "instdir" && channel !== "instcom") {
+			return { success: false, reason: `unsupported channel: ${channel}` };
+		}
+
+		// LINE id из env: instdir → I2CRM_LINE_ID_IG_DIRECT, instcom → I2CRM_LINE_ID_IG_COMMENT
+		const lineEnv = channel === "instdir" ? "I2CRM_LINE_ID_IG_DIRECT" : "I2CRM_LINE_ID_IG_COMMENT";
+		const lineId = Number(this.configService.get<string>(lineEnv));
+		if (!lineId || !Number.isFinite(lineId)) {
+			this.logger.error(`i2crm: ${lineEnv} not configured in .env`);
+			return { success: false, reason: `${lineEnv} not configured` };
+		}
+
+		const channelLabel = "Instagram";
+
+		// Берём первого (и единственного) пользователя из БД — у нас один портал.
+		// При мультипортале сюда передавать domain через query-параметр webhook URL.
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const user = users[0];
+		if (!user) {
+			this.logger.error(`i2crm: no Bitrix24 user in DB to dispatch incoming`);
+			return { success: false, reason: "no-user" };
+		}
+		const portalDomain = user.portalDomain;
+
+		// Лид/контакт по UF_CRM_IG_CHAT_ID (или phone если есть).
+		const phoneE164 = phone && /^\+?\d{10,15}$/.test(String(phone))
+			? (String(phone).startsWith("+") ? String(phone) : `+${phone}`)
+			: "";
+		try {
+			await this.ensureOpenLeadForPhone(
+				portalDomain,
+				phoneE164,
+				clientName,
+				lineId,
+				channelLabel,
+				String(clientId),
+			);
+		} catch (e: any) {
+			this.logger.warn(`i2crm: ensureLead failed (non-fatal): ${e.message}`);
+		}
+
+		// Сохраним username отдельно (косметика, ссылка @user).
+		if (username) {
+			try {
+				const dup: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+					filter: { UF_CRM_IG_CHAT_ID: String(clientId) },
+					select: ["ID", "UF_CRM_IG_USERNAME"],
+				});
+				if (Array.isArray(dup) && dup.length > 0) {
+					const cid = dup[0].ID;
+					if (!dup[0].UF_CRM_IG_USERNAME) {
+						await this.callBitrix24Method(portalDomain, "crm.contact.update", {
+							id: cid,
+							fields: { UF_CRM_IG_USERNAME: username },
+						});
+					}
+				}
+			} catch (e: any) {
+				this.logger.warn(`i2crm: failed to set IG_USERNAME: ${e.message}`);
+			}
+		}
+
+		// Текст для B24. Для comment-канала добавляем контекст что это коммент,
+		// поскольку Direct и Comment могут идти от одного клиента и нужно различать.
+		const isComment = channel === "instcom";
+		const postUrl = payload?.post_url || payload?.media_url || "";
+		const finalText = isComment
+			? `[Instagram комментарий${postUrl ? " к посту " + postUrl : ""}]\n${text}`
+			: text;
+
+		const userKey = `i2crm_ig_${clientId}`;
+		const ts = datetime ? Math.floor(new Date(datetime).getTime() / 1000) : Math.floor(Date.now() / 1000);
+
+		const messagePayload: any = {
+			user: {
+				id: userKey,
+				name: clientName,
+				url: username ? `https://instagram.com/${username}` : undefined,
+			},
+			message: {
+				id: String(messageId),
+				date: ts,
+				text: finalText,
+			},
+			chat: {
+				id: userKey,
+				name: clientName,
+				url: username ? `https://instagram.com/${username}` : undefined,
+			},
+			extra: { crm: "Y" },
+		};
+
+		// Аттачи (если type=image/video/audio/file)
+		if (type !== "text" && (payload?.media_url || payload?.media)) {
+			const mediaUrl = payload.media_url || payload.media?.url;
+			if (mediaUrl) {
+				messagePayload.message.files = [
+					{
+						url: mediaUrl,
+						name: payload.media?.file_name || `${type}.bin`,
+					},
+				];
+			}
+		}
+
+		try {
+			await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+				CONNECTOR: "i2crm",
+				LINE: lineId,
+				MESSAGES: [messagePayload],
+			});
+			this.logger.info(
+				`i2crm: sent to B24 line=${lineId} channel=${channel} client=${clientId} msg=${messageId} externalId=${externalId}`,
+			);
+			return { success: true };
+		} catch (err: any) {
+			this.logger.error(`i2crm: imconnector.send.messages failed: ${err.message}`);
+			return { success: false, reason: err.message };
 		}
 	}
 
