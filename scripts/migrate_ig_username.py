@@ -197,19 +197,25 @@ def migrate_entity(bx, entity):
             params["fields[UF_CRM_IG_USERNAME]"] = username
         if need_url:
             params["fields[UF_CRM_INSTAGRAM]"] = canonical_url
-        # Ретраи на OPERATION_TIME_LIMIT (B24 защита от частых апдейтов
-        # с накопленным временем за минуту). 3 попытки с возрастающим sleep.
-        for attempt in range(1, 4):
+        # OPERATION_TIME_LIMIT — B24 защита от накопленного CPU-времени за
+        # минуту. После ошибки квота восстанавливается ТОЛЬКО при полном
+        # простое 60-90 секунд (любой запрос продлевает блокировку).
+        # Стратегия: 5 попыток × возрастающий sleep 60/90/120/180/240 секунд.
+        retry_delays = [60, 90, 120, 180, 240]
+        for attempt, delay in enumerate(retry_delays, 1):
             try:
                 bx.call(f"crm.{entity}.update", params, timeout=60)
                 with lock:
                     if need_username: counters["migrated_username"] += 1
                     if need_url: counters["canonicalized_url"] += 1
+                # Базовая пауза между апдейтами — снижает нагрузку
+                time.sleep(0.5)
                 return
             except Exception as e:
                 msg = str(e)
-                if "OPERATION_TIME_LIMIT" in msg and attempt < 3:
-                    time.sleep(20 * attempt)  # 20s, 40s
+                if "OPERATION_TIME_LIMIT" in msg and attempt < len(retry_delays):
+                    print(f"  rate-limit on {entity} {item['ID']} attempt {attempt}, sleep {delay}s", flush=True)
+                    time.sleep(delay)
                     continue
                 with lock:
                     counters["errors"] += 1
@@ -240,9 +246,10 @@ def migrate_entity(bx, entity):
         if total is None:
             total = r.get("total", 0)
             print(f"  total={total}", flush=True)
-        # 2 параллельных потока — B24 OPERATION_TIME_LIMIT блокирует
-        # выше 4 r/s (накопленное CPU time за минуту)
-        with ThreadPoolExecutor(max_workers=2) as ex:
+        # 1 поток — B24 OPERATION_TIME_LIMIT блокирует уже на 2 потоках,
+        # квота восстанавливается только при полном простое. С 1 потоком
+        # + 0.5с sleep — ~1.5 r/s, безопасно.
+        with ThreadPoolExecutor(max_workers=1) as ex:
             futures = [ex.submit(update_one, it) for it in items]
             for _ in as_completed(futures):
                 pass
