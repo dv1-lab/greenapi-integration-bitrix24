@@ -461,7 +461,7 @@ const B24_AUTH = ${authJs};
         document.documentElement.scrollHeight,
         600
       );
-      BX24.resizeWindow(0, h + 40);
+      BX24.resizeWindow(0, h + 80);
     } catch (e) {
       dbg("resizeWindow err", String(e));
     }
