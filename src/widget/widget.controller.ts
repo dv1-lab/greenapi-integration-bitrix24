@@ -561,11 +561,19 @@ const B24_AUTH = ${authJs};
   // в зависимости от выбранного провайдера (Telegram → UF_CRM_IM_TELEGRAM,
   // MAX → UF_CRM_MAX). Заполняется при загрузке crm.{lead,deal,contact}.get.
   const entityUsernames = { telegram: "", max: "" };
+  // Стабильный chatId клиента (внутренний user_id мессенджера). Приоритет
+  // выше username — chatId не меняется при смене ника. Заполняется тем же
+  // путём (UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID на сущности).
+  const entityChatIds = { telegram: "", max: "" };
   function collectUsernames(data) {
     const tg = (data && data.UF_CRM_IM_TELEGRAM) ? String(data.UF_CRM_IM_TELEGRAM).replace(/^@/, "") : "";
     const mx = (data && data.UF_CRM_MAX) ? String(data.UF_CRM_MAX).replace(/^@/, "") : "";
     if (tg && !entityUsernames.telegram) entityUsernames.telegram = tg;
     if (mx && !entityUsernames.max) entityUsernames.max = mx;
+    const tgId = (data && data.UF_CRM_TG_CHAT_ID) ? String(data.UF_CRM_TG_CHAT_ID) : "";
+    const mxId = (data && data.UF_CRM_MAX_CHAT_ID) ? String(data.UF_CRM_MAX_CHAT_ID) : "";
+    if (tgId && !entityChatIds.telegram) entityChatIds.telegram = tgId;
+    if (mxId && !entityChatIds.max) entityChatIds.max = mxId;
   }
   function applyUsernameFromUf() {
     const idInst = $("instance").value;
@@ -804,17 +812,25 @@ const B24_AUTH = ${authJs};
     const text = $("text").value.trim();
     const idInstance = $("instance").value || undefined;
     const usernameOverride = $("tgUsername").value.trim().replace(/^@/, "");
-    // Если виджет знает chatId этого клиента из его B24-карточки — используем его.
-    // Тогда phone оператору вводить не обязательно (для MAX/Telegram phone бесполезен,
-    // там общение по chatId, а phone Green API не отдаёт privacy).
+    // Источники chatId в порядке приоритета:
+    //   1. UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID — стабильный, верифицированный
+    //      (adapter записал при первом ответе клиента).
+    //   2. MAX_CHATS_BY_LINE — из IMOPENLINES_SESSION-активностей B24-сущности.
+    //      Менее надёжно (может быть chatId старой/чужой сессии).
     let chatIdOverride;
     const inst = INSTANCE_BY_ID[idInstance];
     const instProvider = inst ? (inst.provider || "wa").toLowerCase() : "wa";
-    if (inst && instProvider !== "wa" && inst.bitrixLine != null) {
+    if (instProvider === "telegram" && entityChatIds.telegram) {
+      chatIdOverride = entityChatIds.telegram;
+      dbg("using UF_CRM_TG_CHAT_ID", chatIdOverride);
+    } else if (instProvider === "max" && entityChatIds.max) {
+      chatIdOverride = entityChatIds.max;
+      dbg("using UF_CRM_MAX_CHAT_ID", chatIdOverride);
+    } else if (inst && instProvider !== "wa" && inst.bitrixLine != null) {
       const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
       if (known) {
         chatIdOverride = known;
-        dbg("using existing chatId for " + instProvider, known);
+        dbg("using existing chatId from activities", known);
       }
     }
     if (!text) {
