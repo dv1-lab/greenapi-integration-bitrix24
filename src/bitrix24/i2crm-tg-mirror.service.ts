@@ -20,7 +20,8 @@ interface MirrorState {
 export class I2crmTgMirrorService {
 	private readonly logger = GreenApiLogger.getInstance(I2crmTgMirrorService.name);
 	private readonly botToken: string | undefined;
-	private readonly groupId: string | undefined;
+	private readonly groupIdDirect: string | undefined;
+	private readonly groupIdComment: string | undefined;
 	private readonly mapPath: string;
 	private state: MirrorState = { topics: {}, cardsPosted: {} };
 	private mapLoaded = false;
@@ -28,12 +29,26 @@ export class I2crmTgMirrorService {
 
 	constructor(private readonly configService: ConfigService) {
 		this.botToken = this.configService.get<string>("TG_MIRROR_BOT_TOKEN");
-		this.groupId = this.configService.get<string>("I2CRM_TG_MIRROR_GROUP_ID");
+		// Direct и Comments — в разные группы. Если *_DIRECT не задано —
+		// fallback на общую I2CRM_TG_MIRROR_GROUP_ID (обратная совместимость).
+		const fallback = this.configService.get<string>("I2CRM_TG_MIRROR_GROUP_ID");
+		this.groupIdDirect = this.configService.get<string>("I2CRM_TG_MIRROR_GROUP_ID_DIRECT") || fallback;
+		this.groupIdComment = this.configService.get<string>("I2CRM_TG_MIRROR_GROUP_ID_COMMENT") || fallback;
 		this.mapPath = this.configService.get<string>("I2CRM_TG_MIRROR_TOPIC_MAP") || "/app/data/i2crm-topics.json";
 	}
 
 	get enabled(): boolean {
-		return !!(this.botToken && this.groupId);
+		return !!(this.botToken && (this.groupIdDirect || this.groupIdComment));
+	}
+
+	private groupForChannel(channel: string | undefined): string | undefined {
+		return channel === "instcom" ? this.groupIdComment : this.groupIdDirect;
+	}
+
+	// Ключ маппинга — `<groupId>:<clientId>`. Один клиент может писать
+	// и в Direct и в Comments (разные группы) — у него будут два разных топика.
+	private topicKey(groupId: string, clientId: string): string {
+		return `${groupId}:${clientId}`;
 	}
 
 	private async loadMap(): Promise<void> {
@@ -84,22 +99,34 @@ export class I2crmTgMirrorService {
 		return r.data?.result;
 	}
 
-	private async createTopic(clientId: string, name: string): Promise<number> {
+	private async createTopic(groupId: string, clientId: string, name: string): Promise<number> {
 		const result = await this.botApi("createForumTopic", {
-			chat_id: this.groupId,
+			chat_id: groupId,
 			name: name.slice(0, 128),
 		});
 		const topicId = result.message_thread_id;
-		this.state.topics[clientId] = topicId;
+		this.state.topics[this.topicKey(groupId, clientId)] = topicId;
 		await this.persistMap();
-		this.logger.info(`tg-mirror: created topic ${topicId} for client ${clientId} (${name})`);
+		this.logger.info(`tg-mirror: created topic ${topicId} in group ${groupId} for client ${clientId} (${name})`);
 		return topicId;
 	}
 
-	private async findOrCreateTopic(clientId: string, name: string): Promise<number> {
+	private async findOrCreateTopic(groupId: string, clientId: string, name: string): Promise<number> {
 		await this.loadMap();
-		if (this.state.topics[clientId]) return this.state.topics[clientId];
-		return this.createTopic(clientId, name);
+		const key = this.topicKey(groupId, clientId);
+		if (this.state.topics[key]) return this.state.topics[key];
+		// Legacy: один клиент мог быть сохранён как просто `<clientId>` (без groupId)
+		// до разделения групп. Подхватываем такие записи в группу Comments
+		// (где раньше был fallback).
+		if (groupId === this.groupIdComment && this.state.topics[clientId]) {
+			const oldTopic = this.state.topics[clientId];
+			this.state.topics[key] = oldTopic;
+			delete this.state.topics[clientId];
+			await this.persistMap();
+			this.logger.info(`tg-mirror: migrated legacy topic ${oldTopic} to key ${key}`);
+			return oldTopic;
+		}
+		return this.createTopic(groupId, clientId, name);
 	}
 
 	private buildCaption(payload: any): string {
@@ -124,39 +151,45 @@ export class I2crmTgMirrorService {
 			this.logger.warn("tg-mirror: payload missing client_id, skipping");
 			return;
 		}
+		const channel = String(payload?.channel || "");
+		const groupId = this.groupForChannel(channel);
+		if (!groupId) {
+			this.logger.warn(`tg-mirror: no group configured for channel ${channel}`);
+			return;
+		}
 		const username = payload?.client_username;
 		const clientName = payload?.client_name || username || `IG_${clientId}`;
 		const topicName = username ? `@${username}` : clientName;
 
 		try {
-			const topicId = await this.findOrCreateTopic(clientId, topicName);
+			const topicId = await this.findOrCreateTopic(groupId, clientId, topicName);
 			const caption = this.buildCaption(payload);
 			const mediaUrl = payload?.media_url || payload?.media?.url;
 			const type = String(payload?.type || "text");
 
 			if (mediaUrl && (type === "image" || type === "photo")) {
 				await this.botApi("sendPhoto", {
-					chat_id: this.groupId,
+					chat_id: groupId,
 					message_thread_id: topicId,
 					photo: mediaUrl,
 					caption,
 				});
 			} else if (mediaUrl && type === "video") {
 				await this.botApi("sendVideo", {
-					chat_id: this.groupId,
+					chat_id: groupId,
 					message_thread_id: topicId,
 					video: mediaUrl,
 					caption,
 				});
 			} else {
 				await this.botApi("sendMessage", {
-					chat_id: this.groupId,
+					chat_id: groupId,
 					message_thread_id: topicId,
 					text: caption,
 					disable_web_page_preview: false,
 				});
 			}
-			this.logger.info(`tg-mirror: mirrored msg to topic ${topicId} (client=${clientId})`);
+			this.logger.info(`tg-mirror: mirrored msg to group ${groupId} topic ${topicId} (client=${clientId} channel=${channel})`);
 		} catch (e: any) {
 			this.logger.error(`tg-mirror: failed for client ${clientId}: ${e.message}`);
 		}
@@ -183,9 +216,15 @@ export class I2crmTgMirrorService {
 			return;
 		}
 
-		const topicId = this.state.topics[input.clientId];
+		const groupId = this.groupForChannel(input.channel);
+		if (!groupId) {
+			this.logger.warn(`tg-mirror: no group for channel ${input.channel}, cannot post card`);
+			return;
+		}
+		const topicId = this.state.topics[this.topicKey(groupId, input.clientId)]
+			|| this.state.topics[input.clientId]; // legacy fallback
 		if (!topicId) {
-			this.logger.warn(`tg-mirror: no topic for client ${input.clientId}, cannot post card`);
+			this.logger.warn(`tg-mirror: no topic in group ${groupId} for client ${input.clientId}, cannot post card`);
 			return;
 		}
 
@@ -204,7 +243,7 @@ export class I2crmTgMirrorService {
 
 		try {
 			await this.botApi("sendMessage", {
-				chat_id: this.groupId,
+				chat_id: groupId,
 				message_thread_id: topicId,
 				text,
 				parse_mode: "HTML",
@@ -213,7 +252,7 @@ export class I2crmTgMirrorService {
 			});
 			this.state.cardsPosted[leadKey] = true;
 			await this.persistMap();
-			this.logger.info(`tg-mirror: posted client card for lead ${leadKey} → topic ${topicId}`);
+			this.logger.info(`tg-mirror: posted client card for lead ${leadKey} → group ${groupId} topic ${topicId}`);
 		} catch (e: any) {
 			this.logger.error(`tg-mirror: failed to post card for lead ${leadKey}: ${e.message}`);
 		}
