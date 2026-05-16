@@ -175,8 +175,9 @@ export class Bitrix24Service extends BaseAdapter<
 		senderName: string,
 		lineId: number,
 		channelLabel: string = "WhatsApp",
+		chatId?: string,
 	): Promise<void> {
-		const lockKey = `${portalDomain}:${phoneE164}`;
+		const lockKey = `${portalDomain}:${phoneE164}:${chatId || ""}`;
 		const existing = this._ensureLeadLocks.get(lockKey);
 		if (existing) {
 			await existing;
@@ -184,15 +185,51 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const task = (async () => {
 			try {
-				// 1. Поиск контакта по phone
-				const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
-					type: "PHONE",
-					values: [phoneE164],
-				});
-				const contactId: number | undefined = dup?.CONTACT?.[0];
+				// 1. Поиск контакта по phone. Если phone пустой/невалидный —
+				// ищем по сохранённому chatId в UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID
+				// (для случая когда клиент пишет с приватным phone в MAX/Telegram).
+				let contactId: number | undefined;
+				const hasUsablePhone = /^\+?\d{10,15}$/.test(phoneE164);
+				if (hasUsablePhone) {
+					const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
+						type: "PHONE",
+						values: [phoneE164],
+					});
+					contactId = dup?.CONTACT?.[0];
+				}
+				if (!contactId && chatId && (channelLabel === "Telegram" || channelLabel === "MAX")) {
+					const ufName = channelLabel === "MAX" ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+					const found: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+						filter: { [ufName]: chatId },
+						select: ["ID"],
+					});
+					if (Array.isArray(found) && found.length > 0) {
+						contactId = parseInt(found[0].ID, 10);
+						this.logger.info(`ensureLead: contact ${contactId} found via ${ufName}=${chatId}`);
+					}
+				}
 				if (!contactId) {
-					this.logger.info(`ensureLead: no existing contact for ${phoneE164}, leaving creation to B24`);
+					this.logger.info(`ensureLead: no existing contact for ${phoneE164}/${chatId || "-"}, leaving creation to B24`);
 					return;
+				}
+				// Если нашли контакт И есть chatId — сохраняем chatId в UF контакта
+				// (только если поле сейчас пустое). Это даст матч по chatId для
+				// будущих сообщений когда phone недоступен.
+				if (chatId && (channelLabel === "Telegram" || channelLabel === "MAX")) {
+					const ufName = channelLabel === "MAX" ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+					try {
+						const contactData: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
+						const existingValue = contactData?.[ufName];
+						if (!existingValue) {
+							await this.callBitrix24Method(portalDomain, "crm.contact.update", {
+								id: contactId,
+								fields: { [ufName]: chatId },
+							});
+							this.logger.info(`ensureLead: saved ${ufName}=${chatId} on contact ${contactId}`);
+						}
+					} catch (e: any) {
+						this.logger.warn(`ensureLead: failed to save chatId on contact ${contactId}: ${e.message}`);
+					}
 				}
 
 				// 2. Открытые лиды (фильтр: статус не F=failed, не S=success)
@@ -312,17 +349,23 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 			}
 
-			// ensureLead имеет смысл только когда есть телефон (через него ищем
-			// существующего контакта). Если phone достали через getContactInfo —
-			// он тоже сюда попадёт. Иначе B24 сам создаст лид с CRM_CREATE=lead.
-			if (line != null && phoneE164) {
-				await this.ensureOpenLeadForPhone(
-					instance.user.portalDomain,
-					phoneE164,
-					message.senderName || `${channelLabel} ${message.phone}`,
-					line,
-					channelLabel,
-				);
+			// ensureLead имеет смысл когда есть phone ИЛИ когда есть chatId для
+			// поиска по сохранённому UF_CRM_*_CHAT_ID. Для MAX/Telegram message.phone
+			// — это chatId клиента (внутренний user_id). Передаём в ensureLead как
+			// chatId-параметр чтобы (а) найти контакт по UF, (б) сохранить
+			// chatId в UF контакта после привязки.
+			if (line != null) {
+				const chatIdForUf = (instanceProvider === "max" || instanceProvider === "telegram") ? message.phone : undefined;
+				if (phoneE164 || chatIdForUf) {
+					await this.ensureOpenLeadForPhone(
+						instance.user.portalDomain,
+						phoneE164 || "",
+						message.senderName || `${channelLabel} ${message.phone}`,
+						line,
+						channelLabel,
+						chatIdForUf,
+					);
+				}
 			}
 			// Префикс для user.id/chat.id. WA → `wa_` (там идентификатор реально
 			// телефон). MAX и Telegram → `sc_`. Раньше Telegram использовал `wa_`

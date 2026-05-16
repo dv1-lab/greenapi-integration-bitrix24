@@ -259,24 +259,26 @@ export class WidgetController {
 		const lineForMirror = inst.bitrixLine || undefined;
 		const mirrorKey = (provider === "max" || provider === "telegram") ? chatId : phone;
 
-		// Если оператор ввёл реальный phone — попробуем найти существующий B24-контакт
-		// и подвязать к нему лид (как делает adapter для incoming через
-		// ensureOpenLeadForPhone). Без этого виджет создавал свежий лид «номер -
-		// Telegram 79584983354» даже если у клиента уже есть контакт+открытый лид.
-		if (lineForMirror && phone.length >= 10 && phone.length <= 15 && inst.user?.portalDomain) {
-			const phoneE164 = `+${phone}`;
+		// Поиск существующего B24-контакта и привязка к нему. Для WA — по phone.
+		// Для MAX/Telegram — по сохранённому chatId в UF_CRM_*_CHAT_ID
+		// (адаптер заполняет это поле при incoming, если уже было общение).
+		if (lineForMirror && inst.user?.portalDomain) {
+			const phoneE164 = (phone.length >= 10 && phone.length <= 15) ? `+${phone}` : "";
 			const channelLabel = provider === "max" ? "MAX" : provider === "telegram" ? "Telegram" : "WhatsApp";
-			try {
-				await this.bitrix24.ensureOpenLeadForPhone(
-					inst.user.portalDomain,
-					phoneE164,
-					phoneE164,
-					lineForMirror,
-					channelLabel,
-				);
-			} catch (e: any) {
-				// Не блокируем отправку при ошибке поиска контакта
-				console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
+			const chatIdForUf = (provider === "max" || provider === "telegram") ? chatId : undefined;
+			if (phoneE164 || chatIdForUf) {
+				try {
+					await this.bitrix24.ensureOpenLeadForPhone(
+						inst.user.portalDomain,
+						phoneE164,
+						phoneE164 || (chatIdForUf || ""),
+						lineForMirror,
+						channelLabel,
+						chatIdForUf,
+					);
+				} catch (e: any) {
+					console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
+				}
 			}
 		}
 
