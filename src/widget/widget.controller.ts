@@ -450,6 +450,22 @@ const B24_AUTH = ${authJs};
     if (p === "telegram") return "Telegram";
     return "WhatsApp";
   }
+  // B24 placement iframe имеет фиксированную высоту — без resizeWindow контент
+  // обрезается снизу (особенно при показе блока @username). Дёргаем после
+  // каждого изменения видимости/контента.
+  function resizeB24() {
+    if (typeof BX24 === "undefined" || !BX24.resizeWindow) return;
+    try {
+      const h = Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight,
+        600
+      );
+      BX24.resizeWindow(0, h + 40);
+    } catch (e) {
+      dbg("resizeWindow err", String(e));
+    }
+  }
   function updateSubtitle() {
     const idInst = $("instance").value;
     const channel = detectChannelLabel(idInst);
@@ -457,6 +473,7 @@ const B24_AUTH = ${authJs};
     // Telegram: показываем поле @username (только для него — у MAX/WA username нет)
     const isTg = (PROVIDER_MAP[idInst] || "").toLowerCase() === "telegram";
     $("tgUsernameBlock").style.display = isTg ? "block" : "none";
+    resizeB24();
   }
   fetch("/widget/instances").then(r => r.json()).then(list => {
     const sel = $("instance");
@@ -513,6 +530,11 @@ const B24_AUTH = ${authJs};
   }
 
   BX24.init(function() {
+    // Растягиваем iframe сразу после init и потом ещё раз через 250мс,
+    // когда DOM полностью отрендерится (instances загружены и т.п.).
+    resizeB24();
+    setTimeout(resizeB24, 250);
+    setTimeout(resizeB24, 800);
     const info = BX24.placement.info() || {};
     dbg("placement.info", info);
 
