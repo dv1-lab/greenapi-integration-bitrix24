@@ -378,7 +378,7 @@ export class WidgetController {
 
   <div id="tgUsernameBlock" style="display:none; margin-top:8px;">
     <label for="tgUsername">@username <span id="tgUsernameChannel">Telegram</span> <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
-    <input id="tgUsername" placeholder="@alexandra_run или alexandra_run" autocomplete="off">
+    <input id="tgUsername" placeholder="ivan_ivanov" autocomplete="off">
     <div class="hint">Можно с символом @ в начале или без. Используется только для Telegram и MAX (в обоих есть никнеймы).</div>
   </div>
 
