@@ -542,12 +542,20 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 
+		let sessionInfo: { sessionId?: string; chatId?: string } = {};
 		try {
-			await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+			const response: any = await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
 				CONNECTOR: "social_connector",
 				LINE: lineId,
 				MESSAGES: [messagePayload],
 			});
+			// Извлекаем session.ID и session.CHAT_ID из ответа — нужны для карточки
+			// клиента в TG-зеркало.
+			const r0 = response?.DATA?.RESULT?.[0];
+			if (r0?.session) {
+				sessionInfo.sessionId = String(r0.session.ID || "");
+				sessionInfo.chatId = String(r0.session.CHAT_ID || "");
+			}
 			this.logger.info(
 				`i2crm: sent to B24 line=${lineId} channel=${channel} client=${clientId} msg=${messageId} externalId=${externalId}`,
 			);
@@ -568,7 +576,8 @@ export class Bitrix24Service extends BaseAdapter<
 		// → нельзя матчить контакт по chatId при следующих сообщениях, что
 		// ломает кросс-канальную связку (пример: тот же IG-клиент звонит по
 		// phone → создаётся второй контакт без связи с IG).
-		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel).catch((e) => {
+		// Передаём session/chat для карточки клиента в TG-mirror.
+		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo).catch((e) => {
 			this.logger.warn(`i2crm: backfill UF failed (non-fatal): ${e.message}`);
 		});
 
@@ -580,6 +589,8 @@ export class Bitrix24Service extends BaseAdapter<
 		clientId: string,
 		username: string,
 		channelLabel: string,
+		channel: string = "instdir",
+		sessionInfo: { sessionId?: string; chatId?: string } = {},
 	): Promise<void> {
 		const userCode = `i2crm_ig_${clientId}`;
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -628,10 +639,12 @@ export class Bitrix24Service extends BaseAdapter<
 
 				let contactId: number | undefined;
 				let crmLineId: number | undefined;
+				let leadTitle: string | undefined;
 				if (ownerType === 1) {
 					// LEAD
 					const lead: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: ownerId });
 					contactId = lead?.CONTACT_ID ? parseInt(lead.CONTACT_ID, 10) : undefined;
+					leadTitle = lead?.TITLE;
 					if (username && lead?.UF_CRM_IG_USERNAME && String(lead.UF_CRM_IG_USERNAME) !== username) {
 						usernameChange = { oldName: String(lead.UF_CRM_IG_USERNAME), newName: username };
 					}
@@ -643,6 +656,16 @@ export class Bitrix24Service extends BaseAdapter<
 						});
 						this.logger.info(`i2crm: backfilled UF on lead ${ownerId} (${channelLabel} ${clientId}, fields: ${Object.keys(upd).join(",")})`);
 					}
+					// Карточка клиента в TG-зеркало (один раз на лид, идемпотентно).
+					this.i2crmTgMirror.postClientCard({
+						clientId,
+						leadId: ownerId,
+						leadTitle,
+						sessionId: sessionInfo.sessionId,
+						chatId: sessionInfo.chatId,
+						channel,
+						portalDomain,
+					}).catch((e) => this.logger.warn(`i2crm: tg-mirror postClientCard failed: ${e.message}`));
 				} else if (ownerType === 3) {
 					// CONTACT (редкий случай — обычно owner это лид)
 					contactId = ownerId;

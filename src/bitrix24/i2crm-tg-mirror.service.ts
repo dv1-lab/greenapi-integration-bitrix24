@@ -12,12 +12,17 @@ import { GreenApiLogger } from "@green-api/greenapi-integration";
 // Хранилище маппинга client_id → topic_id — JSON-файл (на одном портале простой
 // надёжный вариант, если потребуется — мигрировать в Prisma table).
 @Injectable()
+interface MirrorState {
+	topics: Record<string, number>;       // clientId → topic_id
+	cardsPosted: Record<string, true>;    // leadId → true (карточка клиента уже постилась)
+}
+
 export class I2crmTgMirrorService {
 	private readonly logger = GreenApiLogger.getInstance(I2crmTgMirrorService.name);
 	private readonly botToken: string | undefined;
 	private readonly groupId: string | undefined;
 	private readonly mapPath: string;
-	private map: Record<string, number> = {};
+	private state: MirrorState = { topics: {}, cardsPosted: {} };
 	private mapLoaded = false;
 	private writeLock: Promise<void> = Promise.resolve();
 
@@ -36,15 +41,24 @@ export class I2crmTgMirrorService {
 		try {
 			if (fs.existsSync(this.mapPath)) {
 				const raw = fs.readFileSync(this.mapPath, "utf-8");
-				this.map = JSON.parse(raw || "{}");
+				const parsed = JSON.parse(raw || "{}");
+				// Совместимость со старым форматом `{ clientId: topicId }`.
+				if (parsed && typeof parsed === "object" && parsed.topics) {
+					this.state = {
+						topics: parsed.topics || {},
+						cardsPosted: parsed.cardsPosted || {},
+					};
+				} else {
+					this.state = { topics: parsed || {}, cardsPosted: {} };
+				}
 			} else {
 				const dir = path.dirname(this.mapPath);
 				if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-				fs.writeFileSync(this.mapPath, "{}");
+				fs.writeFileSync(this.mapPath, JSON.stringify(this.state));
 			}
 		} catch (e: any) {
-			this.logger.warn(`tg-mirror: failed to load map from ${this.mapPath}: ${e.message}`);
-			this.map = {};
+			this.logger.warn(`tg-mirror: failed to load state from ${this.mapPath}: ${e.message}`);
+			this.state = { topics: {}, cardsPosted: {} };
 		}
 		this.mapLoaded = true;
 	}
@@ -52,9 +66,9 @@ export class I2crmTgMirrorService {
 	private async persistMap(): Promise<void> {
 		const job = this.writeLock.then(async () => {
 			try {
-				fs.writeFileSync(this.mapPath, JSON.stringify(this.map, null, 2));
+				fs.writeFileSync(this.mapPath, JSON.stringify(this.state, null, 2));
 			} catch (e: any) {
-				this.logger.error(`tg-mirror: failed to persist map: ${e.message}`);
+				this.logger.error(`tg-mirror: failed to persist state: ${e.message}`);
 			}
 		});
 		this.writeLock = job;
@@ -76,7 +90,7 @@ export class I2crmTgMirrorService {
 			name: name.slice(0, 128),
 		});
 		const topicId = result.message_thread_id;
-		this.map[clientId] = topicId;
+		this.state.topics[clientId] = topicId;
 		await this.persistMap();
 		this.logger.info(`tg-mirror: created topic ${topicId} for client ${clientId} (${name})`);
 		return topicId;
@@ -84,7 +98,7 @@ export class I2crmTgMirrorService {
 
 	private async findOrCreateTopic(clientId: string, name: string): Promise<number> {
 		await this.loadMap();
-		if (this.map[clientId]) return this.map[clientId];
+		if (this.state.topics[clientId]) return this.state.topics[clientId];
 		return this.createTopic(clientId, name);
 	}
 
@@ -146,5 +160,70 @@ export class I2crmTgMirrorService {
 		} catch (e: any) {
 			this.logger.error(`tg-mirror: failed for client ${clientId}: ${e.message}`);
 		}
+	}
+
+	// Постит карточку клиента в существующий топик: B24-лид, session, chat.
+	// Идемпотентно — каждый leadId постится один раз (хранится в state.cardsPosted).
+	// Вызывается из backfillIgUfFields после нахождения OWNER_ID.
+	async postClientCard(input: {
+		clientId: string;
+		leadId: number;
+		leadTitle?: string;
+		sessionId?: string;
+		chatId?: string;
+		channel: "instdir" | "instcom" | string;
+		portalDomain?: string;
+	}): Promise<void> {
+		if (!this.enabled) return;
+		await this.loadMap();
+
+		const leadKey = String(input.leadId);
+		if (this.state.cardsPosted[leadKey]) {
+			this.logger.debug(`tg-mirror: card already posted for lead ${leadKey}, skipping`);
+			return;
+		}
+
+		const topicId = this.state.topics[input.clientId];
+		if (!topicId) {
+			this.logger.warn(`tg-mirror: no topic for client ${input.clientId}, cannot post card`);
+			return;
+		}
+
+		const portal = input.portalDomain || "1begovoy.bitrix24.ru";
+		const channelLabel = input.channel === "instcom" ? "Comments" : "Direct";
+		const title = input.leadTitle ? this.escapeHtml(input.leadTitle) : "";
+		const sessionPart = input.sessionId && input.chatId
+			? `\nSession ID: ${input.sessionId} · Chat: chat${input.chatId}`
+			: input.sessionId
+				? `\nSession ID: ${input.sessionId}`
+				: "";
+		const text = `📋 Карточка клиента (Instagram ${channelLabel})\n` +
+			`Лид Bitrix: <a href="https://${portal}/crm/lead/details/${input.leadId}/">#${input.leadId}</a>` +
+			(title ? `\nИмя: ${title}` : "") +
+			sessionPart;
+
+		try {
+			await this.botApi("sendMessage", {
+				chat_id: this.groupId,
+				message_thread_id: topicId,
+				text,
+				parse_mode: "HTML",
+				disable_web_page_preview: true,
+				disable_notification: true,
+			});
+			this.state.cardsPosted[leadKey] = true;
+			await this.persistMap();
+			this.logger.info(`tg-mirror: posted client card for lead ${leadKey} → topic ${topicId}`);
+		} catch (e: any) {
+			this.logger.error(`tg-mirror: failed to post card for lead ${leadKey}: ${e.message}`);
+		}
+	}
+
+	private escapeHtml(s: string): string {
+		return s
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;");
 	}
 }
