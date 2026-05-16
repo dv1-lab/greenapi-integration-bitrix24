@@ -1200,53 +1200,61 @@ export class Bitrix24Service extends BaseAdapter<
 		if (!targetKey) {
 			return { success: false, message: "I2CRM_TARGET_KEY_PUBLICAPI not configured" };
 		}
-		const sourceId = isDirect
-			? Number(this.configService.get<string>("I2CRM_SOURCE_IG_DIRECT"))
-			: Number(this.configService.get<string>("I2CRM_SOURCE_IG_COMMENT"));
-		const domain = isDirect ? "instagram-direct" : "instagram-comment";
+		// source — это account_id IG бизнес-аккаунта (8215238716), не source.id i2crm.
+		// Эмпирически выяснено 2026-05-16: при source=14713 (внутренний i2crm-id) API
+		// отвечал «Нет активного канала для написания ответов в Директ». source=account_id работает.
+		const accountId = this.configService.get<string>("I2CRM_INSTAGRAM_ACCOUNT_ID");
+		if (!accountId) {
+			return { success: false, message: "I2CRM_INSTAGRAM_ACCOUNT_ID not configured" };
+		}
 
 		const body: Record<string, any> = {
-			domain,
-			source: sourceId,
-			client: Number(clientId),
+			domain: "instagram",
+			source: String(accountId),
+			client: String(clientId),
+			type: isDirect ? "direct" : "comment",
 		};
 		if (text) body.text = text;
 		if (files.length > 0) {
-			// Простейший вариант: первый файл как photo, остальные тоже photo[].
-			// Тип файла определяется получателем; для IG Direct — обычно изображения.
 			body.photo = files.map((f: any) => f.url);
 		}
-		if (isDirect) {
-			body.type = "direct";
-		} else {
-			body.type = "comment";
-			// Для comment: нужен media (post id) и comment (parent comment id).
-			// Контекст потерян после перехода через B24 — оставляем i2crm
-			// сопоставлять по client_id + последнему сообщению клиенту.
-		}
+		// Для comment: media (post id) и comment (parent comment id) обязательны
+		// по спеке, но контекст обычно теряется в B24-pipeline. i2crm сам сопоставляет
+		// по client_id с последним комментарием пользователя (см. описание поля).
 
 		this.logger.info(`i2crm outgoing: POST ${apiBase}/target/feedback`, {
-			domain, source: sourceId, client: clientId, hasText: !!text, files: files.length,
+			domain: body.domain, source: body.source, client: body.client, type: body.type,
+			hasText: !!text, files: files.length,
 		});
 
 		try {
 			const resp = await axios.post(`${apiBase}/target/feedback`, body, {
 				params: { key: targetKey },
 				timeout: 15000,
+				// Не выкидываем axios-исключение при 4xx/5xx — i2crm возвращает 200 с error
+				// в теле даже для бизнес-ошибок, нужна единая обработка.
+				validateStatus: () => true,
 			});
 			const result = resp.data;
+			// i2crm возвращает {error: false, data: {...}} при успехе, {error: "<msg>", data: {...}} при ошибке.
+			if (result?.error) {
+				this.logger.error(`i2crm outgoing rejected by i2crm API`, {
+					httpStatus: resp.status,
+					error: result.error,
+					data: result.data,
+				});
+				return { success: false, message: `i2crm: ${typeof result.error === "string" ? result.error : "validation failed"}` };
+			}
 			this.logger.info(`i2crm outgoing OK`, { result });
+			const externalMessageId = result?.data?.id || result?.data?.external_ids?.[0] || null;
 			return {
 				success: true,
 				message: "Sent to i2crm",
-				data: { i2crmResponse: result, externalMessageId: result?.message_id || result?.id || null, externalChatId: clientId },
+				data: { i2crmResponse: result, externalMessageId, externalChatId: clientId },
 			};
 		} catch (err: any) {
-			this.logger.error(`i2crm outgoing failed: ${err.message}`, {
-				response: err.response?.data,
-				status: err.response?.status,
-			});
-			return { success: false, message: `i2crm API error: ${err.message}` };
+			this.logger.error(`i2crm outgoing transport error: ${err.message}`);
+			return { success: false, message: `i2crm transport: ${err.message}` };
 		}
 	}
 
