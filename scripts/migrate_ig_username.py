@@ -166,7 +166,8 @@ def normalize(raw):
 def migrate_entity(bx, entity):
     print(f"\n=== migrating {entity} ===")
     start = 0
-    migrated = 0
+    migrated_username = 0
+    canonicalized_url = 0
     skipped_already = 0
     skipped_no_username = 0
     errors = 0
@@ -193,37 +194,55 @@ def migrate_entity(bx, entity):
             total = r.get("total", 0)
             print(f"  total={total}")
         for it in items:
-            url = it.get("UF_CRM_INSTAGRAM")
-            cur = it.get("UF_CRM_IG_USERNAME")
-            if cur:
-                skipped_already += 1
-                continue
-            username = normalize(url)
+            url_raw = it.get("UF_CRM_INSTAGRAM")
+            cur_username = it.get("UF_CRM_IG_USERNAME")
+            username = normalize(url_raw)
             if not username:
                 skipped_no_username += 1
                 continue
+
+            fields = {}
+            if not cur_username:
+                fields["fields[UF_CRM_IG_USERNAME]"] = username
+            # Каноничный URL для кликабельности. Если в поле уже лежит точно
+            # такой же — не трогаем (минус один лишний запрос).
+            canonical_url = f"https://instagram.com/{username}/"
+            if str(url_raw or "").strip() != canonical_url:
+                fields["fields[UF_CRM_INSTAGRAM]"] = canonical_url
+
+            if not fields:
+                skipped_already += 1
+                continue
             if DRY_RUN:
-                migrated += 1
+                if "fields[UF_CRM_IG_USERNAME]" in fields:
+                    migrated_username += 1
+                if "fields[UF_CRM_INSTAGRAM]" in fields:
+                    canonicalized_url += 1
                 continue
             try:
                 bx.call(f"crm.{entity}.update", {
                     "id": it["ID"],
-                    "fields[UF_CRM_IG_USERNAME]": username,
+                    **fields,
                 })
-                migrated += 1
+                if "fields[UF_CRM_IG_USERNAME]" in fields:
+                    migrated_username += 1
+                if "fields[UF_CRM_INSTAGRAM]" in fields:
+                    canonicalized_url += 1
             except Exception as e:
                 errors += 1
                 print(f"  update error {entity} {it['ID']}: {e}")
             time.sleep(RATE_DELAY)
         # progress
-        print(f"  page start={start}: migrated_total={migrated} skipped_already={skipped_already} "
-              f"skipped_no_username={skipped_no_username} errors={errors}")
+        print(f"  page start={start}: migrated_username={migrated_username} "
+              f"canonicalized_url={canonicalized_url} skipped_already={skipped_already} "
+              f"skipped_no_username={skipped_no_username} errors={errors}", flush=True)
         next_start = r.get("next")
         if next_start is None or next_start == start:
             break
         start = next_start
-    print(f"=== {entity} done: migrated={migrated} skipped_already={skipped_already} "
-          f"skipped_no_username={skipped_no_username} errors={errors} ===")
+    print(f"=== {entity} done: migrated_username={migrated_username} "
+          f"canonicalized_url={canonicalized_url} skipped_already={skipped_already} "
+          f"skipped_no_username={skipped_no_username} errors={errors} ===", flush=True)
 
 
 def main():
