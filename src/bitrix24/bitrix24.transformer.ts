@@ -33,14 +33,18 @@ export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDt
 			const chatId = webhook.senderData.chatId;
 			const isFromGroup = chatId.endsWith("@g.us");
 			const senderPhone = webhook.senderData.sender.replace("@c.us", "");
-			const senderName = webhook.senderData.senderName || webhook.senderData.senderContactName || `WhatsApp ${senderPhone}`;
+			// Fallback БЕЗ пробела: B24 разбивает name по пробелу в LAST_NAME →
+			// получается NAME=«WhatsApp», LAST_NAME=«6748117222» (мусор в карточке).
+			// Просто chatId без префикса канала — пусть будет валидный NAME, а канал
+			// читается из источника лида и линии.
+			const senderName = webhook.senderData.senderName || webhook.senderData.senderContactName || senderPhone;
 
 			let conversationId: string;
 			let conversationName: string;
 
 			if (isFromGroup) {
 				conversationId = chatId.replace("@g.us", "");
-				conversationName = `${webhook.senderData.chatName} (Group)` || `WhatsApp Group ${conversationId} (Group)`;
+				conversationName = webhook.senderData.chatName || conversationId;
 				this.logger.info(`Processing group message from group: ${conversationName} (${chatId}), sender: ${senderName} (+${senderPhone})`);
 			} else {
 				conversationId = senderPhone;
@@ -345,7 +349,7 @@ export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDt
 				direction: "inbound",
 				phone: callerPhone,
 				portalDomain: "",
-				senderName: `WhatsApp ${callerPhone}`,
+				senderName: callerPhone,
 			};
 		}
 
