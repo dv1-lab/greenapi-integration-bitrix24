@@ -116,11 +116,11 @@ class Bitrix:
             print(f"WARN: failed to persist new token to DB: {e}", file=sys.stderr)
         print(f"[token] refreshed (new len={len(self.access_token)})", file=sys.stderr)
 
-    def call(self, method, params, _retry=False):
+    def call(self, method, params, _retry=False, timeout=30):
         params = dict(params)
         params["auth"] = self.access_token
         url = f"https://{PORTAL}/rest/{method}"
-        r = requests.post(url, data=params, timeout=30)
+        r = requests.post(url, data=params, timeout=timeout)
         if r.status_code == 401 and not _retry:
             self.refresh()
             return self.call(method, params, _retry=True)
@@ -164,14 +164,51 @@ def normalize(raw):
 
 
 def migrate_entity(bx, entity):
-    """Batched-вариант — собираем 50 update-команд в один HTTP-запрос B24 batch."""
+    """Single-update в N параллельных потоках — batch API B24 даёт Read timeout 30s
+    на 50 updates."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
+
     print(f"\n=== migrating {entity} ===", flush=True)
+    counters = {"migrated_username": 0, "canonicalized_url": 0,
+                "skipped_already": 0, "skipped_no_username": 0, "errors": 0}
+    lock = Lock()
+
+    def update_one(item):
+        url_raw = item.get("UF_CRM_INSTAGRAM")
+        cur_username = item.get("UF_CRM_IG_USERNAME")
+        username = normalize(url_raw)
+        if not username:
+            with lock: counters["skipped_no_username"] += 1
+            return
+        need_username = not cur_username
+        canonical_url = f"https://instagram.com/{username}/"
+        need_url = str(url_raw or "").strip() != canonical_url
+        if not need_username and not need_url:
+            with lock: counters["skipped_already"] += 1
+            return
+        if DRY_RUN:
+            with lock:
+                if need_username: counters["migrated_username"] += 1
+                if need_url: counters["canonicalized_url"] += 1
+            return
+        params = {"id": item["ID"]}
+        if need_username:
+            params["fields[UF_CRM_IG_USERNAME]"] = username
+        if need_url:
+            params["fields[UF_CRM_INSTAGRAM]"] = canonical_url
+        try:
+            bx.call(f"crm.{entity}.update", params, timeout=60)
+            with lock:
+                if need_username: counters["migrated_username"] += 1
+                if need_url: counters["canonicalized_url"] += 1
+        except Exception as e:
+            with lock:
+                counters["errors"] += 1
+                if counters["errors"] <= 10:
+                    print(f"  update error {entity} {item['ID']}: {e}", flush=True)
+
     start = 0
-    migrated_username = 0
-    canonicalized_url = 0
-    skipped_already = 0
-    skipped_no_username = 0
-    errors = 0
     total = None
     while True:
         try:
@@ -182,10 +219,10 @@ def migrate_entity(bx, entity):
                 "select[2]": "UF_CRM_IG_USERNAME",
                 "order[ID]": "ASC",
                 "start": start,
-            })
+            }, timeout=60)
         except Exception as e:
             print(f"  list error at start={start}: {e}", flush=True)
-            errors += 1
+            with lock: counters["errors"] += 1
             time.sleep(5)
             continue
         items = r.get("result", []) or []
@@ -194,72 +231,25 @@ def migrate_entity(bx, entity):
         if total is None:
             total = r.get("total", 0)
             print(f"  total={total}", flush=True)
-
-        # Собираем cmd[] для batch
-        batch_cmds = []
-        batch_meta = []  # (need_username, need_url)
-        for it in items:
-            url_raw = it.get("UF_CRM_INSTAGRAM")
-            cur_username = it.get("UF_CRM_IG_USERNAME")
-            username = normalize(url_raw)
-            if not username:
-                skipped_no_username += 1
-                continue
-            need_username = not cur_username
-            canonical_url = f"https://instagram.com/{username}/"
-            need_url = str(url_raw or "").strip() != canonical_url
-            if not need_username and not need_url:
-                skipped_already += 1
-                continue
-            # B24 batch.cmd[] параметр — строка-команда
-            parts = [f"crm.{entity}.update?id={it['ID']}"]
-            if need_username:
-                parts.append(f"fields[UF_CRM_IG_USERNAME]={requests.utils.quote(username)}")
-            if need_url:
-                parts.append(f"fields[UF_CRM_INSTAGRAM]={requests.utils.quote(canonical_url)}")
-            batch_cmds.append("&".join(parts))
-            batch_meta.append((need_username, need_url))
-
-        # Шлём batch chunks по 50
-        for ci in range(0, len(batch_cmds), 50):
-            chunk = batch_cmds[ci:ci+50]
-            chunk_meta = batch_meta[ci:ci+50]
-            if DRY_RUN:
-                for nu, nl in chunk_meta:
-                    if nu: migrated_username += 1
-                    if nl: canonicalized_url += 1
-                continue
-            params = {f"cmd[c{i}]": cmd for i, cmd in enumerate(chunk)}
-            params["halt"] = "0"
-            try:
-                resp = bx.call("batch", params)
-                result_data = resp.get("result", {})
-                batch_errors = result_data.get("result_error", {}) or {}
-                for i, (nu, nl) in enumerate(chunk_meta):
-                    if f"c{i}" in batch_errors:
-                        errors += 1
-                        if errors <= 5:
-                            print(f"  batch error c{i}: {batch_errors[f'c{i}']}", flush=True)
-                    else:
-                        if nu: migrated_username += 1
-                        if nl: canonicalized_url += 1
-            except Exception as e:
-                errors += len(chunk)
-                print(f"  batch call failed: {e}", flush=True)
-                time.sleep(2)
-            # B24 batch допускает 2 req/s — пауза между chunks
-            time.sleep(0.5)
-
-        print(f"  page start={start}: migrated_username={migrated_username} "
-              f"canonicalized_url={canonicalized_url} skipped_already={skipped_already} "
-              f"skipped_no_username={skipped_no_username} errors={errors}", flush=True)
+        # 4 параллельных потока — баланс между скоростью и B24 rate-limit
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = [ex.submit(update_one, it) for it in items]
+            for _ in as_completed(futures):
+                pass
+        print(f"  page start={start}: migrated_username={counters['migrated_username']} "
+              f"canonicalized_url={counters['canonicalized_url']} "
+              f"skipped_already={counters['skipped_already']} "
+              f"skipped_no_username={counters['skipped_no_username']} "
+              f"errors={counters['errors']}", flush=True)
         next_start = r.get("next")
         if next_start is None or next_start == start:
             break
         start = next_start
-    print(f"=== {entity} done: migrated_username={migrated_username} "
-          f"canonicalized_url={canonicalized_url} skipped_already={skipped_already} "
-          f"skipped_no_username={skipped_no_username} errors={errors} ===", flush=True)
+    print(f"=== {entity} done: migrated_username={counters['migrated_username']} "
+          f"canonicalized_url={counters['canonicalized_url']} "
+          f"skipped_already={counters['skipped_already']} "
+          f"skipped_no_username={counters['skipped_no_username']} "
+          f"errors={counters['errors']} ===", flush=True)
 
 
 def main():
