@@ -450,20 +450,24 @@ const B24_AUTH = ${authJs};
     if (p === "telegram") return "Telegram";
     return "WhatsApp";
   }
-  // B24 placement iframe имеет фиксированную высоту — без resizeWindow контент
-  // обрезается снизу (особенно при показе блока @username). Дёргаем после
-  // каждого изменения видимости/контента.
+  // B24 placement iframe имеет фиксированную высоту. У разных типов placement
+  // разные методы изменения:
+  //   - DETAIL_TAB / CONTACT_TAB / DEAL_TAB → BX24.fitWindow() (растягивает
+  //     iframe до доступной высоты карточки, со скроллом внутри)
+  //   - все остальные (TOOLBAR попапы, page-app) → BX24.resizeWindow(0, h)
+  // Дёргаем оба, в нужном контексте сработает один — это безопасно.
   function resizeB24() {
-    if (typeof BX24 === "undefined" || !BX24.resizeWindow) return;
+    if (typeof BX24 === "undefined") return;
     try {
       const h = Math.max(
         document.body.scrollHeight,
         document.documentElement.scrollHeight,
-        600
+        700
       );
-      BX24.resizeWindow(0, h + 200);
+      if (BX24.resizeWindow) BX24.resizeWindow(0, h + 200);
+      if (BX24.fitWindow) BX24.fitWindow();
     } catch (e) {
-      dbg("resizeWindow err", String(e));
+      dbg("resize err", String(e));
     }
   }
   function updateSubtitle() {
