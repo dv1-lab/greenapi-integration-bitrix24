@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { Request, Response } from "express";
 import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
+import { Bitrix24Service } from "../bitrix24/bitrix24.service";
 
 // Карта префикса idInstance → API URL Green API. У свежих instance shard в host'е,
 // у старых (вроде 1101948511) — общий api.green-api.com.
@@ -21,6 +22,7 @@ export class WidgetController {
 	constructor(
 		private readonly config: ConfigService,
 		private readonly prisma: PrismaService,
+		private readonly bitrix24: Bitrix24Service,
 	) {}
 
 	@Get("instances")
@@ -145,16 +147,19 @@ export class WidgetController {
 		}
 
 		// Поиск Instance по выбору фронта; если не указан — берём первый authorized.
+		// Подгружаем user — нужен portalDomain для ensureOpenLeadForPhone.
 		let inst;
 		if (body.idInstance) {
 			inst = await this.prisma.instance.findUnique({
 				where: { idInstance: BigInt(body.idInstance) },
+				include: { user: true },
 			});
 		}
 		if (!inst) {
 			inst = await this.prisma.instance.findFirst({
 				where: { stateInstance: "authorized" },
 				orderBy: { idInstance: "asc" },
+				include: { user: true },
 			});
 		}
 		if (!inst) {
@@ -253,6 +258,28 @@ export class WidgetController {
 		// что adapter ставит для входящих, иначе будет два разных диалога.
 		const lineForMirror = inst.bitrixLine || undefined;
 		const mirrorKey = (provider === "max" || provider === "telegram") ? chatId : phone;
+
+		// Если оператор ввёл реальный phone — попробуем найти существующий B24-контакт
+		// и подвязать к нему лид (как делает adapter для incoming через
+		// ensureOpenLeadForPhone). Без этого виджет создавал свежий лид «номер -
+		// Telegram 79584983354» даже если у клиента уже есть контакт+открытый лид.
+		if (lineForMirror && phone.length >= 10 && phone.length <= 15 && inst.user?.portalDomain) {
+			const phoneE164 = `+${phone}`;
+			const channelLabel = provider === "max" ? "MAX" : provider === "telegram" ? "Telegram" : "WhatsApp";
+			try {
+				await this.bitrix24.ensureOpenLeadForPhone(
+					inst.user.portalDomain,
+					phoneE164,
+					phoneE164,
+					lineForMirror,
+					channelLabel,
+				);
+			} catch (e: any) {
+				// Не блокируем отправку при ошибке поиска контакта
+				console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
+			}
+		}
+
 		const mirrored = await this.mirrorToBitrix(mirrorKey, text, idMessage, body.authId, body.domain, lineForMirror, provider);
 		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}

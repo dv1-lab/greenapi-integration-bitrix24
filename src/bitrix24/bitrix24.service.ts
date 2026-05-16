@@ -169,7 +169,7 @@ export class Bitrix24Service extends BaseAdapter<
 	 *
 	 * Идемпотентность обеспечивается мьютексом по phone и проверкой 2-3.
 	 */
-	private async ensureOpenLeadForPhone(
+	async ensureOpenLeadForPhone(
 		portalDomain: string,
 		phoneE164: string,
 		senderName: string,
