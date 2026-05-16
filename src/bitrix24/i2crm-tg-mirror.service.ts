@@ -11,12 +11,12 @@ import { GreenApiLogger } from "@green-api/greenapi-integration";
 //
 // Хранилище маппинга client_id → topic_id — JSON-файл (на одном портале простой
 // надёжный вариант, если потребуется — мигрировать в Prisma table).
-@Injectable()
 interface MirrorState {
 	topics: Record<string, number>;       // clientId → topic_id
 	cardsPosted: Record<string, true>;    // leadId → true (карточка клиента уже постилась)
 }
 
+@Injectable()
 export class I2crmTgMirrorService {
 	private readonly logger = GreenApiLogger.getInstance(I2crmTgMirrorService.name);
 	private readonly botToken: string | undefined;
