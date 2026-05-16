@@ -317,8 +317,8 @@ export class WidgetController {
 
   <label>Номер телефона клиента</label>
   <div id="phoneChips" class="chips"></div>
-  <input id="phone" placeholder="79261234567" autocomplete="off" inputmode="numeric">
-  <div class="hint">Кликни нужный номер из списка выше или введи свой (цифры, с кодом страны без +)</div>
+  <input id="phone" placeholder="+79261234567 или 79261234567" autocomplete="off" inputmode="tel">
+  <div class="hint">Кликни нужный номер из списка выше или введи свой (с кодом страны, можно с + или без)</div>
 
   <div id="tgUsernameBlock" style="display:none; margin-top:8px;">
     <label for="tgUsername">@username Telegram <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
