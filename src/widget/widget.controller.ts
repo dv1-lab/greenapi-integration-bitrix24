@@ -282,7 +282,7 @@ export class WidgetController {
 <script src="//api.bitrix24.com/api/v1/"></script>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px 24px 80px; background: #f5f7fa; color: #1a1a1a; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px 24px 160px; background: #f5f7fa; color: #1a1a1a; min-height: 100vh; }
   .card { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
   h1 { margin: 0 0 4px; font-size: 18px; color: #2d8f4e; }
   .subtitle { margin: 0 0 20px; font-size: 13px; color: #6b7280; }
@@ -461,7 +461,7 @@ const B24_AUTH = ${authJs};
         document.documentElement.scrollHeight,
         600
       );
-      BX24.resizeWindow(0, h + 120);
+      BX24.resizeWindow(0, h + 200);
     } catch (e) {
       dbg("resizeWindow err", String(e));
     }
@@ -530,11 +530,17 @@ const B24_AUTH = ${authJs};
   }
 
   BX24.init(function() {
-    // Растягиваем iframe сразу после init и потом ещё раз через 250мс,
-    // когда DOM полностью отрендерится (instances загружены и т.п.).
+    // Растягиваем iframe сразу после init и повторяем через несколько
+    // таймаутов — когда отрендерятся инстансы, чипы, селект развернётся.
+    // Плюс ResizeObserver на body, чтобы реагировать на любые изменения
+    // (показ блока @username для TG, resize textarea вручную, и т.п.).
     resizeB24();
-    setTimeout(resizeB24, 250);
-    setTimeout(resizeB24, 800);
+    [120, 350, 800, 1500].forEach(ms => setTimeout(resizeB24, ms));
+    if (typeof ResizeObserver !== "undefined") {
+      try { new ResizeObserver(() => resizeB24()).observe(document.body); }
+      catch (e) { dbg("ResizeObserver err", String(e)); }
+    }
+    window.addEventListener("resize", resizeB24);
     const info = BX24.placement.info() || {};
     dbg("placement.info", info);
 
