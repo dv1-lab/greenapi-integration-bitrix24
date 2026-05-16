@@ -587,26 +587,25 @@ export class Bitrix24Service extends BaseAdapter<
 		for (let attempt = 1; attempt <= 6; attempt++) {
 			await sleep(attempt === 1 ? 1500 : 2000);
 			try {
-				// Ищем CRM-активность типа «Сессия открытой линии», в которой
-				// USER_CODE содержит наш chat-user. PROVIDER_PARAMS — JSON-строка
-				// с полем USER_CODE формата `social_connector|18|i2crm_ig_<id>|...`.
+				// Ищем CRM-активность «Сессия открытой линии». PROVIDER_PARAMS —
+				// объект {USER_CODE: "social_connector|<line>|i2crm_ig_<id>|<b24user>"}.
+				// %PROVIDER_PARAMS не работает как LIKE на JSON, фильтруем в коде.
 				const activities: any = await this.callBitrix24Method(portalDomain, "crm.activity.list", {
-					filter: {
-						PROVIDER_TYPE_ID: "IMOPENLINE",
-						"%PROVIDER_PARAMS": userCode,
-					},
+					filter: { PROVIDER_ID: "IMOPENLINES_SESSION" },
 					select: ["ID", "OWNER_ID", "OWNER_TYPE_ID", "PROVIDER_PARAMS"],
 					order: { ID: "DESC" },
 				});
 
 				const list = Array.isArray(activities) ? activities : [];
-				if (list.length === 0) {
+				// Ищем первую активность чьё PROVIDER_PARAMS.USER_CODE содержит userCode.
+				const act = list.find((a: any) => {
+					const code = a?.PROVIDER_PARAMS?.USER_CODE;
+					return typeof code === "string" && code.includes(userCode);
+				});
+				if (!act) {
 					this.logger.debug(`i2crm: backfill attempt ${attempt}/6 — no activity yet for ${userCode}`);
 					continue;
 				}
-
-				// Берём самую свежую активность по этому user_code
-				const act = list[0];
 				const ownerType = parseInt(act.OWNER_TYPE_ID, 10);
 				const ownerId = parseInt(act.OWNER_ID, 10);
 
