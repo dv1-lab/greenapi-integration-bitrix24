@@ -621,13 +621,22 @@ export class Bitrix24Service extends BaseAdapter<
 				const ownerId = parseInt(act.OWNER_ID, 10);
 
 				// CHAT_ID — стабильный, пишем только если поле пустое. USERNAME —
-				// может меняться (клиент сменил @ник), обновляем при каждом сообщении
-				// если значение отличается от того что сохранено в B24.
-				const buildUpdate = (currentChatId: any, currentUsername: any): Record<string, string> | null => {
+				// может меняться (клиент сменил @ник), обновляем при каждом сообщении.
+				// UF_CRM_INSTAGRAM (url) — синхронизируем с username чтобы кликабельная
+				// ссылка в карточке вела на актуальный профиль (старое поле, было до
+				// нашей интеграции, оставлено для удобства оператора).
+				const buildIgUrl = (u: string) => `https://instagram.com/${u}/`;
+				const buildUpdate = (currentChatId: any, currentUsername: any, currentUrl: any): Record<string, string> | null => {
 					const fields: Record<string, string> = {};
 					if (!currentChatId) fields.UF_CRM_IG_CHAT_ID = clientId;
 					if (username && String(currentUsername || "") !== username) {
 						fields.UF_CRM_IG_USERNAME = username;
+					}
+					if (username) {
+						const newUrl = buildIgUrl(username);
+						if (String(currentUrl || "") !== newUrl) {
+							fields.UF_CRM_INSTAGRAM = newUrl;
+						}
 					}
 					return Object.keys(fields).length > 0 ? fields : null;
 				};
@@ -648,7 +657,7 @@ export class Bitrix24Service extends BaseAdapter<
 					if (username && lead?.UF_CRM_IG_USERNAME && String(lead.UF_CRM_IG_USERNAME) !== username) {
 						usernameChange = { oldName: String(lead.UF_CRM_IG_USERNAME), newName: username };
 					}
-					const upd = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME);
+					const upd = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME, lead?.UF_CRM_INSTAGRAM);
 					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.lead.update", {
 							id: ownerId,
@@ -670,12 +679,13 @@ export class Bitrix24Service extends BaseAdapter<
 					// CONTACT (редкий случай — обычно owner это лид)
 					contactId = ownerId;
 				} else if (ownerType === 2) {
-					// DEAL — на сделке тоже запишем
+					// DEAL — на сделке тоже запишем (UF_CRM_INSTAGRAM на deal нет —
+					// поле существует только на lead/contact; B24 проигнорирует unknown).
 					const deal: any = await this.callBitrix24Method(portalDomain, "crm.deal.get", { id: ownerId });
 					if (username && deal?.UF_CRM_IG_USERNAME && String(deal.UF_CRM_IG_USERNAME) !== username) {
 						usernameChange = usernameChange || { oldName: String(deal.UF_CRM_IG_USERNAME), newName: username };
 					}
-					const upd = buildUpdate(deal?.UF_CRM_IG_CHAT_ID, deal?.UF_CRM_IG_USERNAME);
+					const upd = buildUpdate(deal?.UF_CRM_IG_CHAT_ID, deal?.UF_CRM_IG_USERNAME, undefined);
 					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.deal.update", {
 							id: ownerId,
@@ -690,7 +700,7 @@ export class Bitrix24Service extends BaseAdapter<
 					if (username && contact?.UF_CRM_IG_USERNAME && String(contact.UF_CRM_IG_USERNAME) !== username) {
 						usernameChange = usernameChange || { oldName: String(contact.UF_CRM_IG_USERNAME), newName: username };
 					}
-					const upd = buildUpdate(contact?.UF_CRM_IG_CHAT_ID, contact?.UF_CRM_IG_USERNAME);
+					const upd = buildUpdate(contact?.UF_CRM_IG_CHAT_ID, contact?.UF_CRM_IG_USERNAME, contact?.UF_CRM_INSTAGRAM);
 					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.contact.update", {
 							id: contactId,
