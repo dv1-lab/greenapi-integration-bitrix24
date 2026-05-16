@@ -1156,6 +1156,91 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	// Outgoing B24 → i2crm: оператор пишет в open-line 18/22 → отправляем
+	// клиенту в Instagram через i2crm Public API.
+	async handleI2crmOutgoing(webhook: Bitrix24WebhookDto, lineNumber: number): Promise<WebhookProcessResult> {
+		const messages = webhook.data?.MESSAGES;
+		if (!messages || messages.length === 0) {
+			return { success: false, message: "no MESSAGES in webhook" };
+		}
+		const m = messages[0];
+
+		const lineDirect = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+		const lineComment = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_COMMENT"));
+		const isDirect = lineNumber === lineDirect;
+		const isComment = lineNumber === lineComment;
+		if (!isDirect && !isComment) {
+			return { success: false, message: `line ${lineNumber} не Instagram (not 18/22)` };
+		}
+
+		// chat.id у нас = `i2crm_ig_<client_id>` (см. handleI2crmIncoming).
+		// Если же пришёл outgoing от ручного теста без incoming — chat.id может быть
+		// сырым числом. Поддерживаем оба формата.
+		const rawChatId = String(m.chat?.id || m.user?.id || "");
+		const match = rawChatId.match(/^i2crm_ig_(\d+)$/);
+		const clientId = match ? match[1] : rawChatId.replace(/\D/g, "");
+		if (!clientId) {
+			return { success: false, message: `cannot parse client_id from chat.id=${rawChatId}` };
+		}
+
+		const text = m.message?.text || "";
+		const files: any[] = (m.message as any)?.files || [];
+
+		const apiBase = this.configService.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
+		const targetKey = this.configService.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
+		if (!targetKey) {
+			return { success: false, message: "I2CRM_TARGET_KEY_PUBLICAPI not configured" };
+		}
+		const sourceId = isDirect
+			? Number(this.configService.get<string>("I2CRM_SOURCE_IG_DIRECT"))
+			: Number(this.configService.get<string>("I2CRM_SOURCE_IG_COMMENT"));
+		const domain = isDirect ? "instagram-direct" : "instagram-comment";
+
+		const body: Record<string, any> = {
+			domain,
+			source: sourceId,
+			client: Number(clientId),
+		};
+		if (text) body.text = text;
+		if (files.length > 0) {
+			// Простейший вариант: первый файл как photo, остальные тоже photo[].
+			// Тип файла определяется получателем; для IG Direct — обычно изображения.
+			body.photo = files.map((f: any) => f.url);
+		}
+		if (isDirect) {
+			body.type = "direct";
+		} else {
+			body.type = "comment";
+			// Для comment: нужен media (post id) и comment (parent comment id).
+			// Контекст потерян после перехода через B24 — оставляем i2crm
+			// сопоставлять по client_id + последнему сообщению клиенту.
+		}
+
+		this.logger.info(`i2crm outgoing: POST ${apiBase}/target/feedback`, {
+			domain, source: sourceId, client: clientId, hasText: !!text, files: files.length,
+		});
+
+		try {
+			const resp = await axios.post(`${apiBase}/target/feedback`, body, {
+				params: { key: targetKey },
+				timeout: 15000,
+			});
+			const result = resp.data;
+			this.logger.info(`i2crm outgoing OK`, { result });
+			return {
+				success: true,
+				message: "Sent to i2crm",
+				data: { i2crmResponse: result, externalMessageId: result?.message_id || result?.id || null, externalChatId: clientId },
+			};
+		} catch (err: any) {
+			this.logger.error(`i2crm outgoing failed: ${err.message}`, {
+				response: err.response?.data,
+				status: err.response?.status,
+			});
+			return { success: false, message: `i2crm API error: ${err.message}` };
+		}
+	}
+
 	async handleBitrix24Webhook(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
 		this.logger.info(`Handling Bitrix24 webhook: ${webhook.event}`);
 
@@ -1166,6 +1251,31 @@ export class Bitrix24Service extends BaseAdapter<
 			});
 
 			const domain = webhook.auth.domain;
+			const lineNumber = webhook.data?.LINE ? parseInt(webhook.data.LINE) : 0;
+			const connector = String((webhook.data as any)?.CONNECTOR || "").toLowerCase();
+
+			// Branch: Instagram через i2crm. CONNECTOR=i2crm выставляется B24
+			// для линий 18/22 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Если CONNECTOR
+			// отсутствует в webhook (старые версии B24), проверяем по LINE.
+			const lineDirect = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+			const lineComment = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_COMMENT"));
+			if (connector === "i2crm" || lineNumber === lineDirect || lineNumber === lineComment) {
+				this.logger.info(`Routing outbound to i2crm pipeline (line=${lineNumber}, connector=${connector})`);
+				const result = await this.handleI2crmOutgoing(webhook, lineNumber);
+				if (result.success) {
+					await this.sendDeliveryConfirmation(
+						webhook,
+						domain,
+						lineNumber,
+						{
+							idMessage: (result.data as any)?.externalMessageId || `i2crm_${Date.now()}`,
+						} as SendResponse,
+						"i2crm",
+					);
+				}
+				return result;
+			}
+
 			const instances = await this.prisma.getInstancesByUserId(domain);
 
 			if (instances.length === 0) {
@@ -1173,7 +1283,6 @@ export class Bitrix24Service extends BaseAdapter<
 				return {success: false, message: "No GREEN-API instances configured"};
 			}
 
-			const lineNumber = webhook.data?.LINE ? parseInt(webhook.data.LINE) : 0;
 			let targetInstance = instances.find(inst => inst.bitrixLine === lineNumber);
 
 			if (!targetInstance) {
@@ -1222,6 +1331,7 @@ export class Bitrix24Service extends BaseAdapter<
 		domain: string,
 		line: number,
 		greenApiResult: SendResponse,
+		connectorId: string = "social_connector",
 	): Promise<void> {
 		try {
 			if (!webhook.data?.MESSAGES || webhook.data.MESSAGES.length === 0) {
@@ -1235,7 +1345,7 @@ export class Bitrix24Service extends BaseAdapter<
 			const externalChatId = originalMessage.chat?.id || "unknown";
 
 			await this.callBitrix24Method(domain, "imconnector.send.status.delivery", {
-				CONNECTOR: "social_connector",
+				CONNECTOR: connectorId,
 				LINE: line,
 				MESSAGES: [{
 					im: originalMessage.im,
