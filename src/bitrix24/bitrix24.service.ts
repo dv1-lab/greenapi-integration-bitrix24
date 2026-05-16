@@ -22,6 +22,7 @@ import {
 	GreenApiLogger, SendResponse, generateRandomToken,
 } from "@green-api/greenapi-integration";
 import { Bitrix24Transformer } from "./bitrix24.transformer";
+import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
 import { PrismaService } from "../prisma/prisma.service";
 import {
 	Bitrix24MessagePayload,
@@ -45,6 +46,7 @@ export class Bitrix24Service extends BaseAdapter<
 		protected readonly bitrix24Transformer: Bitrix24Transformer,
 		protected readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
+		private readonly i2crmTgMirror: I2crmTgMirrorService,
 	) {
 		super(bitrix24Transformer, prisma);
 	}
@@ -567,11 +569,18 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.info(
 				`i2crm: sent to B24 line=${lineId} channel=${channel} client=${clientId} msg=${messageId} externalId=${externalId}`,
 			);
-			return { success: true };
 		} catch (err: any) {
 			this.logger.error(`i2crm: imconnector.send.messages failed: ${err.message}`);
 			return { success: false, reason: err.message };
 		}
+
+		// Mirror в TG-группу (как WA/MAX/TG 3354) — не блокирует основной pipeline,
+		// логирует ошибки внутри сервиса.
+		this.i2crmTgMirror.mirrorIncoming(payload).catch((e) => {
+			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
+		});
+
+		return { success: true };
 	}
 
 	async handleStateInstanceWebhook(webhook: StateInstanceWebhook): Promise<void> {
