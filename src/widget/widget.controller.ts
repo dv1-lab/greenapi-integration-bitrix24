@@ -10,6 +10,8 @@ function greenApiUrl(idInstance: string): string {
 	const known: Record<string, string> = {
 		"1103487233": "https://1103.api.green-api.com",
 		"1101948511": "https://api.green-api.com",
+		"3100621187": "https://3100.api.green-api.com",
+		"4100621194": "https://4100.api.green-api.com",
 	};
 	return known[idInstance] || "https://api.green-api.com";
 }
@@ -74,13 +76,17 @@ export class WidgetController {
 	}
 
 	@Post("send")
-	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string }) {
+	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string }) {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		const chatIdOverride = (body.chatIdOverride || "").trim();
-		// phone обязателен только если нет chatIdOverride (для MAX/Telegram
-		// валидно отправлять без phone, по известному chatId из B24).
-		if (!chatIdOverride && (phone.length < 10 || phone.length > 15)) {
+		// Telegram-only: @username, который оператор ввёл вручную. Не путать с
+		// chatIdOverride (числовой user_id из B24-привязки). Сами @ срезаем —
+		// добавим позже в нужном формате под Green API.
+		const usernameOverride = (body.usernameOverride || "").trim().replace(/^@/, "");
+		// phone обязателен только если нет chatIdOverride/usernameOverride
+		// (для MAX/Telegram валидно отправлять без phone, по известному chatId/username).
+		if (!chatIdOverride && !usernameOverride && (phone.length < 10 || phone.length > 15)) {
 			throw new HttpException(`Неверный номер: "${body.phone}"`, HttpStatus.BAD_REQUEST);
 		}
 		if (!text) {
@@ -109,17 +115,16 @@ export class WidgetController {
 		const apiUrl = greenApiUrl(idInstance);
 
 		// Определяем провайдера. WhatsApp использует chatId=phone@c.us, MAX —
-		// внутренний chatId (CheckAccount). Telegram аналогично — id, не phone.
+		// внутренний chatId (CheckAccount). Telegram аналогично — внутренний
+		// user_id, причём резолв phone→user_id требует чтобы номер был в адресной
+		// книге нашего Telegram-аккаунта (Telegram privacy).
 		const provider = ((inst.settings as any)?.provider || "wa").toLowerCase();
 		let chatId: string;
 		if (provider === "max" || provider === "telegram") {
 			// Приоритет 1: явный chatId от фронта (виджет нашёл его в B24 open-line
-			// привязке контакта). Это работает для всех не-WA провайдеров — Telegram
-			// тоже идентифицирует чаты по внутреннему chatId, не по phone.
+			// привязке контакта).
 			if (chatIdOverride) {
 				chatId = chatIdOverride;
-				// Кешируем для будущих отправок (только если есть phone — для Telegram
-				// его обычно нет, тогда кеш пустой и в следующий раз снова придёт через override).
 				if (phone.length >= 10) {
 					await this.prisma.maxContact.upsert({
 						where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
@@ -127,20 +132,23 @@ export class WidgetController {
 						update: { chatId },
 					});
 				}
-			} else if (provider === "telegram") {
-				// Для Telegram нет CheckAccount-аналога — нужен chatId.
-				throw new HttpException(
-					"Telegram: открой виджет в карточке клиента, у которого есть привязанный Telegram-чат, либо введи chatId напрямую (TODO).",
-					HttpStatus.BAD_REQUEST,
-				);
+			} else if (usernameOverride && provider === "telegram") {
+				// Приоритет 2 (Telegram): @username от оператора. Green API
+				// принимает chatId в формате `<username>@c.us` для Telegram —
+				// внутри они резолвят через MTProto contacts.ResolveUsername.
+				chatId = `${usernameOverride}@c.us`;
 			} else {
-				// Приоритет 2: локальный кеш phone → chatId
+				// Приоритет 3: локальный кеш phone → chatId (заполнялся при
+				// прошлой успешной отправке).
 				let cached = await this.prisma.maxContact.findUnique({
 					where: { idInstance_phone: { idInstance: BigInt(idInstance), phone } },
 				});
 				if (!cached) {
-					// Приоритет 3: CheckAccount у Green API (работает только если
-					// номер в контактах нашего MAX-аккаунта на телефоне).
+					// Приоритет 4: CheckAccount у Green API. Для MAX — резолвит
+					// если номер в контактах MAX-аккаунта. Для Telegram — если
+					// номер в адресной книге Telegram-аккаунта И клиент в
+					// privacy "находить по номеру" не запретил.
+					const providerLabel = provider === "max" ? "MAX" : "Telegram";
 					try {
 						const r = await axios.post(
 							`${apiUrl}/waInstance${idInstance}/CheckAccount/${apiToken}`,
@@ -148,10 +156,10 @@ export class WidgetController {
 							{ timeout: 15000 },
 						);
 						if (!r.data?.exist || !r.data?.chatId) {
-							throw new HttpException(
-								`MAX: номер +${phone} не найден. Возможно у клиента нет MAX, либо его нет в контактах MAX-аккаунта 79584983354. Если уже была переписка — попробуйте из карточки клиента где привязан MAX-чат.`,
-								HttpStatus.NOT_FOUND,
-							);
+							const hint = provider === "telegram"
+								? `Telegram: номер +${phone} не найден. Telegram отдаёт user_id по номеру только если: (а) номер в адресной книге Telegram-аккаунта 79584983354, ИЛИ (б) у клиента в Telegram-privacy "Кто может найти меня по номеру" = Все. Если уже была переписка — открой виджет в карточке клиента где привязан Telegram-чат. Альтернатива — введи @username клиента в поле ниже.`
+								: `MAX: номер +${phone} не найден. Возможно у клиента нет MAX, либо его нет в контактах MAX-аккаунта 79584983354. Если уже была переписка — попробуйте из карточки клиента где привязан MAX-чат.`;
+							throw new HttpException(hint, HttpStatus.NOT_FOUND);
 						}
 						cached = await this.prisma.maxContact.create({
 							data: { idInstance: BigInt(idInstance), phone, chatId: String(r.data.chatId) },
@@ -159,7 +167,7 @@ export class WidgetController {
 					} catch (err: any) {
 						if (err instanceof HttpException) throw err;
 						const msg = err.response?.data || err.message;
-						throw new HttpException(`MAX CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
 					}
 				}
 				chatId = cached.chatId;
@@ -305,6 +313,12 @@ export class WidgetController {
   <input id="phone" placeholder="79261234567" autocomplete="off" inputmode="numeric">
   <div class="hint">Кликни нужный номер из списка выше или введи свой (цифры, с кодом страны без +)</div>
 
+  <div id="tgUsernameBlock" style="display:none; margin-top:8px;">
+    <label for="tgUsername">@username Telegram <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
+    <input id="tgUsername" placeholder="alexandra_run" autocomplete="off">
+    <div class="hint">Без символа @ в начале. Используется только если выбран Telegram-инстанс.</div>
+  </div>
+
   <label for="text">Сообщение</label>
   <textarea id="text" placeholder="Здравствуйте! Это менеджер «Первый Беговой»…"></textarea>
 
@@ -433,6 +447,9 @@ const B24_AUTH = ${authJs};
     const idInst = $("instance").value;
     const channel = detectChannelLabel(idInst);
     $("subtitle").textContent = "Первое сообщение клиенту через " + channel;
+    // Telegram: показываем поле @username (только для него — у MAX/WA username нет)
+    const isTg = (PROVIDER_MAP[idInst] || "").toLowerCase() === "telegram";
+    $("tgUsernameBlock").style.display = isTg ? "block" : "none";
   }
   fetch("/widget/instances").then(r => r.json()).then(list => {
     const sel = $("instance");
@@ -572,6 +589,7 @@ const B24_AUTH = ${authJs};
     const phone = $("phone").value.trim();
     const text = $("text").value.trim();
     const idInstance = $("instance").value || undefined;
+    const usernameOverride = $("tgUsername").value.trim().replace(/^@/, "");
     // Если виджет знает chatId этого клиента из его B24-карточки — используем его.
     // Тогда phone оператору вводить не обязательно (для MAX/Telegram phone бесполезен,
     // там общение по chatId, а phone Green API не отдаёт privacy).
@@ -589,10 +607,12 @@ const B24_AUTH = ${authJs};
       showStatus("Введите текст сообщения", false);
       return;
     }
-    if (!phone && !chatIdOverride) {
+    if (!phone && !chatIdOverride && !usernameOverride) {
       const hint = instProvider === "wa"
         ? "Введите номер телефона клиента"
-        : "Введите номер или открой виджет в карточке клиента — оттуда подтянется chatId";
+        : instProvider === "telegram"
+          ? "Введите номер или @username клиента, либо открой виджет в карточке где привязан Telegram-чат"
+          : "Введите номер или открой виджет в карточке клиента — оттуда подтянется chatId";
       showStatus(hint, false);
       return;
     }
@@ -602,7 +622,7 @@ const B24_AUTH = ${authJs};
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, text, idInstance, chatIdOverride, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
+        body: JSON.stringify({ phone, text, idInstance, chatIdOverride, usernameOverride, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
