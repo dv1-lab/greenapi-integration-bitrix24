@@ -1176,7 +1176,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// chat.id у нас = `i2crm_ig_<client_id>` (см. handleI2crmIncoming).
 		// Если же пришёл outgoing от ручного теста без incoming — chat.id может быть
 		// сырым числом. Поддерживаем оба формата.
-		const rawChatId = String(m.chat?.id || m.user?.id || "");
+		const rawChatId = String(m.chat?.id || "");
 		const match = rawChatId.match(/^i2crm_ig_(\d+)$/);
 		const clientId = match ? match[1] : rawChatId.replace(/\D/g, "");
 		if (!clientId) {
