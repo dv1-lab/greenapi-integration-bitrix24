@@ -132,10 +132,11 @@ export class WidgetController {
 						update: { chatId },
 					});
 				}
-			} else if (usernameOverride && provider === "telegram") {
-				// Приоритет 2 (Telegram): @username от оператора. Green API
-				// принимает chatId в формате `<username>@c.us` для Telegram —
-				// внутри они резолвят через MTProto contacts.ResolveUsername.
+			} else if (usernameOverride && (provider === "telegram" || provider === "max")) {
+				// Приоритет 2: @username от оператора. И Telegram, и MAX
+				// поддерживают идентификацию по username (нику) в обход
+				// privacy-настроек поиска по phone. Green API принимает
+				// chatId в формате `<username>@c.us`.
 				chatId = `${usernameOverride}@c.us`;
 			} else {
 				// Приоритет 3: локальный кеш phone → chatId (заполнялся при
@@ -321,9 +322,9 @@ export class WidgetController {
   <div class="hint">Кликни нужный номер из списка выше или введи свой (с кодом страны, можно с + или без)</div>
 
   <div id="tgUsernameBlock" style="display:none; margin-top:8px;">
-    <label for="tgUsername">@username Telegram <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
+    <label for="tgUsername">@username <span id="tgUsernameChannel">Telegram</span> <span style="color:#9ca3af; font-weight: 400;">(если знаешь — попробуем по username, минуя privacy-ограничения phone)</span></label>
     <input id="tgUsername" placeholder="@alexandra_run или alexandra_run" autocomplete="off">
-    <div class="hint">Можно с символом @ в начале или без. Используется только если выбран Telegram-инстанс.</div>
+    <div class="hint">Можно с символом @ в начале или без. Используется только для Telegram и MAX (в обоих есть никнеймы).</div>
   </div>
 
   <label for="text">Сообщение</label>
@@ -474,9 +475,12 @@ const B24_AUTH = ${authJs};
     const idInst = $("instance").value;
     const channel = detectChannelLabel(idInst);
     $("subtitle").textContent = "Первое сообщение клиенту через " + channel;
-    // Telegram: показываем поле @username (только для него — у MAX/WA username нет)
-    const isTg = (PROVIDER_MAP[idInst] || "").toLowerCase() === "telegram";
-    $("tgUsernameBlock").style.display = isTg ? "block" : "none";
+    // Telegram и MAX поддерживают @username, у WhatsApp — нет.
+    const p = (PROVIDER_MAP[idInst] || "").toLowerCase();
+    const hasUsername = p === "telegram" || p === "max";
+    $("tgUsernameBlock").style.display = hasUsername ? "block" : "none";
+    const ch = $("tgUsernameChannel");
+    if (ch) ch.textContent = p === "max" ? "MAX" : "Telegram";
     resizeB24();
   }
   fetch("/widget/instances").then(r => r.json()).then(list => {
