@@ -197,16 +197,25 @@ def migrate_entity(bx, entity):
             params["fields[UF_CRM_IG_USERNAME]"] = username
         if need_url:
             params["fields[UF_CRM_INSTAGRAM]"] = canonical_url
-        try:
-            bx.call(f"crm.{entity}.update", params, timeout=60)
-            with lock:
-                if need_username: counters["migrated_username"] += 1
-                if need_url: counters["canonicalized_url"] += 1
-        except Exception as e:
-            with lock:
-                counters["errors"] += 1
-                if counters["errors"] <= 10:
-                    print(f"  update error {entity} {item['ID']}: {e}", flush=True)
+        # Ретраи на OPERATION_TIME_LIMIT (B24 защита от частых апдейтов
+        # с накопленным временем за минуту). 3 попытки с возрастающим sleep.
+        for attempt in range(1, 4):
+            try:
+                bx.call(f"crm.{entity}.update", params, timeout=60)
+                with lock:
+                    if need_username: counters["migrated_username"] += 1
+                    if need_url: counters["canonicalized_url"] += 1
+                return
+            except Exception as e:
+                msg = str(e)
+                if "OPERATION_TIME_LIMIT" in msg and attempt < 3:
+                    time.sleep(20 * attempt)  # 20s, 40s
+                    continue
+                with lock:
+                    counters["errors"] += 1
+                    if counters["errors"] <= 10:
+                        print(f"  update error {entity} {item['ID']} (attempt {attempt}): {e}", flush=True)
+                return
 
     start = 0
     total = None
@@ -231,8 +240,9 @@ def migrate_entity(bx, entity):
         if total is None:
             total = r.get("total", 0)
             print(f"  total={total}", flush=True)
-        # 4 параллельных потока — баланс между скоростью и B24 rate-limit
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        # 2 параллельных потока — B24 OPERATION_TIME_LIMIT блокирует
+        # выше 4 r/s (накопленное CPU time за минуту)
+        with ThreadPoolExecutor(max_workers=2) as ex:
             futures = [ex.submit(update_one, it) for it in items]
             for _ in as_completed(futures):
                 pass
