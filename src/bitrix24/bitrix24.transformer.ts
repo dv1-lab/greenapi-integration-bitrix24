@@ -457,7 +457,15 @@ export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDt
 
 			let chatId: string;
 
-			if (/^\d{15,}$/.test(phone)) {
+			// chat.id из B24 webhook'а — это наш userKey:
+			//   wa_<phone>  → WhatsApp (форматируем как <phone>@c.us)
+			//   sc_<chatId> → MAX/Telegram (используем <chatId> как есть БЕЗ @c.us —
+			//   эмпирически проверено: с суффиксом Green API silent-фейлит).
+			const scMatch = phone.match(/^sc_(.+)$/);
+			if (scMatch) {
+				chatId = scMatch[1];
+				this.logger.info(`Sending message to non-WA chat (MAX/TG): ${chatId} (original: ${phone})`);
+			} else if (/^\d{15,}$/.test(phone)) {
 				chatId = `${phone}@g.us`;
 				this.logger.info(`Sending message to group chat: ${chatId}`);
 			} else {
