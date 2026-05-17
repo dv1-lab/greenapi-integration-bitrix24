@@ -907,6 +907,32 @@ export class Bitrix24Service extends BaseAdapter<
 				this.logger.warn(`User not found for ONAPPINSTALL event: ${domain}`);
 			}
 
+			// После переустановки B24 сбрасывает активацию коннекторов на линиях.
+			// Восстанавливаем нужные binding'и — social_connector активен на всех
+			// линиях которыми мы управляем. Если когда-то в B24 был установлен
+			// i2crm-нативный коннектор (от приложения i2crm) — он мог реактивироваться,
+			// удаляем его с линий 18/22 (Instagram через Public API не нуждается в нём).
+			try {
+				const igLineDirect = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT")) || 18;
+				const igLineComment = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_COMMENT")) || 22;
+				for (const line of [igLineDirect, igLineComment]) {
+					await this.callBitrix24Method(domain, "imconnector.activate", {
+						CONNECTOR: "social_connector",
+						LINE: line,
+						ACTIVE: 1,
+					});
+					// Если i2crm-нативный был активен — деактивируем (наш Public API pipeline не зависит)
+					await this.callBitrix24Method(domain, "imconnector.activate", {
+						CONNECTOR: "i2crm",
+						LINE: line,
+						ACTIVE: 0,
+					}).catch(() => undefined);
+				}
+				this.logger.info(`Connector activation restored after install: social_connector on lines ${igLineDirect},${igLineComment}; i2crm deactivated`);
+			} catch (e: any) {
+				this.logger.warn(`Connector re-activation after install failed (non-fatal): ${e.message}`);
+			}
+
 			return {
 				success: true,
 				message: "App installation processed successfully",
