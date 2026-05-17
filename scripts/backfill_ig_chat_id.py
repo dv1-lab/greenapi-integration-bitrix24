@@ -24,6 +24,8 @@ import re
 import sys
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 # Импортируем хелперы из migrate_ig_username (та же auth-логика)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,70 +38,97 @@ RATE_DELAY = float(os.environ.get("RATE_DELAY", "0.25"))
 USER_CODE_RE = re.compile(r"^i2crm\|\d+\|inst-(\d+)[-_]")
 
 
-def collect_lead_to_client(bx, line_id):
-    """Возвращает dict {lead_id: {'client_id': str, 'media_id': str|None, 'comment_id': str|None}}.
-    Берём ПЕРВУЮ встреченную активность для каждого лида (DESC order — самая свежая).
-    """
-    print(f"\n=== collecting line {line_id} activities ===", flush=True)
-    lead_data = {}
-    start = 0
-    pages = 0
-    total = None
-    while True:
-        try:
-            r = bx.call("crm.activity.list", {
-                "filter[PROVIDER_ID]": "IMOPENLINES_SESSION",
-                "filter[PROVIDER_TYPE_ID]": str(line_id),
-                "select[0]": "ID",
-                "select[1]": "OWNER_ID",
-                "select[2]": "OWNER_TYPE_ID",
-                "select[3]": "PROVIDER_PARAMS",
-                "order[ID]": "DESC",
-                "start": start,
-            })
-        except Exception as e:
-            print(f"  list error at start={start}: {e}", flush=True)
-            time.sleep(5)
-            continue
-        items = r.get("result", []) or []
-        if not items:
-            break
-        if total is None:
-            total = r.get("total", 0)
-            print(f"  total activities: {total}", flush=True)
-        for a in items:
-            if a.get("OWNER_TYPE_ID") != "1":
-                continue  # только лиды
-            pp = a.get("PROVIDER_PARAMS") or {}
-            uc = pp.get("USER_CODE") if isinstance(pp, dict) else None
-            if not uc:
+def _parse_activity_to_entry(a, line_id):
+    """Парсит активность → (lead_id, entry) или None."""
+    if a.get("OWNER_TYPE_ID") != "1":
+        return None
+    pp = a.get("PROVIDER_PARAMS") or {}
+    uc = pp.get("USER_CODE") if isinstance(pp, dict) else None
+    if not uc:
+        return None
+    m = USER_CODE_RE.match(uc)
+    if not m:
+        return None
+    client_id = m.group(1)
+    lead_id = int(a["OWNER_ID"])
+    entry = {"client_id": client_id, "media_id": None, "comment_id": None}
+    if line_id == 22:
+        m2 = re.match(r"^i2crm\|22\|inst-\d+-(\d+)_\d+-(\d+)", uc)
+        if m2:
+            entry["media_id"] = m2.group(1)
+            entry["comment_id"] = m2.group(2)
+    return lead_id, entry
+
+
+def _get_total_activities(bx, line_id):
+    """Один list-запрос чтобы узнать total — далее распределим страницы по worker'ам."""
+    r = bx.call("crm.activity.list", {
+        "filter[PROVIDER_ID]": "IMOPENLINES_SESSION",
+        "filter[PROVIDER_TYPE_ID]": str(line_id),
+        "select[0]": "ID",
+        "start": 0,
+    })
+    return r.get("total", 0)
+
+
+def collect_lead_to_client_parallel(bx, line_id, num_workers, lead_data, lock):
+    """Параллельный сбор: total делим на num_workers диапазонов, каждый worker
+    идёт sequentially по своему диапазону страниц. Пишут в общий lead_data."""
+    total = _get_total_activities(bx, line_id)
+    print(f"  line {line_id}: total={total}, splitting into {num_workers} workers", flush=True)
+    if total == 0:
+        return
+
+    # Распределяем по worker'ам: каждый берёт каждую N-ю страницу (start=0, 50N, 100N, ...)
+    # B24 next-pagination игнорируем — используем абсолютный start.
+    # Каждая страница = 50 записей.
+    pages_per_worker = (total + 49) // 50  # всего страниц
+    # На worker'а: каждый i-й worker берёт страницы (i, i+N, i+2N, ...)
+    progress = {"scanned": 0}
+
+    def worker(worker_idx):
+        page_starts = list(range(worker_idx * 50, total, num_workers * 50))
+        for start in page_starts:
+            try:
+                r = bx.call("crm.activity.list", {
+                    "filter[PROVIDER_ID]": "IMOPENLINES_SESSION",
+                    "filter[PROVIDER_TYPE_ID]": str(line_id),
+                    "select[0]": "ID",
+                    "select[1]": "OWNER_ID",
+                    "select[2]": "OWNER_TYPE_ID",
+                    "select[3]": "PROVIDER_PARAMS",
+                    "order[ID]": "DESC",
+                    "start": start,
+                }, timeout=60)
+            except Exception as e:
+                print(f"  line {line_id} w{worker_idx} list error at start={start}: {e}", flush=True)
+                time.sleep(5)
                 continue
-            m = USER_CODE_RE.match(uc)
-            if not m:
+            items = r.get("result", []) or []
+            if not items:
                 continue
-            client_id = m.group(1)
-            lead_id = int(a["OWNER_ID"])
-            if lead_id in lead_data:
-                continue
-            entry = {"client_id": client_id, "media_id": None, "comment_id": None}
-            # Для Comment вытаскиваем media_id + comment_id
-            if line_id == 22:
-                # inst-<cid>-<media>_<acc>-<comment>
-                m2 = re.match(r"^i2crm\|22\|inst-\d+-(\d+)_\d+-(\d+)", uc)
-                if m2:
-                    entry["media_id"] = m2.group(1)
-                    entry["comment_id"] = m2.group(2)
-            lead_data[lead_id] = entry
-        pages += 1
-        if pages % 10 == 0:
-            print(f"  scanned {start + len(items)}/{total} activities, "
-                  f"unique leads collected: {len(lead_data)}", flush=True)
-        nxt = r.get("next")
-        if nxt is None or nxt == start:
-            break
-        start = nxt
-    print(f"  line {line_id} done: scanned ~{start} activities, unique i2crm-leads: {len(lead_data)}", flush=True)
-    return lead_data
+            for a in items:
+                parsed = _parse_activity_to_entry(a, line_id)
+                if not parsed:
+                    continue
+                lead_id, entry = parsed
+                with lock:
+                    if lead_id not in lead_data:
+                        lead_data[lead_id] = entry
+                    elif entry.get("media_id") and not lead_data[lead_id].get("media_id"):
+                        # Comment-данные приоритетнее (есть media/comment id)
+                        lead_data[lead_id] = entry
+            with lock:
+                progress["scanned"] += len(items)
+                if progress["scanned"] % 5000 < 50:
+                    print(f"  line {line_id}: scanned {progress['scanned']}/{total}, "
+                          f"unique leads total: {len(lead_data)}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [ex.submit(worker, i) for i in range(num_workers)]
+        for _ in as_completed(futures):
+            pass
+    print(f"  line {line_id} done: scanned ~{progress['scanned']} activities", flush=True)
 
 
 def fetch_lead_state(bx, lead_ids):
@@ -227,7 +256,8 @@ def backfill_leads(bx, lead_data):
         print("DRY_RUN: would update", total, "leads")
         return
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    # 4 потока — больше может упереться в OPERATION_TIME_LIMIT (но retry поможет).
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futures = [ex.submit(process_one, lid) for lid in lead_ids]
         for _ in as_completed(futures):
             pass
@@ -260,16 +290,31 @@ def main():
     env = load_env()
     bx = Bitrix(env)
     bx.refresh()
-    direct = collect_lead_to_client(bx, 18)
-    comments = collect_lead_to_client(bx, 22)
-    # Comment-данные приоритетнее (там есть media_id/comment_id для LINK0)
-    merged = dict(direct)
-    for lead_id, info in comments.items():
-        if lead_id in merged and not merged[lead_id].get("media_id"):
-            merged[lead_id] = info
-        elif lead_id not in merged:
-            merged[lead_id] = info
-    print(f"\ntotal unique leads to process: {len(merged)}", flush=True)
+    # Защитим refresh от race condition при многопотоке
+    if not hasattr(bx, "_refresh_lock"):
+        bx._refresh_lock = Lock()
+        _orig_refresh = bx.refresh
+        def _safe_refresh():
+            with bx._refresh_lock:
+                _orig_refresh()
+        bx.refresh = _safe_refresh
+
+    # Параллельный сбор обеих линий + параллельная pagination внутри line 18.
+    # Line 18 — ~90k activities, выделим 2 worker'а
+    # Line 22 — ~30k activities, 1 worker'а достаточно
+    # Total 3 потока на B24 — приемлемо.
+    merged = {}
+    lock = Lock()
+
+    print("\n=== collecting line 18 + line 22 IN PARALLEL ===", flush=True)
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f18 = ex.submit(collect_lead_to_client_parallel, bx, 18, 2, merged, lock)
+        f22 = ex.submit(collect_lead_to_client_parallel, bx, 22, 1, merged, lock)
+        for _ in as_completed([f18, f22]):
+            pass
+    print(f"\ncollect total: {len(merged)} unique leads in {int(time.time()-t0)}s", flush=True)
+
     backfill_leads(bx, merged)
 
 
