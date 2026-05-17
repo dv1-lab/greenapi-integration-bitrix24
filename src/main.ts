@@ -3,7 +3,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { AppModule } from "./app.module";
 import { Settings, GreenApiLogger } from "@green-api/greenapi-integration";
 import helmet from "helmet";
-import { urlencoded } from "express";
+import { urlencoded, json } from "express";
 import { mask, maskString } from "./common/mask";
 
 declare global {
@@ -45,6 +45,14 @@ async function bootstrap() {
 	app.enableCors();
 	// B24 placement POST шлёт application/x-www-form-urlencoded — без этого @Body пустой.
 	app.use(urlencoded({ extended: true, limit: "5mb" }));
+	// Сохраняем raw body для JSON-запросов — нужно для /webhooks/i2crm
+	// чтобы обойти JS Number precision loss на 64-bit IDs клиентов IG.
+	app.use(json({
+		limit: "5mb",
+		verify: (req: any, _res, buf) => {
+			req.rawBody = buf;
+		},
+	}));
 
 	await app.listen(3000);
 }

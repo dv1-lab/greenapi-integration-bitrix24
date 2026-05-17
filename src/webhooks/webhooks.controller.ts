@@ -1,9 +1,20 @@
-import { Controller, Post, Body, HttpCode, HttpStatus, Res, UseGuards } from "@nestjs/common";
-import { Response } from "express";
+import { Controller, Post, Body, HttpCode, HttpStatus, Req, Res, UseGuards } from "@nestjs/common";
+import { Request, Response } from "express";
 import { Bitrix24Service } from "../bitrix24/bitrix24.service";
 import { GreenApiWebhook, GreenApiLogger } from "@green-api/greenapi-integration";
 import { Bitrix24WebhookDto } from "../bitrix24/dto/bitrix24-webhook.dto";
 import { Bitrix24WebhookGuard } from "./guards/bitrix24-webhook.guard";
+
+// i2crm посылает client_id, message_id, external_id и пр. как 64-bit integers
+// (могут быть > 2^53). JSON.parse в Node превращает их в Number и теряет
+// точность последних цифр. Преобразуем их в строки ДО JSON.parse через regex
+// над сырым текстом — единственный способ сохранить точное значение.
+const BIG_INT_FIELDS = /(\"(?:client_id|message_id|external_id|account_id|media_id|comment_id|id|account|client)\"\s*:\s*)(\d{15,})/g;
+
+function safeJsonParse(rawText: string): any {
+	const safe = rawText.replace(BIG_INT_FIELDS, '$1"$2"');
+	return JSON.parse(safe);
+}
 
 @Controller("webhooks")
 export class WebhooksController {
@@ -31,7 +42,20 @@ export class WebhooksController {
 
 	@Post("i2crm")
 	@HttpCode(HttpStatus.OK)
-	async handleI2crmWebhook(@Body() body: any, @Res() res: Response): Promise<void> {
+	async handleI2crmWebhook(@Req() req: Request, @Res() res: Response): Promise<void> {
+		// Используем raw body (saved by express.json verify в main.ts) — парсим
+		// числовые ID-поля как строки чтобы не терять последние цифры на
+		// 64-bit integers. NestJS default-парсер использует JSON.parse, который
+		// округляет числа > 2^53 (Instagram client_id может быть 19-значным).
+		let body: any;
+		try {
+			const rawBuf = (req as any).rawBody as Buffer | undefined;
+			const text = rawBuf ? rawBuf.toString("utf-8") : JSON.stringify(req.body || {});
+			body = safeJsonParse(text);
+		} catch (e: any) {
+			this.logger.error(`[i2crm webhook] body parse failed: ${e.message}`);
+			body = req.body;
+		}
 		this.logger.info("[i2crm webhook] payload", body);
 		// Сразу 200 чтобы i2crm не ретраил при долгой обработке
 		res.status(HttpStatus.OK).json({ success: true });
