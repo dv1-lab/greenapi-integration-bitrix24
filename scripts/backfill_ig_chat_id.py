@@ -353,17 +353,14 @@ def main():
     merged = {}
     lock = Lock()
 
-    print("\n=== collecting line 18 + line 22 IN PARALLEL (1 worker per line) ===", flush=True)
+    print("\n=== collecting line 18 + line 22 SEQUENTIALLY (1 worker total) ===", flush=True)
     t0 = time.time()
-    # 1 worker на каждую линию (не 2+1). B24 OPERATION_TIME_LIMIT срабатывает
-    # при любой параллельности на activity.list с PROVIDER_PARAMS, поэтому 3+
-    # потока съедают всё время на back-off. 2 потока (по 1 на линию) — баланс:
-    # обе линии идут одновременно, но не дерутся за квоту слишком жёстко.
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f18 = ex.submit(collect_lead_to_client_parallel, bx, 18, 1, merged, lock)
-        f22 = ex.submit(collect_lead_to_client_parallel, bx, 22, 1, merged, lock)
-        for _ in as_completed([f18, f22]):
-            pass
+    # Эмпирически: B24 OPERATION_TIME_LIMIT срабатывает даже при 2 параллельных
+    # activity.list на разных линиях (PROVIDER_PARAMS — тяжёлое поле, накапливает
+    # CPU-время квоты). Sequential — единственный способ обеспечить стабильный
+    # темп без 70% времени в back-off.
+    collect_lead_to_client_parallel(bx, 18, 1, merged, lock)
+    collect_lead_to_client_parallel(bx, 22, 1, merged, lock)
     print(f"\ncollect total: {len(merged)} unique leads in {int(time.time()-t0)}s", flush=True)
 
     backfill_leads(bx, merged)
