@@ -102,91 +102,158 @@ def collect_lead_to_client(bx, line_id):
     return lead_data
 
 
-def backfill_leads(bx, lead_data):
-    print(f"\n=== backfilling {len(lead_data)} leads ===", flush=True)
-    updated_leads = 0
-    updated_contacts = 0
-    updated_links = 0
-    skipped_lead_no_change = 0
-    skipped_contact_no_change = 0
-    errors = 0
-    done = 0
-
-    for lead_id, info in lead_data.items():
-        done += 1
-        client_id = info["client_id"]
+def fetch_lead_state(bx, lead_ids):
+    """Берёт CONTACT_ID, LINK, UF_CRM_IG_CHAT_ID для всех лидов одним bulk-запросом
+    через crm.lead.list с filter[@ID][]. Возвращает dict {lead_id: {contact_id, link, chat_id_present}}.
+    Чанки по 50 — B24 list большие filter обрабатывает медленно."""
+    print(f"\n=== fetching state for {len(lead_ids)} leads ===", flush=True)
+    result = {}
+    ids = list(lead_ids)
+    for ci in range(0, len(ids), 50):
+        chunk = ids[ci:ci+50]
         try:
-            lead = bx.call("crm.lead.get", {"id": lead_id}).get("result", {})
+            params = {
+                "select[0]": "ID",
+                "select[1]": "CONTACT_ID",
+                "select[2]": "LINK",
+                "select[3]": "UF_CRM_IG_CHAT_ID",
+            }
+            for i, lid in enumerate(chunk):
+                params[f"filter[@ID][{i}]"] = str(lid)
+            r = bx.call("crm.lead.list", params, timeout=60)
+            for item in r.get("result", []) or []:
+                lid = int(item["ID"])
+                cid = item.get("CONTACT_ID")
+                link = item.get("LINK")
+                result[lid] = {
+                    "contact_id": int(cid) if cid else None,
+                    "link": link if isinstance(link, list) else [],
+                    "chat_id_already": bool(item.get("UF_CRM_IG_CHAT_ID")),
+                }
         except Exception as e:
-            errors += 1
-            print(f"  lead.get {lead_id} failed: {e}", flush=True)
-            continue
+            print(f"  fetch state chunk {ci} failed: {e}", flush=True)
+        if (ci // 50 + 1) % 20 == 0:
+            print(f"  state fetched {min(ci + 50, len(ids))}/{len(ids)} leads", flush=True)
+    print(f"  total: {len(result)}, with contact: {sum(1 for v in result.values() if v['contact_id'])}, "
+          f"chat_id already set: {sum(1 for v in result.values() if v['chat_id_already'])}", flush=True)
+    return result
 
-        # Подготавливаем апдейт лида
-        lead_fields = {}
-        if not lead.get("UF_CRM_IG_CHAT_ID"):
-            lead_fields["fields[UF_CRM_IG_CHAT_ID]"] = client_id
 
-        # LINK0 (URL поста) — если знаем media_id, пробуем построить URL из comment_id
-        # У i2crm нет shortcode, но можем использовать media_id как fallback в URL
-        # к конкретному комменту. Меньшее зло чем оставить пусто.
+def backfill_leads(bx, lead_data):
+    """Параллельный backfill: 2 потока, без предварительного lead.get/contact.get.
+    Update'ы безусловно перезаписывают UF_CRM_IG_CHAT_ID (по client_id из USER_CODE — safe).
+    Для LINK0 на comment-лидах — append через специальный API B24 без чтения LINK[]."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
+
+    lead_ids = list(lead_data.keys())
+    lead_state = fetch_lead_state(bx, lead_ids)
+
+    print(f"\n=== backfilling {len(lead_data)} leads (2 threads, bulk state pre-fetched) ===", flush=True)
+    counters = {"leads_upd": 0, "leads_skip": 0, "contacts_upd": 0, "links_upd": 0, "errors": 0, "done": 0}
+    lock = Lock()
+    total = len(lead_data)
+
+    def process_one(lead_id):
+        info = lead_data[lead_id]
+        state = lead_state.get(lead_id) or {"contact_id": None, "link": [], "chat_id_already": False}
+        client_id = info["client_id"]
+        post_url = None
         if info.get("media_id") and info.get("comment_id"):
             post_url = f"https://www.instagram.com/p/{info['media_id']}/?comment_id={info['comment_id']}"
-            existing_links = lead.get("LINK") or []
-            has_link0 = any(l.get("VALUE_TYPE") == "LINK0" for l in existing_links) if isinstance(existing_links, list) else False
-            if not has_link0:
-                new_links = [{"ID": l["ID"], "VALUE": l["VALUE"], "VALUE_TYPE": l["VALUE_TYPE"]}
-                             for l in existing_links] if isinstance(existing_links, list) else []
+
+        # Если UF уже заполнен И LINK0 уже добавлен — пропускаем (idempotency)
+        existing_link0 = next(
+            (l for l in (state["link"] or []) if isinstance(l, dict) and l.get("VALUE_TYPE") == "LINK0"),
+            None,
+        )
+        need_chat_id = not state["chat_id_already"]
+        need_link0 = post_url and (not existing_link0 or existing_link0.get("VALUE") != post_url)
+
+        if not need_chat_id and not need_link0 and not state["contact_id"]:
+            with lock:
+                counters["leads_skip"] += 1
+                counters["done"] += 1
+            return
+
+        # 1. UPDATE LEAD: UF_CRM_IG_CHAT_ID + (для comment) LINK с сохранением существующих
+        if need_chat_id or need_link0:
+            lead_params = {"id": lead_id}
+            if need_chat_id:
+                lead_params["fields[UF_CRM_IG_CHAT_ID]"] = client_id
+            if need_link0:
+                # Сохраняем все НЕ-LINK0 значения и добавляем/обновляем LINK0
+                new_links = []
+                for l in (state["link"] or []):
+                    if isinstance(l, dict) and l.get("VALUE_TYPE") != "LINK0":
+                        new_links.append({
+                            "ID": l.get("ID"),
+                            "VALUE": l.get("VALUE"),
+                            "VALUE_TYPE": l.get("VALUE_TYPE"),
+                        })
                 new_links.append({"VALUE": post_url, "VALUE_TYPE": "LINK0"})
-                # B24 multifield update — отдельным ключом в fields
-                # Для form-encoded: fields[LINK][0][VALUE]=..., fields[LINK][0][VALUE_TYPE]=...
                 for i, link in enumerate(new_links):
                     for k, v in link.items():
-                        lead_fields[f"fields[LINK][{i}][{k}]"] = str(v)
-                updated_links += 1
+                        if v is not None:
+                            lead_params[f"fields[LINK][{i}][{k}]"] = str(v)
+            ok = retry_call(bx, "crm.lead.update", lead_params, counters, lock, lead_id)
+            if ok:
+                with lock:
+                    counters["leads_upd"] += 1
+                    if need_link0:
+                        counters["links_upd"] += 1
 
-        if not lead_fields:
-            skipped_lead_no_change += 1
-        elif not DRY_RUN:
-            try:
-                bx.call("crm.lead.update", {"id": lead_id, **lead_fields})
-                updated_leads += 1
-            except Exception as e:
-                errors += 1
-                print(f"  lead.update {lead_id} failed: {e}", flush=True)
-        else:
-            updated_leads += 1
-
-        # Обновляем CONTACT
-        contact_id = lead.get("CONTACT_ID")
+        # 2. UPDATE CONTACT (если есть) — overwrite UF_CRM_IG_CHAT_ID
+        # (если уже есть верное значение — overwrite самим собой, безопасно)
+        contact_id = state["contact_id"]
         if contact_id:
-            try:
-                contact = bx.call("crm.contact.get", {"id": contact_id}).get("result", {})
-                if not contact.get("UF_CRM_IG_CHAT_ID"):
-                    if not DRY_RUN:
-                        bx.call("crm.contact.update", {
-                            "id": contact_id,
-                            "fields[UF_CRM_IG_CHAT_ID]": client_id,
-                        })
-                    updated_contacts += 1
-                else:
-                    skipped_contact_no_change += 1
-            except Exception as e:
-                errors += 1
-                print(f"  contact {contact_id} backfill failed: {e}", flush=True)
+            ok2 = retry_call(bx, "crm.contact.update", {
+                "id": contact_id,
+                "fields[UF_CRM_IG_CHAT_ID]": client_id,
+            }, counters, lock, contact_id)
+            if ok2:
+                with lock:
+                    counters["contacts_upd"] += 1
 
-        if not DRY_RUN:
-            time.sleep(RATE_DELAY)
+        with lock:
+            counters["done"] += 1
+            if counters["done"] % 100 == 0:
+                print(f"  progress {counters['done']}/{total} "
+                      f"leads_upd={counters['leads_upd']} leads_skip={counters['leads_skip']} "
+                      f"contacts_upd={counters['contacts_upd']} links_upd={counters['links_upd']} "
+                      f"errors={counters['errors']}", flush=True)
 
-        if done % 50 == 0:
-            print(f"  progress {done}/{len(lead_data)} "
-                  f"leads_upd={updated_leads} contacts_upd={updated_contacts} "
-                  f"links_upd={updated_links} lead_skip={skipped_lead_no_change} "
-                  f"contact_skip={skipped_contact_no_change} errors={errors}", flush=True)
+    if DRY_RUN:
+        print("DRY_RUN: would update", total, "leads")
+        return
 
-    print(f"\n=== DONE: leads_updated={updated_leads} contacts_updated={updated_contacts} "
-          f"links_updated={updated_links} lead_skip={skipped_lead_no_change} "
-          f"contact_skip={skipped_contact_no_change} errors={errors} ===", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = [ex.submit(process_one, lid) for lid in lead_ids]
+        for _ in as_completed(futures):
+            pass
+
+    print(f"\n=== DONE: leads_upd={counters['leads_upd']} leads_skip={counters['leads_skip']} "
+          f"contacts_upd={counters['contacts_upd']} links_upd={counters['links_upd']} "
+          f"errors={counters['errors']} ===", flush=True)
+
+
+def retry_call(bx, method, params, counters, lock, item_id, kind="lead"):
+    """Update с retry на OPERATION_TIME_LIMIT (sleep 60/90/120s)."""
+    for attempt, delay in enumerate([60, 90, 120, 180], 1):
+        try:
+            bx.call(method, params, timeout=60)
+            return True
+        except Exception as e:
+            msg = str(e)
+            if "OPERATION_TIME_LIMIT" in msg and attempt < 4:
+                time.sleep(delay)
+                continue
+            with lock:
+                counters["errors"] += 1
+                if counters["errors"] <= 15:
+                    print(f"  {method} {item_id} (attempt {attempt}): {e}", flush=True)
+            return False
+    return False
 
 
 def main():
