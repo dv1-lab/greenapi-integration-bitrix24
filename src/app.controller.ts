@@ -836,6 +836,14 @@ export class AppController {
                         console.log('Social Connector interface loaded');
                         domain = BX24.getDomain();
                         console.log('Current domain:', domain);
+                        // Сигнализируем B24 что установка приложения завершена,
+                        // иначе app.info возвращает INSTALLED:false и обычные сотрудники
+                        // видят "Приложение ещё не установлено до конца".
+                        try {
+                            if (typeof BX24.installFinish === 'function') {
+                                BX24.installFinish();
+                            }
+                        } catch (e) { console.warn('installFinish:', e); }
                     });
                 } else {
                     console.warn('BX24 not available, running in standalone mode');
