@@ -13,9 +13,16 @@ export class PrismaService
 	}
 
 	async createUser(data: UserCreateData): Promise<User> {
+		// При повторном вызове /oauth/install B24 не передаёт application_token
+		// (он приходит отдельно через ONAPPINSTALL webhook), и в data.applicationToken
+		// лежит временный плейсхолдер вида `temp_<ts>`. Если затереть им уже
+		// существующий правильный applicationToken — Guard начнёт отбивать
+		// все последующие ONIMCONNECTORMESSAGEADD, и outgoing-сообщения перестают
+		// доходить. Поэтому при update applicationToken НЕ перезаписываем.
+		const {applicationToken: _appTok, ...updateFields} = data;
 		return this.user.upsert({
 			where: {id: data.id},
-			update: {...data},
+			update: updateFields,
 			create: {...data},
 		});
 	}
