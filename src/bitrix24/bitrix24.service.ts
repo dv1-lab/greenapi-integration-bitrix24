@@ -1729,6 +1729,99 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	// ----- Contact-name lookup (для wa-tg-bridge: имя темы из B24) ---
+	// Кеш phone/igClientId → ФИО клиента из B24. TTL 10 мин, чтобы не дёргать
+	// B24 на каждое incoming-сообщение. При обновлении ФИО в B24 — мост подтянет
+	// новое имя через max 10 минут (а если был direct refresh — мгновенно).
+	private contactNameCache = new Map<string, { name: string | null; expires: number }>();
+
+	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null }> {
+		const phone = (input.phone || "").trim();
+		const igClientId = (input.igClientId || "").trim();
+		if (!phone && !igClientId) return { name: null, source: null };
+		const key = phone ? `phone:${phone}` : `ig:${igClientId}`;
+		const cached = this.contactNameCache.get(key);
+		if (cached && cached.expires > Date.now()) {
+			return { name: cached.name, source: cached.name ? "cache" : null };
+		}
+
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const user = users[0];
+		if (!user) return { name: null, source: null };
+		const portalDomain = user.portalDomain;
+
+		const buildName = (rec: any): string | null => {
+			if (!rec) return null;
+			const parts = [rec.NAME, rec.LAST_NAME].filter((s: any) => s && String(s).trim());
+			return parts.length ? parts.join(" ").trim() : null;
+		};
+
+		let name: string | null = null;
+		let source: string | null = null;
+
+		try {
+			if (phone) {
+				// Через crm.duplicate.findbycomm — официальный способ найти контакт/лид
+				// по phone в B24 (учитывает все варианты записи номера).
+				const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
+					entity_type: "CONTACT",
+					type: "PHONE",
+					values: [phone],
+				});
+				const contactId = dup?.CONTACT?.[0];
+				if (contactId) {
+					const c: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
+					name = buildName(c);
+					source = "contact";
+				}
+				if (!name) {
+					const dupL: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
+						entity_type: "LEAD",
+						type: "PHONE",
+						values: [phone],
+					});
+					const leadId = dupL?.LEAD?.[0];
+					if (leadId) {
+						const l: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: leadId });
+						name = buildName(l);
+						source = "lead";
+					}
+				}
+			} else if (igClientId) {
+				// IG: ищем по UF_CRM_IG_CHAT_ID в контактах и лидах.
+				const cList: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+					filter: { UF_CRM_IG_CHAT_ID: igClientId },
+					select: ["ID", "NAME", "LAST_NAME"],
+				});
+				if (Array.isArray(cList) && cList.length > 0) {
+					name = buildName(cList[0]);
+					source = "contact";
+				}
+				if (!name) {
+					const lList: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+						filter: { UF_CRM_IG_CHAT_ID: igClientId },
+						select: ["ID", "NAME", "LAST_NAME"],
+					});
+					if (Array.isArray(lList) && lList.length > 0) {
+						name = buildName(lList[0]);
+						source = "lead";
+					}
+				}
+			}
+		} catch (e: any) {
+			this.logger.warn(`getContactName failed for ${key}: ${e.message}`);
+		}
+
+		this.contactNameCache.set(key, { name, expires: Date.now() + 600_000 });
+		if (this.contactNameCache.size > 1000) {
+			const now = Date.now();
+			for (const [k, v] of this.contactNameCache) {
+				if (v.expires < now) this.contactNameCache.delete(k);
+			}
+		}
+		return { name, source };
+	}
+
 	// ----- Operator name cache + hint forwarding ----------------------
 	// Cache: B24 user_id → "Имя Фамилия". TTL 1 час (имена сотрудников редко
 	// меняются, но при увольнении/добавлении хотим подхватить).

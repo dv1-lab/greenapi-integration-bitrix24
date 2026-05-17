@@ -83,6 +83,33 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint для wa-tg-bridge: получить ФИО клиента из B24 по phone
+	// (для WA/MAX/TG) или igClientId (для Instagram). Авторизация общим секретом
+	// BRIDGE_HINT_SECRET (он же используется для operator-hint). Контейнер
+	// доступен только в Docker-сети, наружу не торчит.
+	@Post("internal/contact-name")
+	@HttpCode(HttpStatus.OK)
+	async getContactName(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { phone?: string; igClientId?: string };
+		try {
+			const result = await this.bitrix24Service.getContactName(body);
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`contact-name lookup failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
+	// Internal endpoint: bridge принимает callback "переименовать тему". Сами
+	// не вызываем (это endpoint в bridge, не у нас) — оставлено для документации
+	// архитектуры, см. wa-tg-bridge __main__.py /internal/rename-topic.
+
 	private mapError(error: any) {
 		const mappings = [
 			{
