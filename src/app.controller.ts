@@ -1,11 +1,8 @@
 import { All, Controller, Req, Res } from "@nestjs/common";
 import { Response, Request } from "express";
-import { WidgetController } from "./widget/widget.controller";
 
 @Controller()
 export class AppController {
-	constructor(private readonly widgetController: WidgetController) {}
-
 	private getTranslations(language: string) {
 		const isRussian = language === "ru";
 
@@ -74,9 +71,10 @@ export class AppController {
 		}
 
 		// Если запрос пришёл в контексте CRM placement (от Bitrix24 при открытии
-		// вкладки/выпадашки в карточке лида/сделки/контакта) — рендерим виджет
-		// «Написать первым» вместо landing-page. B24 после переустановки иногда
-		// открывает корневой URL вместо указанного в placement.get handler'а.
+		// вкладки/выпадашки в карточке лида/сделки/контакта) — рендерим HTML-страницу
+		// которая через JS auto-submit'ит форму на /widget/send-first с теми же POST-полями.
+		// B24 после переустановки иногда открывает корневой URL вместо указанного
+		// в placement.get handler'а — это auto-redirect передаёт управление виджету.
 		const placement = (req.body?.PLACEMENT || req.query?.PLACEMENT || "").toString();
 		const isCrmPlacement = placement && (
 			placement.startsWith("CRM_LEAD_") ||
@@ -85,7 +83,10 @@ export class AppController {
 			placement.startsWith("CRM_COMPANY_")
 		);
 		if (isCrmPlacement) {
-			return this.widgetController.render(req, req.body, res);
+			const fields = Object.entries(req.body || {})
+				.map(([k, v]) => `<input type="hidden" name="${k.replace(/"/g, "&quot;")}" value="${String(v ?? "").replace(/"/g, "&quot;")}">`)
+				.join("\n");
+			return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Загрузка...</title></head><body><form id="f" method="POST" action="/widget/send-first">${fields}</form><script>document.getElementById('f').submit()</script><p style="font-family:sans-serif;color:#666;text-align:center;margin-top:40px">Загрузка виджета...</p></body></html>`);
 		}
 
 		const languageId = req.query.LANG as string || req.body?.LANG || "en";
