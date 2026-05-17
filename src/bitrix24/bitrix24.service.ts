@@ -1733,21 +1733,23 @@ export class Bitrix24Service extends BaseAdapter<
 	// Кеш phone/igClientId → ФИО клиента из B24. TTL 10 мин, чтобы не дёргать
 	// B24 на каждое incoming-сообщение. При обновлении ФИО в B24 — мост подтянет
 	// новое имя через max 10 минут (а если был direct refresh — мгновенно).
-	private contactNameCache = new Map<string, { name: string | null; expires: number }>();
+	private contactNameCache = new Map<string, { name: string | null; expires: number; entityId?: number | null; link?: string | null }>();
 
-	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null }> {
+	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null; entityId: number | null; link: string | null }> {
 		const phone = (input.phone || "").trim();
 		const igClientId = (input.igClientId || "").trim();
-		if (!phone && !igClientId) return { name: null, source: null };
+		const empty = { name: null, source: null, entityId: null, link: null };
+		if (!phone && !igClientId) return empty;
 		const key = phone ? `phone:${phone}` : `ig:${igClientId}`;
 		const cached = this.contactNameCache.get(key);
 		if (cached && cached.expires > Date.now()) {
-			return { name: cached.name, source: cached.name ? "cache" : null };
+			const c: any = cached;
+			return { name: c.name, source: c.name ? "cache" : null, entityId: c.entityId || null, link: c.link || null };
 		}
 
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
 		const user = users[0];
-		if (!user) return { name: null, source: null };
+		if (!user) return empty;
 		const portalDomain = user.portalDomain;
 
 		const buildName = (rec: any): string | null => {
@@ -1758,11 +1760,11 @@ export class Bitrix24Service extends BaseAdapter<
 
 		let name: string | null = null;
 		let source: string | null = null;
+		let entityId: number | null = null;
+		let link: string | null = null;
 
 		try {
 			if (phone) {
-				// Через crm.duplicate.findbycomm — официальный способ найти контакт/лид
-				// по phone в B24 (учитывает все варианты записи номера).
 				const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
 					entity_type: "CONTACT",
 					type: "PHONE",
@@ -1773,6 +1775,8 @@ export class Bitrix24Service extends BaseAdapter<
 					const c: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
 					name = buildName(c);
 					source = "contact";
+					entityId = parseInt(contactId, 10);
+					link = `https://${portalDomain}/crm/contact/details/${entityId}/`;
 				}
 				if (!name) {
 					const dupL: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
@@ -1785,10 +1789,11 @@ export class Bitrix24Service extends BaseAdapter<
 						const l: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: leadId });
 						name = buildName(l);
 						source = "lead";
+						entityId = parseInt(leadId, 10);
+						link = `https://${portalDomain}/crm/lead/details/${entityId}/`;
 					}
 				}
 			} else if (igClientId) {
-				// IG: ищем по UF_CRM_IG_CHAT_ID в контактах и лидах.
 				const cList: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
 					filter: { UF_CRM_IG_CHAT_ID: igClientId },
 					select: ["ID", "NAME", "LAST_NAME"],
@@ -1796,6 +1801,8 @@ export class Bitrix24Service extends BaseAdapter<
 				if (Array.isArray(cList) && cList.length > 0) {
 					name = buildName(cList[0]);
 					source = "contact";
+					entityId = parseInt(cList[0].ID, 10);
+					link = `https://${portalDomain}/crm/contact/details/${entityId}/`;
 				}
 				if (!name) {
 					const lList: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
@@ -1805,6 +1812,8 @@ export class Bitrix24Service extends BaseAdapter<
 					if (Array.isArray(lList) && lList.length > 0) {
 						name = buildName(lList[0]);
 						source = "lead";
+						entityId = parseInt(lList[0].ID, 10);
+						link = `https://${portalDomain}/crm/lead/details/${entityId}/`;
 					}
 				}
 			}
@@ -1812,14 +1821,14 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`getContactName failed for ${key}: ${e.message}`);
 		}
 
-		this.contactNameCache.set(key, { name, expires: Date.now() + 600_000 });
+		this.contactNameCache.set(key, { name, expires: Date.now() + 600_000, entityId, link } as any);
 		if (this.contactNameCache.size > 1000) {
 			const now = Date.now();
 			for (const [k, v] of this.contactNameCache) {
 				if (v.expires < now) this.contactNameCache.delete(k);
 			}
 		}
-		return { name, source };
+		return { name, source, entityId, link };
 	}
 
 	// ----- Operator name cache + hint forwarding ----------------------
