@@ -301,8 +301,9 @@ def backfill_leads(bx, lead_data):
         print("DRY_RUN: would update", total, "leads")
         return
 
-    # 4 потока — больше может упереться в OPERATION_TIME_LIMIT (но retry поможет).
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # 2 потока — для update'ов на B24 квота снисходительнее, retry с global
+    # back-off страхует. 4 потока в backfill дают такие же block'и как 3+ в collect.
+    with ThreadPoolExecutor(max_workers=2) as ex:
         futures = [ex.submit(process_one, lid) for lid in lead_ids]
         for _ in as_completed(futures):
             pass
@@ -352,10 +353,14 @@ def main():
     merged = {}
     lock = Lock()
 
-    print("\n=== collecting line 18 + line 22 IN PARALLEL ===", flush=True)
+    print("\n=== collecting line 18 + line 22 IN PARALLEL (1 worker per line) ===", flush=True)
     t0 = time.time()
+    # 1 worker на каждую линию (не 2+1). B24 OPERATION_TIME_LIMIT срабатывает
+    # при любой параллельности на activity.list с PROVIDER_PARAMS, поэтому 3+
+    # потока съедают всё время на back-off. 2 потока (по 1 на линию) — баланс:
+    # обе линии идут одновременно, но не дерутся за квоту слишком жёстко.
     with ThreadPoolExecutor(max_workers=2) as ex:
-        f18 = ex.submit(collect_lead_to_client_parallel, bx, 18, 2, merged, lock)
+        f18 = ex.submit(collect_lead_to_client_parallel, bx, 18, 1, merged, lock)
         f22 = ex.submit(collect_lead_to_client_parallel, bx, 22, 1, merged, lock)
         for _ in as_completed([f18, f22]):
             pass
