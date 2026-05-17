@@ -159,7 +159,11 @@ export class I2crmTgMirrorService {
 		}
 		const username = payload?.client_username;
 		const clientName = payload?.client_name || username || `IG_${clientId}`;
-		const topicName = username ? `@${username}` : clientName;
+		// Префикс канала в названии темы — "IG Direct" / "IG Comment". Помогает
+		// сотрудникам визуально различать каналы в общем списке тем TG-группы.
+		const channelPrefix = channel === "instcom" ? "IG Comment" : "IG Direct";
+		const baseName = username ? `@${username}` : clientName;
+		const topicName = `${channelPrefix} · ${baseName}`;
 
 		try {
 			const topicId = await this.findOrCreateTopic(groupId, clientId, topicName);
