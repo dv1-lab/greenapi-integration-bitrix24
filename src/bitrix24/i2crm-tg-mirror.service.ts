@@ -167,25 +167,49 @@ export class I2crmTgMirrorService {
 			const mediaUrl = payload?.media_url || payload?.media?.url;
 			const type = String(payload?.type || "text");
 
+			// Telegram caption-лимит = 1024 символа. Длинные подписи режем и
+			// досылаем полный текст вторым sendMessage в тот же топик.
+			const CAPTION_MAX = 1024;
+			const truncated = caption.length > CAPTION_MAX
+				? caption.slice(0, CAPTION_MAX - 3).trimEnd() + "…"
+				: caption;
+			const sendOverflow = async () => {
+				if (caption.length <= CAPTION_MAX) return;
+				await this.botApi("sendMessage", {
+					chat_id: groupId,
+					message_thread_id: topicId,
+					text: caption,
+					disable_web_page_preview: true,
+				});
+			};
+
 			if (mediaUrl && (type === "image" || type === "photo")) {
 				await this.botApi("sendPhoto", {
 					chat_id: groupId,
 					message_thread_id: topicId,
 					photo: mediaUrl,
-					caption,
+					caption: truncated,
 				});
+				await sendOverflow();
 			} else if (mediaUrl && type === "video") {
 				await this.botApi("sendVideo", {
 					chat_id: groupId,
 					message_thread_id: topicId,
 					video: mediaUrl,
-					caption,
+					caption: truncated,
 				});
+				await sendOverflow();
 			} else {
+				// Текстовое сообщение — TG-лимит 4096 символов. На IG-комменте
+				// маловероятно (Instagram сам режет до 2200), но защитимся.
+				const TEXT_MAX = 4096;
+				const text = caption.length > TEXT_MAX
+					? caption.slice(0, TEXT_MAX - 3).trimEnd() + "…"
+					: caption;
 				await this.botApi("sendMessage", {
 					chat_id: groupId,
 					message_thread_id: topicId,
-					text: caption,
+					text,
 					disable_web_page_preview: false,
 				});
 			}
