@@ -1641,6 +1641,20 @@ export class Bitrix24Service extends BaseAdapter<
 
 				await this.sendDeliveryConfirmation(webhook, domain, lineNumber, result as SendResponse);
 
+				// Hint в wa-tg-bridge с именем оператора B24 — чтобы в TG-зеркале
+				// outgoing-сообщения помечались "🧑‍💼 ФИО (B24): …" вместо
+				// безликого "отправлено с мобильного". Best-effort, не валим успех
+				// при ошибке.
+				const senderUserId = String(
+					(webhook.data?.MESSAGES?.[0] as any)?.message?.user_id || "",
+				);
+				const externalId = (result as SendResponse)?.idMessage;
+				if (senderUserId && externalId) {
+					this.sendOperatorHintToBridge(domain, senderUserId, externalId).catch((e: any) => {
+						this.logger.warn(`operator-hint to bridge failed (non-fatal): ${e.message}`);
+					});
+				}
+
 				return {
 					success: true,
 					message: "Message sent successfully",
@@ -1713,5 +1727,55 @@ export class Bitrix24Service extends BaseAdapter<
 				error: error.stack,
 			});
 		}
+	}
+
+	// ----- Operator name cache + hint forwarding ----------------------
+	// Cache: B24 user_id → "Имя Фамилия". TTL 1 час (имена сотрудников редко
+	// меняются, но при увольнении/добавлении хотим подхватить).
+	private operatorNameCache = new Map<string, { name: string; expires: number }>();
+
+	private async getOperatorName(domain: string, userId: string): Promise<string | null> {
+		if (!userId) return null;
+		const now = Date.now();
+		const cached = this.operatorNameCache.get(userId);
+		if (cached && cached.expires > now) {
+			return cached.name;
+		}
+		try {
+			const resp: any = await this.callBitrix24Method(domain, "user.get", { ID: userId });
+			const u = Array.isArray(resp?.result) ? resp.result[0] : null;
+			if (!u) return null;
+			const name = [u.NAME, u.LAST_NAME].filter(Boolean).join(" ").trim()
+				|| u.WORK_POSITION
+				|| u.EMAIL
+				|| `B24#${userId}`;
+			this.operatorNameCache.set(userId, { name, expires: now + 3600_000 });
+			// Бесконтрольно расти не даём — самая простая защита.
+			if (this.operatorNameCache.size > 500) {
+				const t = now;
+				for (const [k, v] of this.operatorNameCache) {
+					if (v.expires < t) this.operatorNameCache.delete(k);
+				}
+			}
+			return name;
+		} catch (e: any) {
+			this.logger.warn(`user.get failed for B24 user ${userId}: ${e.message}`);
+			return null;
+		}
+	}
+
+	private async sendOperatorHintToBridge(
+		domain: string, b24UserId: string, idMessage: string,
+	): Promise<void> {
+		const bridgeUrl = this.configService.get<string>("BRIDGE_HINT_URL");
+		if (!bridgeUrl) return; // фича отключена если переменная не задана
+		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+		const name = await this.getOperatorName(domain, b24UserId);
+		if (!name) return;
+		await axios.post(bridgeUrl, { idMessage, operatorName: name }, {
+			timeout: 3000,
+			headers: secret ? { "X-Hint-Secret": secret } : undefined,
+		});
+		this.logger.debug(`operator-hint sent to bridge: ${idMessage} → ${name}`);
 	}
 }
