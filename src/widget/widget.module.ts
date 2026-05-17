@@ -7,5 +7,6 @@ import { Bitrix24Module } from "../bitrix24/bitrix24.module";
 @Module({
 	imports: [ConfigModule, PrismaModule, Bitrix24Module],
 	controllers: [WidgetController],
+	exports: [WidgetController],
 })
 export class WidgetModule {}

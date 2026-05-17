@@ -1,8 +1,11 @@
 import { All, Controller, Req, Res } from "@nestjs/common";
 import { Response, Request } from "express";
+import { WidgetController } from "./widget/widget.controller";
 
 @Controller()
 export class AppController {
+	constructor(private readonly widgetController: WidgetController) {}
+
 	private getTranslations(language: string) {
 		const isRussian = language === "ru";
 
@@ -68,6 +71,21 @@ export class AppController {
 
 		if (req.method === "HEAD") {
 			return res.status(200).send();
+		}
+
+		// Если запрос пришёл в контексте CRM placement (от Bitrix24 при открытии
+		// вкладки/выпадашки в карточке лида/сделки/контакта) — рендерим виджет
+		// «Написать первым» вместо landing-page. B24 после переустановки иногда
+		// открывает корневой URL вместо указанного в placement.get handler'а.
+		const placement = (req.body?.PLACEMENT || req.query?.PLACEMENT || "").toString();
+		const isCrmPlacement = placement && (
+			placement.startsWith("CRM_LEAD_") ||
+			placement.startsWith("CRM_DEAL_") ||
+			placement.startsWith("CRM_CONTACT_") ||
+			placement.startsWith("CRM_COMPANY_")
+		);
+		if (isCrmPlacement) {
+			return this.widgetController.render(req, req.body, res);
 		}
 
 		const languageId = req.query.LANG as string || req.body?.LANG || "en";
