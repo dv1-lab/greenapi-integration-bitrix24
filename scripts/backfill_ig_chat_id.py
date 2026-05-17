@@ -34,6 +34,32 @@ from migrate_ig_username import Bitrix, load_env, PORTAL  # type: ignore
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 RATE_DELAY = float(os.environ.get("RATE_DELAY", "0.25"))
 
+# Глобальный back-off для OPERATION_TIME_LIMIT. Все потоки проверяют
+# `_block_until` перед запросом — если ещё не прошло, ждут. Это лучше
+# чем индивидуальный retry в каждом потоке: когда B24 говорит «time limit»,
+# квота восстанавливается медленно, и пока ждём — другие потоки могут
+# усугубить ситуацию.
+_block_until = 0.0
+_block_lock = Lock()
+
+
+def wait_if_blocked():
+    """Если установлен global block — ждёт пока не пройдёт."""
+    while True:
+        with _block_lock:
+            remaining = _block_until - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 5))
+
+
+def mark_blocked(seconds=90):
+    """После OPERATION_TIME_LIMIT все потоки ждут N секунд."""
+    global _block_until
+    with _block_lock:
+        _block_until = max(_block_until, time.time() + seconds)
+    print(f"  [block] all threads paused for {seconds}s (OPERATION_TIME_LIMIT)", flush=True)
+
 # USER_CODE формата i2crm|<line>|inst-<client_id>-...|<b24_user>
 USER_CODE_RE = re.compile(r"^i2crm\|\d+\|inst-(\d+)[-_]")
 
@@ -89,20 +115,31 @@ def collect_lead_to_client_parallel(bx, line_id, num_workers, lead_data, lock):
     def worker(worker_idx):
         page_starts = list(range(worker_idx * 50, total, num_workers * 50))
         for start in page_starts:
-            try:
-                r = bx.call("crm.activity.list", {
-                    "filter[PROVIDER_ID]": "IMOPENLINES_SESSION",
-                    "filter[PROVIDER_TYPE_ID]": str(line_id),
-                    "select[0]": "ID",
-                    "select[1]": "OWNER_ID",
-                    "select[2]": "OWNER_TYPE_ID",
-                    "select[3]": "PROVIDER_PARAMS",
-                    "order[ID]": "DESC",
-                    "start": start,
-                }, timeout=60)
-            except Exception as e:
-                print(f"  line {line_id} w{worker_idx} list error at start={start}: {e}", flush=True)
-                time.sleep(5)
+            # Retry sequentially с global back-off на OPERATION_TIME_LIMIT
+            r = None
+            for attempt in range(1, 5):
+                wait_if_blocked()
+                try:
+                    r = bx.call("crm.activity.list", {
+                        "filter[PROVIDER_ID]": "IMOPENLINES_SESSION",
+                        "filter[PROVIDER_TYPE_ID]": str(line_id),
+                        "select[0]": "ID",
+                        "select[1]": "OWNER_ID",
+                        "select[2]": "OWNER_TYPE_ID",
+                        "select[3]": "PROVIDER_PARAMS",
+                        "order[ID]": "DESC",
+                        "start": start,
+                    }, timeout=60)
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    if "OPERATION_TIME_LIMIT" in msg:
+                        mark_blocked(90 + attempt * 30)
+                        continue
+                    print(f"  line {line_id} w{worker_idx} list error at start={start}: {e}", flush=True)
+                    time.sleep(5)
+                    break
+            if r is None:
                 continue
             items = r.get("result", []) or []
             if not items:
@@ -140,27 +177,35 @@ def fetch_lead_state(bx, lead_ids):
     ids = list(lead_ids)
     for ci in range(0, len(ids), 50):
         chunk = ids[ci:ci+50]
-        try:
-            params = {
-                "select[0]": "ID",
-                "select[1]": "CONTACT_ID",
-                "select[2]": "LINK",
-                "select[3]": "UF_CRM_IG_CHAT_ID",
-            }
-            for i, lid in enumerate(chunk):
-                params[f"filter[@ID][{i}]"] = str(lid)
-            r = bx.call("crm.lead.list", params, timeout=60)
-            for item in r.get("result", []) or []:
-                lid = int(item["ID"])
-                cid = item.get("CONTACT_ID")
-                link = item.get("LINK")
-                result[lid] = {
-                    "contact_id": int(cid) if cid else None,
-                    "link": link if isinstance(link, list) else [],
-                    "chat_id_already": bool(item.get("UF_CRM_IG_CHAT_ID")),
-                }
-        except Exception as e:
-            print(f"  fetch state chunk {ci} failed: {e}", flush=True)
+        params = {
+            "select[0]": "ID",
+            "select[1]": "CONTACT_ID",
+            "select[2]": "LINK",
+            "select[3]": "UF_CRM_IG_CHAT_ID",
+        }
+        for i, lid in enumerate(chunk):
+            params[f"filter[@ID][{i}]"] = str(lid)
+        for attempt in range(1, 5):
+            wait_if_blocked()
+            try:
+                r = bx.call("crm.lead.list", params, timeout=60)
+                for item in r.get("result", []) or []:
+                    lid = int(item["ID"])
+                    cid = item.get("CONTACT_ID")
+                    link = item.get("LINK")
+                    result[lid] = {
+                        "contact_id": int(cid) if cid else None,
+                        "link": link if isinstance(link, list) else [],
+                        "chat_id_already": bool(item.get("UF_CRM_IG_CHAT_ID")),
+                    }
+                break
+            except Exception as e:
+                msg = str(e)
+                if "OPERATION_TIME_LIMIT" in msg and attempt < 4:
+                    mark_blocked(90 + attempt * 30)
+                    continue
+                print(f"  fetch state chunk {ci} failed: {e}", flush=True)
+                break
         if (ci // 50 + 1) % 20 == 0:
             print(f"  state fetched {min(ci + 50, len(ids))}/{len(ids)} leads", flush=True)
     print(f"  total: {len(result)}, with contact: {sum(1 for v in result.values() if v['contact_id'])}, "
@@ -268,15 +313,16 @@ def backfill_leads(bx, lead_data):
 
 
 def retry_call(bx, method, params, counters, lock, item_id, kind="lead"):
-    """Update с retry на OPERATION_TIME_LIMIT (sleep 60/90/120s)."""
-    for attempt, delay in enumerate([60, 90, 120, 180], 1):
+    """Update с global block-await на OPERATION_TIME_LIMIT."""
+    for attempt in range(1, 5):
+        wait_if_blocked()
         try:
             bx.call(method, params, timeout=60)
             return True
         except Exception as e:
             msg = str(e)
             if "OPERATION_TIME_LIMIT" in msg and attempt < 4:
-                time.sleep(delay)
+                mark_blocked(90 + attempt * 30)
                 continue
             with lock:
                 counters["errors"] += 1
