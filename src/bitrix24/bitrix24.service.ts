@@ -571,6 +571,26 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
 		});
 
+		// Сохраняем последний media+comment-id для outgoing /target/feedback type=comment.
+		// После переключения i2crm на «официальный» способ подключения эти поля стали
+		// обязательными (раньше i2crm сопоставлял по client_id сам).
+		if (isComment && payload?.media_id && payload?.comment_id) {
+			(this.prisma as any).igCommentContext.upsert({
+				where: { clientId: String(clientId) },
+				create: {
+					clientId: String(clientId),
+					mediaId: String(payload.media_id),
+					commentId: String(payload.comment_id),
+				},
+				update: {
+					mediaId: String(payload.media_id),
+					commentId: String(payload.comment_id),
+				},
+			}).catch((e: any) => {
+				this.logger.warn(`i2crm: save IgCommentContext failed (non-fatal): ${e.message}`);
+			});
+		}
+
 		// Backfill UF_CRM_IG_CHAT_ID/USERNAME на созданный B24 лид и контакт.
 		// B24 создаёт CRM-сущности через open-line асинхронно (с задержкой 1-3с),
 		// поэтому опрашиваем crm.activity с retry. Без этого UF остаётся пустым
@@ -1507,8 +1527,23 @@ export class Bitrix24Service extends BaseAdapter<
 			body.photo = files.map((f: any) => f.url);
 		}
 		// Для comment: media (post id) и comment (parent comment id) обязательны
-		// по спеке, но контекст обычно теряется в B24-pipeline. i2crm сам сопоставляет
-		// по client_id с последним комментарием пользователя (см. описание поля).
+		// после переключения i2crm на «официальный» способ подключения. Берём из
+		// IgCommentContext (записывается при incoming type=comment).
+		if (isComment) {
+			try {
+				const ctx = await (this.prisma as any).igCommentContext.findUnique({
+					where: { clientId: String(clientId) },
+				});
+				if (ctx?.mediaId && ctx?.commentId) {
+					body.media = ctx.mediaId;
+					body.comment = ctx.commentId;
+				} else {
+					this.logger.warn(`i2crm comment: no IgCommentContext for client=${clientId} — request will likely fail validation`);
+				}
+			} catch (e: any) {
+				this.logger.warn(`i2crm comment: load IgCommentContext failed: ${e.message}`);
+			}
+		}
 
 		this.logger.info(`i2crm outgoing: POST ${apiBase}/target/feedback`, {
 			domain: body.domain, source: body.source, client: body.client, type: body.type,
