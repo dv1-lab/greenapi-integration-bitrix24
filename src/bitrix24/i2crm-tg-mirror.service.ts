@@ -162,7 +162,31 @@ export class I2crmTgMirrorService {
 		// Префикс канала в названии темы — "IG Direct" / "IG Comment". Помогает
 		// сотрудникам визуально различать каналы в общем списке тем TG-группы.
 		const channelPrefix = channel === "instcom" ? "IG Comment" : "IG Direct";
-		const baseName = username ? `@${username}` : clientName;
+		// ФИО клиента из B24 — через HTTP self-call к собственному endpoint
+		// /webhooks/internal/contact-name. Прямая инжекция bitrix24Service'а
+		// сюда даст circular dep (он же инжектит i2crm-tg-mirror), поэтому
+		// идём через HTTP — overhead ~5-10мс на localhost, приемлемо для
+		// создания темы (1 раз за время жизни клиента).
+		let b24Name: string | null = null;
+		try {
+			const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+			const port = this.configService.get<string>("PORT") || "3000";
+			const resp = await axios.post(
+				`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
+				{ igClientId: String(clientId) },
+				{
+					headers: secret ? { "X-Hint-Secret": secret } : undefined,
+					timeout: 3000,
+					validateStatus: () => true,
+				},
+			);
+			if (resp.status === 200) {
+				b24Name = (resp.data?.name as string) || null;
+			}
+		} catch (e: any) {
+			this.logger.debug(`tg-mirror: B24 name self-lookup failed: ${e.message}`);
+		}
+		const baseName = b24Name || (username ? `@${username}` : clientName);
 		const topicName = `${channelPrefix} · ${baseName}`;
 
 		try {
