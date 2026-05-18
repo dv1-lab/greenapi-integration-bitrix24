@@ -374,6 +374,72 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Ищет открытую CRM-сущность у контакта: сначала открытую сделку
+	 * (CLOSED=N), потом открытый лид (статус не F/S). Используется в widget
+	 * /send для решения «писать timeline-comment в существующую сущность или
+	 * создавать новый imconnector-лид». Возвращает первую найденную, null
+	 * если ничего открытого нет.
+	 */
+	async findOpenCrmEntityForContact(
+		portalDomain: string,
+		contactId: number,
+	): Promise<{ kind: "deal" | "lead"; id: number; title?: string } | null> {
+		try {
+			const deals: any = await this.callBitrix24Method(portalDomain, "crm.deal.list", {
+				filter: { CONTACT_ID: contactId, CLOSED: "N" },
+				select: ["ID", "TITLE"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(deals) && deals.length > 0) {
+				return { kind: "deal", id: Number(deals[0].ID), title: deals[0].TITLE };
+			}
+		} catch (e: any) {
+			this.logger.warn(`findOpenCrmEntity: deal.list failed for contact ${contactId}: ${e.message}`);
+		}
+		try {
+			const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+				filter: { CONTACT_ID: contactId, "!STATUS_SEMANTIC_ID": ["F", "S"] },
+				select: ["ID", "TITLE"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(leads) && leads.length > 0) {
+				return { kind: "lead", id: Number(leads[0].ID), title: leads[0].TITLE };
+			}
+		} catch (e: any) {
+			this.logger.warn(`findOpenCrmEntity: lead.list failed for contact ${contactId}: ${e.message}`);
+		}
+		return null;
+	}
+
+	/**
+	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
+	 * или null при ошибке (логируется warn). Используется в widget /send для
+	 * фиксации исходящего сообщения в открытой сущности клиента вместо создания
+	 * imconnector-сессии (см. findOpenCrmEntityForContact).
+	 */
+	async addTimelineComment(
+		portalDomain: string,
+		entityType: "deal" | "lead",
+		entityId: number,
+		text: string,
+	): Promise<number | null> {
+		try {
+			const safe = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+			const result: any = await this.callBitrix24Method(portalDomain, "crm.timeline.comment.add", {
+				fields: {
+					ENTITY_ID: entityId,
+					ENTITY_TYPE: entityType,
+					COMMENT: safe,
+				},
+			});
+			return result ? Number(result) : null;
+		} catch (e: any) {
+			this.logger.warn(`addTimelineComment(${entityType}/${entityId}) failed: ${e.message}`);
+			return null;
+		}
+	}
+
+	/**
 	 * Backfill свежесозданного лида от imconnector.send.messages (widget /send).
 	 * B24 создаёт лид асинхронно после первой messages — без CONTACT_ID и с
 	 * технической TITLE/NAME (chatId или E.164). Этот метод догоняет лид и

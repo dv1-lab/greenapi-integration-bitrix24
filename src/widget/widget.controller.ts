@@ -322,6 +322,44 @@ export class WidgetController {
 			}
 		}
 
+		// Если у контакта есть открытая сделка или лид — пишем timeline-comment
+		// в неё, новую imconnector-сессию НЕ создаём. Бизнес-логика: исходящее
+		// первого касания должно влиться в текущую воронку клиента, а не плодить
+		// рядом ещё один лид. Приоритет: сделка → лид. Когда клиент ответит —
+		// adapter incoming flow создаст сессию через mirrorToBitrix и она
+		// прицепится к контакту через UF_CRM_*_CHAT_ID.
+		let openEntity: { kind: "deal" | "lead"; id: number; title?: string } | null = null;
+		if (resolvedContactId && inst.user?.portalDomain) {
+			try {
+				openEntity = await this.bitrix24.findOpenCrmEntityForContact(
+					inst.user.portalDomain,
+					resolvedContactId,
+				);
+			} catch (e: any) {
+				console.warn("[widget] findOpenCrmEntity failed:", e?.message);
+			}
+		}
+
+		if (openEntity && inst.user?.portalDomain) {
+			const comment =
+				`📩 Отправлено в ${channelLabel}:\n${text}` +
+				(idMessage ? `\n\n[green-api ${idMessage}]` : "");
+			const commentId = await this.bitrix24.addTimelineComment(
+				inst.user.portalDomain,
+				openEntity.kind,
+				openEntity.id,
+				comment,
+			);
+			return {
+				ok: true, idMessage, chatId, idInstance,
+				line: lineForMirror,
+				mirrored: commentId
+					? `attached to ${openEntity.kind} ${openEntity.id} as timeline comment ${commentId}`
+					: `b24 timeline.comment.add failed for ${openEntity.kind} ${openEntity.id}`,
+			};
+		}
+
+		// Открытой сущности нет — обычный imconnector-flow с backfillSendLead.
 		// displayName для mirror: имя из карточки контакта, чтобы TITLE свежего
 		// лида и подпись chat-user'а были читаемые («Олег - Telegram 79584983354»
 		// вместо «396522892 - …»). mirrorToBitrix требует name без пробелов —
