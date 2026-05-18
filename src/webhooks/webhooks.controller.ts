@@ -1,6 +1,7 @@
 import { Controller, Post, Body, HttpCode, HttpStatus, Req, Res, UseGuards } from "@nestjs/common";
 import { Request, Response } from "express";
 import { Bitrix24Service } from "../bitrix24/bitrix24.service";
+import { I2crmTgMirrorService } from "../bitrix24/i2crm-tg-mirror.service";
 import { GreenApiWebhook, GreenApiLogger } from "@green-api/greenapi-integration";
 import { Bitrix24WebhookDto } from "../bitrix24/dto/bitrix24-webhook.dto";
 import { Bitrix24WebhookGuard } from "./guards/bitrix24-webhook.guard";
@@ -20,7 +21,10 @@ function safeJsonParse(rawText: string): any {
 export class WebhooksController {
 	private readonly logger = GreenApiLogger.getInstance(WebhooksController.name);
 
-	constructor(private readonly bitrix24Service: Bitrix24Service) {}
+	constructor(
+		private readonly bitrix24Service: Bitrix24Service,
+		private readonly i2crmTgMirror: I2crmTgMirrorService,
+	) {}
 
 	@Post("green-api")
 	@HttpCode(HttpStatus.OK)
@@ -106,9 +110,31 @@ export class WebhooksController {
 		}
 	}
 
-	// Internal endpoint: bridge принимает callback "переименовать тему". Сами
-	// не вызываем (это endpoint в bridge, не у нас) — оставлено для документации
-	// архитектуры, см. wa-tg-bridge __main__.py /internal/rename-topic.
+	// Internal endpoint: массовое переименование всех IG-тем (refresh_all для IG).
+	// Идёт по state.topics в i2crm-tg-mirror, для каждой темы дёргает B24 за
+	// актуальным ФИО, формирует новое имя в текущем формате и edit'ит топик.
+	// Auth: тот же X-Hint-Secret.
+	@Post("internal/refresh-ig-topics")
+	@HttpCode(HttpStatus.OK)
+	async refreshIgTopics(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { channel?: string; accountName?: string };
+		try {
+			const result = await this.i2crmTgMirror.refreshAllTopics({
+				channel: body.channel,
+				accountName: body.accountName,
+			});
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`refresh-ig-topics failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
 
 	private mapError(error: any) {
 		const mappings = [

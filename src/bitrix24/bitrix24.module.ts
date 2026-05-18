@@ -5,6 +5,6 @@ import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
 
 @Module({
   providers: [Bitrix24Service, Bitrix24Transformer, I2crmTgMirrorService],
-  exports: [Bitrix24Service],
+  exports: [Bitrix24Service, I2crmTgMirrorService],
 })
 export class Bitrix24Module {}

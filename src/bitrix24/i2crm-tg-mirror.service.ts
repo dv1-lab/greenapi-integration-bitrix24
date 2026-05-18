@@ -130,14 +130,25 @@ export class I2crmTgMirrorService {
 	}
 
 	private buildCaption(payload: any): string {
-		const clientName = payload?.client_name || `IG_${payload?.client_id}`;
+		// HTML-формат: @username из IG оборачиваем в <a href="instagram.com/...">
+		// чтобы клик открыл профиль Instagram, а не пытался искать username в TG
+		// (Telegram автолинкует голый @logn на свою сеть). Используется
+		// parse_mode='HTML' во всех вызовах sendMessage/sendPhoto/sendVideo.
+		const clientNameRaw = payload?.client_name || `IG_${payload?.client_id}`;
+		const clientName = this.escapeHtml(String(clientNameRaw));
 		const username = payload?.client_username;
 		const channel = String(payload?.channel || "");
 		const isComment = channel === "instcom";
 		const channelLabel = isComment ? "📷 Instagram коммент" : "💬 Instagram Direct";
-		const header = username ? `${clientName} (@${username})` : clientName;
-		const postCtx = isComment && payload?.post_url ? `\nК посту: ${payload.post_url}` : "";
-		const text = payload?.text ? `\n\n${payload.text}` : "";
+		const usernameLink = username
+			? ` (<a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>)`
+			: "";
+		const header = `${clientName}${usernameLink}`;
+		const postUrl = payload?.post_url ? String(payload.post_url) : "";
+		const postCtx = isComment && postUrl
+			? `\nК посту: <a href="${this.escapeHtml(postUrl)}">${this.escapeHtml(postUrl)}</a>`
+			: "";
+		const text = payload?.text ? `\n\n${this.escapeHtml(String(payload.text))}` : "";
 		return `${channelLabel}\n${header}${postCtx}${text}`;
 	}
 
@@ -211,6 +222,7 @@ export class I2crmTgMirrorService {
 					chat_id: groupId,
 					message_thread_id: topicId,
 					text: caption,
+					parse_mode: "HTML",
 					disable_web_page_preview: true,
 				});
 			};
@@ -221,6 +233,7 @@ export class I2crmTgMirrorService {
 					message_thread_id: topicId,
 					photo: mediaUrl,
 					caption: truncated,
+					parse_mode: "HTML",
 				});
 				await sendOverflow();
 			} else if (mediaUrl && type === "video") {
@@ -229,6 +242,7 @@ export class I2crmTgMirrorService {
 					message_thread_id: topicId,
 					video: mediaUrl,
 					caption: truncated,
+					parse_mode: "HTML",
 				});
 				await sendOverflow();
 			} else {
@@ -242,7 +256,8 @@ export class I2crmTgMirrorService {
 					chat_id: groupId,
 					message_thread_id: topicId,
 					text,
-					disable_web_page_preview: false,
+					parse_mode: "HTML",
+					disable_web_page_preview: true,
 				});
 			}
 			this.logger.info(`tg-mirror: mirrored msg to group ${groupId} topic ${topicId} (client=${clientId} channel=${channel})`);
@@ -320,5 +335,108 @@ export class I2crmTgMirrorService {
 			.replace(/</g, "&lt;")
 			.replace(/>/g, "&gt;")
 			.replace(/"/g, "&quot;");
+	}
+
+	// Массовое переименование всех IG-тем — обновляет название по текущему
+	// формату 'IG Direct @<account> · <ФИО из B24>'. Используется когда формат
+	// изменился (например, добавили префикс @account_name) и нужно ретроактивно
+	// применить ко всем существующим темам.
+	// channel: 'instdir' / 'instcom' / undefined (= оба сразу).
+	async refreshAllTopics(input: { channel?: string; accountName?: string } = {}): Promise<{
+		total: number; renamed: number; skipped_same: number; no_b24: number; errors: number;
+	}> {
+		if (!this.enabled) {
+			return { total: 0, renamed: 0, skipped_same: 0, no_b24: 0, errors: 0 };
+		}
+		await this.loadMap();
+		const channelFilter = input.channel || "";
+		// Если не передали account_name (raw payload отсутствует) — попробуем
+		// из env I2CRM_INSTAGRAM_ACCOUNT_NAME, fallback на "1begovoy.ru".
+		const accountName = input.accountName
+			|| this.configService.get<string>("I2CRM_INSTAGRAM_ACCOUNT_NAME")
+			|| "1begovoy.ru";
+
+		let total = 0;
+		let renamed = 0;
+		let skipped_same = 0;
+		let no_b24 = 0;
+		let errors = 0;
+
+		const port = this.configService.get<string>("PORT") || "3000";
+		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+
+		for (const [key, topicId] of Object.entries(this.state.topics)) {
+			// Ключи бывают:
+			//   <groupId>:<clientId> — current формат (после разделения групп)
+			//   <clientId>           — legacy (один топик на клиента, оба канала)
+			let groupId: string | undefined;
+			let clientId: string;
+			if (key.includes(":")) {
+				const parts = key.split(":", 2);
+				groupId = parts[0];
+				clientId = parts[1];
+			} else {
+				groupId = this.groupIdComment; // legacy keys лежали в Comments
+				clientId = key;
+			}
+
+			// Определяем channel по groupId
+			let channel: string;
+			if (groupId === this.groupIdComment) channel = "instcom";
+			else if (groupId === this.groupIdDirect) channel = "instdir";
+			else continue; // топик в неизвестной группе
+
+			if (channelFilter && channelFilter !== channel) continue;
+			total++;
+
+			try {
+				// ФИО из B24 через self-call (избегаем circular dep)
+				let b24Name: string | null = null;
+				try {
+					const resp = await axios.post(
+						`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
+						{ igClientId: String(clientId) },
+						{
+							headers: secret ? { "X-Hint-Secret": secret } : undefined,
+							timeout: 3000,
+							validateStatus: () => true,
+						},
+					);
+					if (resp.status === 200) b24Name = (resp.data?.name as string) || null;
+				} catch (e: any) {
+					this.logger.debug(`refresh-ig: B24 lookup failed for ${clientId}: ${e.message}`);
+				}
+				if (!b24Name) {
+					no_b24++;
+					continue;
+				}
+
+				const prefix = (channel === "instcom" ? "IG Comment" : "IG Direct") + ` @${accountName}`;
+				const newName = `${prefix} · ${b24Name}`.slice(0, 128);
+
+				try {
+					await this.botApi("editForumTopic", {
+						chat_id: groupId,
+						message_thread_id: topicId,
+						name: newName,
+					});
+					renamed++;
+				} catch (e: any) {
+					if (String(e.message).includes("TOPIC_NOT_MODIFIED")) {
+						skipped_same++;
+					} else {
+						this.logger.warn(`refresh-ig: editForumTopic failed for ${topicId}: ${e.message}`);
+						errors++;
+					}
+				}
+				// Rate-limit 1 req/sec (Telegram Bot API лимит).
+				await new Promise((r) => setTimeout(r, 1000));
+			} catch (e: any) {
+				this.logger.warn(`refresh-ig: iteration failed for ${key}: ${e.message}`);
+				errors++;
+			}
+		}
+
+		return { total, renamed, skipped_same, no_b24, errors };
 	}
 }
