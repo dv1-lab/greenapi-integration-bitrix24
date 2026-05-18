@@ -419,7 +419,73 @@ export class WidgetController {
 			displayName,
 		);
 
+		// После imconnector.send.messages B24 создал новый Direct-лид (если его
+		// не было). Найдём свежий лид клиента и заполним UF поля — иначе там
+		// останется UF_CRM_IG_CHAT_ID/USERNAME/INSTAGRAM/NF_YM_CLIENT_ID пустыми
+		// (B24 сам не догадается, что 27986508 = client X). Без этого оператор
+		// не может двинуть стадию (B24 требует YM_CLIENT_ID).
+		if (input.authId && input.domain) {
+			this.backfillNewDirectLead(input.authId, input.domain, clientId, displayName).catch((e: any) => {
+				console.warn(`backfillNewDirectLead failed (non-fatal): ${e?.message || e}`);
+			});
+		}
+
 		return { ok: true, idMessage, chatId: `i2crm_ig_${clientId}`, idInstance: `i2crm:${accountId}`, line: lineDirect, mirrored };
+	}
+
+	/**
+	 * Найти свежесозданный (DATE_CREATE за последние 2 мин) Direct-лид клиента
+	 * и backfill'ить UF_CRM_IG_*, UF_CRM_NF_YM_CLIENT_ID. B24 создаёт лид
+	 * автоматически при первом imconnector.send.messages, но не наполняет
+	 * наши custom-поля — это делает handleI2crmIncoming на следующем incoming
+	 * от клиента, но если клиент так и не ответит, поля остаются пустыми.
+	 */
+	private async backfillNewDirectLead(
+		authId: string, domain: string, clientId: string, username: string | undefined,
+	): Promise<void> {
+		// Несколько попыток: B24 может создать лид с задержкой 0-10с после
+		// imconnector.send.messages.
+		for (let attempt = 0; attempt < 6; attempt++) {
+			await new Promise((res) => setTimeout(res, attempt === 0 ? 3000 : 4000));
+			try {
+				const url = `https://${domain}/rest/crm.lead.list?auth=${encodeURIComponent(authId)}`;
+				const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+				const r = await axios.post(url, {
+					filter: {
+						">DATE_CREATE": cutoff,
+						"=SOURCE_ID": "18|I2CRM",
+					},
+					select: ["ID", "TITLE", "UF_CRM_IG_CHAT_ID", "UF_CRM_NF_YM_CLIENT_ID"],
+					order: { DATE_CREATE: "DESC" },
+				}, { timeout: 8000 });
+				const leads: any[] = r.data?.result || [];
+				// Ищем тот у которого UF пусто или TITLE содержит i2crm_ig_<clientId>
+				const target = leads.find((l) =>
+					String(l?.TITLE || "").includes(`i2crm_ig_${clientId}`)
+					|| String(l?.TITLE || "").includes(clientId)
+					|| (!l?.UF_CRM_IG_CHAT_ID && !l?.UF_CRM_NF_YM_CLIENT_ID)
+				);
+				if (!target) continue;
+				const fields: Record<string, any> = {
+					UF_CRM_IG_CHAT_ID: clientId,
+					UF_CRM_NF_YM_CLIENT_ID: "-",
+				};
+				if (username) {
+					fields.UF_CRM_IG_USERNAME = username;
+					fields.UF_CRM_INSTAGRAM = `https://instagram.com/${username}/`;
+					// TITLE = "<username> - Instagram Direct - 1begovoy.ru" (только если в TITLE сейчас служебный префикс)
+					if (String(target.TITLE || "").includes(`i2crm_ig_${clientId}`)) {
+						fields.TITLE = `${username} - Instagram Direct - 1begovoy.ru`;
+						fields.NAME = username;
+					}
+				}
+				const upd = `https://${domain}/rest/crm.lead.update?auth=${encodeURIComponent(authId)}`;
+				await axios.post(upd, { id: target.ID, fields }, { timeout: 8000 });
+				return;
+			} catch {
+				// retry on next attempt
+			}
+		}
 	}
 
 	private async mirrorToBitrix(
