@@ -854,6 +854,16 @@ export class Bitrix24Service extends BaseAdapter<
 						upd.UF_CRM_NF_YM_CLIENT_ID = "-";
 					}
 
+					// URL поста IG-комментария → UF_CRM_1637656407829 (string).
+					// На B24-стороне настроен бизнес-процесс, который копирует это
+					// значение в UF_CRM_1638376742616 (тип url, поле «Link0 (активная
+					// ссылка на пост источника лида)» — оно read-only через REST).
+					// Перезаписываем при каждом новом комменте — актуальный пост.
+					if (isComment && postUrl && String(lead?.UF_CRM_1637656407829 || "") !== postUrl) {
+						if (!upd) upd = {};
+						upd.UF_CRM_1637656407829 = postUrl;
+					}
+
 					// LINK0 — стандартный multi-field LINK с подтипом LINK0
 					// («активная ссылка на пост источника лида»). Записываем
 					// для комментариев, где i2crm передаёт src=URL поста.
