@@ -317,6 +317,10 @@ export class Bitrix24Service extends BaseAdapter<
 					NAME: senderName,
 					CONTACT_ID: contactId,
 					PHONE: [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }],
+					// Yandex Metrika ClientId: с сайта заполняется через NetForm
+					// (заявка/звонок), у лидов из мессенджеров его нет. B24 требует
+					// поле при смене стадии — ставим "-" чтобы не блокировать оператора.
+					UF_CRM_NF_YM_CLIENT_ID: "-",
 				};
 				if (sourceId) fields.SOURCE_ID = sourceId;
 
@@ -835,7 +839,14 @@ export class Bitrix24Service extends BaseAdapter<
 					if (username && lead?.UF_CRM_IG_USERNAME && String(lead.UF_CRM_IG_USERNAME) !== username) {
 						usernameChange = { oldName: String(lead.UF_CRM_IG_USERNAME), newName: username };
 					}
-					const upd: Record<string, any> | null = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME, lead?.UF_CRM_INSTAGRAM);
+					let upd: Record<string, any> | null = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME, lead?.UF_CRM_INSTAGRAM);
+					// Yandex Metrika ClientId: только для лидов. С сайта заполняется
+					// через NetForm (заявка/звонок), у IG-лидов нет. B24 требует поле
+					// при смене стадии — ставим "-" если пусто.
+					if (!lead?.UF_CRM_NF_YM_CLIENT_ID) {
+						if (!upd) upd = {};
+						upd.UF_CRM_NF_YM_CLIENT_ID = "-";
+					}
 
 					// LINK0 — стандартный multi-field LINK с подтипом LINK0
 					// («активная ссылка на пост источника лида»). Записываем
