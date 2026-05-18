@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Разовый backfill UF_CRM_NF_YM_CLIENT_ID="-" для всех открытых лидов
-без значения. С сайта это поле заполняется через NetForm, у лидов из
-мессенджеров его нет. B24 требует поле при смене стадии — оператор
-не может двинуть лид. Дмитрий попросил проставить "-" всем открытым.
+"""Разовый backfill UF_CRM_NF_YM_CLIENT_ID="-" для лидов в группе стадий
+"Лид в работе" (12 stage кодов, подтверждено Дмитрием). С сайта это
+поле заполняется через NetForm, у лидов из мессенджеров его нет. B24
+требует поле при смене стадии — оператор не может двинуть лид.
 
 Запуск:
     cd /home/dv/greenapi-b24/source
-    PYTHONUNBUFFERED=1 RATE_DELAY=3.0 python3 scripts/backfill_ym_client_id.py
+    PYTHONUNBUFFERED=1 RATE_DELAY=1.0 python3 scripts/backfill_ym_client_id.py
 
 Идемпотентно: повторный запуск возьмёт только тех, у кого поле всё ещё пустое.
 """
@@ -18,9 +18,17 @@ from threading import Lock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from migrate_ig_username import Bitrix, load_env  # type: ignore
 
-RATE_DELAY = float(os.environ.get("RATE_DELAY", "3.0"))
+RATE_DELAY = float(os.environ.get("RATE_DELAY", "1.0"))
 BLOCK_BASE_SEC = int(os.environ.get("BLOCK_BASE_SEC", "180"))
 BLOCK_STEP_SEC = int(os.environ.get("BLOCK_STEP_SEC", "60"))
+
+# Stages входящие в группу "Лид в работе" (подтверждено Дмитрием 2026-05-18).
+# Сюда входят все open + готовый/распределен, но НЕ финальные (F) и НЕ CONVERTED.
+IN_WORK_STAGES = [
+    "NEW", "UC_C2LTOB", "UC_57D70Q", "IN_PROCESS",
+    "UC_QK14E6", "8", "UC_4D3GN5", "UC_3SQOCQ",
+    "3", "UC_G7R3YA", "1", "9",
+]
 
 _block_until = 0.0
 _block_lock = Lock()
@@ -43,19 +51,22 @@ def mark_blocked(seconds):
 
 
 def list_targets(bx):
-    """Возвращает список ID открытых лидов без UF_CRM_NF_YM_CLIENT_ID."""
-    print("=== fetching list of open leads without YM_CLIENT_ID ===", flush=True)
+    """Возвращает список ID лидов в группе стадий «Лид в работе» без
+    UF_CRM_NF_YM_CLIENT_ID."""
+    print("=== fetching list of in-work leads without YM_CLIENT_ID ===", flush=True)
     all_ids = []
     start = 0
     while True:
         wait_if_blocked()
         try:
-            r = bx.call("crm.lead.list", {
-                "filter[!STATUS_SEMANTIC_ID]": "F",
+            params = {
                 "filter[=UF_CRM_NF_YM_CLIENT_ID]": "",
                 "select[0]": "ID",
                 "start": start,
-            }, timeout=60)
+            }
+            for i, st in enumerate(IN_WORK_STAGES):
+                params[f"filter[@STATUS_ID][{i}]"] = st
+            r = bx.call("crm.lead.list", params, timeout=60)
         except Exception as e:
             if "OPERATION_TIME_LIMIT" in str(e):
                 mark_blocked(BLOCK_BASE_SEC)
