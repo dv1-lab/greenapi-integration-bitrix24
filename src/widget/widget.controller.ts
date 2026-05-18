@@ -408,29 +408,83 @@ export class WidgetController {
 				// non-fatal
 			}
 		}
-		const mirrored = await this.mirrorToBitrix(
-			`i2crm_ig_${clientId}`,
-			input.text,
-			idMessage,
-			input.authId,
-			input.domain,
-			lineDirect || undefined,
-			"instagram",
-			displayName,
-		);
-
-		// После imconnector.send.messages B24 создал новый Direct-лид (если его
-		// не было). Найдём свежий лид клиента и заполним UF поля — иначе там
-		// останется UF_CRM_IG_CHAT_ID/USERNAME/INSTAGRAM/NF_YM_CLIENT_ID пустыми
-		// (B24 сам не догадается, что 27986508 = client X). Без этого оператор
-		// не может двинуть стадию (B24 требует YM_CLIENT_ID).
+		// Проверка: если у клиента уже есть открытый лид — НЕ создаём новый
+		// imconnector-сессию (она создала бы новый лид в B24). Вместо этого
+		// добавляем timeline-comment в существующий открытый лид с указанием
+		// что оператор отправил сообщение в Direct.
+		let openLeadId: number | null = null;
 		if (input.authId && input.domain) {
-			this.backfillNewDirectLead(input.authId, input.domain, clientId, displayName).catch((e: any) => {
-				console.warn(`backfillNewDirectLead failed (non-fatal): ${e?.message || e}`);
-			});
+			try {
+				const lr = await axios.post(
+					`https://${input.domain}/rest/crm.lead.list?auth=${encodeURIComponent(input.authId)}`,
+					{
+						filter: {
+							UF_CRM_IG_CHAT_ID: clientId,
+							"!STATUS_SEMANTIC_ID": "F",
+						},
+						select: ["ID"],
+						order: { DATE_CREATE: "DESC" },
+					},
+					{ timeout: 8000 },
+				);
+				const openLeads: any[] = lr.data?.result || [];
+				if (openLeads.length > 0) openLeadId = Number(openLeads[0].ID);
+			} catch {
+				// non-fatal: при ошибке fallback на обычный mirror
+			}
 		}
 
-		return { ok: true, idMessage, chatId: `i2crm_ig_${clientId}`, idInstance: `i2crm:${accountId}`, line: lineDirect, mirrored };
+		let mirrored: boolean | string;
+		if (openLeadId) {
+			// Существующий открытый лид — добавляем timeline-comment с пометкой
+			// что мы инициировали Direct. Новая сессия / лид в B24 НЕ создаются.
+			try {
+				const safe = (s: string) =>
+					s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+				const comment =
+					`📩 Отправлено в Instagram Direct:\n${input.text}` +
+					(idMessage ? `\n\n[i2crm msg ${idMessage}]` : "");
+				const cr = await axios.post(
+					`https://${input.domain}/rest/crm.timeline.comment.add?auth=${encodeURIComponent(input.authId || "")}`,
+					{
+						fields: {
+							ENTITY_ID: openLeadId,
+							ENTITY_TYPE: "lead",
+							COMMENT: safe(comment),
+						},
+					},
+					{ timeout: 8000 },
+				);
+				if (cr.data?.error) {
+					mirrored = `b24 timeline.comment.add failed: ${cr.data.error_description || cr.data.error}`;
+				} else {
+					mirrored = `attached to lead ${openLeadId} as timeline comment`;
+				}
+			} catch (err: any) {
+				mirrored = `b24 timeline.comment.add failed: ${err.message}`;
+			}
+		} else {
+			// Открытого лида нет — обычный mirror через imconnector. B24 создаст
+			// новый лид и сессию (это норма для «первого касания»).
+			mirrored = await this.mirrorToBitrix(
+				`i2crm_ig_${clientId}`,
+				input.text,
+				idMessage,
+				input.authId,
+				input.domain,
+				lineDirect || undefined,
+				"instagram",
+				displayName,
+			);
+			// backfill UF новосозданного лида
+			if (input.authId && input.domain) {
+				this.backfillNewDirectLead(input.authId, input.domain, clientId, displayName).catch((e: any) => {
+					console.warn(`backfillNewDirectLead failed (non-fatal): ${e?.message || e}`);
+				});
+			}
+		}
+
+		return { ok: true, idMessage, chatId: `i2crm_ig_${clientId}`, idInstance: `i2crm:${accountId}`, line: lineDirect, mirrored, attachedToLead: openLeadId };
 	}
 
 	/**
