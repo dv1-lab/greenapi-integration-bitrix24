@@ -159,9 +159,13 @@ export class I2crmTgMirrorService {
 		}
 		const username = payload?.client_username;
 		const clientName = payload?.client_name || username || `IG_${clientId}`;
-		// Префикс канала в названии темы — "IG Direct" / "IG Comment". Помогает
-		// сотрудникам визуально различать каналы в общем списке тем TG-группы.
-		const channelPrefix = channel === "instcom" ? "IG Comment" : "IG Direct";
+		// Префикс канала в названии темы — "IG Direct @1begovoy.ru" /
+		// "IG Comment @1begovoy.ru". Имя бизнес-аккаунта берём из payload
+		// (account_name). При нескольких подключённых IG-аккаунтах поможет
+		// визуально различать их в общем списке тем TG-группы.
+		const accountName = String(payload?.account_name || "").trim();
+		const accountTag = accountName ? ` @${accountName}` : "";
+		const channelPrefix = (channel === "instcom" ? "IG Comment" : "IG Direct") + accountTag;
 		// ФИО клиента из B24 — через HTTP self-call к собственному endpoint
 		// /webhooks/internal/contact-name. Прямая инжекция bitrix24Service'а
 		// сюда даст circular dep (он же инжектит i2crm-tg-mirror), поэтому
