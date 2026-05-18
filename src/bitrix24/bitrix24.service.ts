@@ -864,30 +864,9 @@ export class Bitrix24Service extends BaseAdapter<
 						upd.UF_CRM_1637656407829 = postUrl;
 					}
 
-					// LINK0 — стандартный multi-field LINK с подтипом LINK0
-					// («активная ссылка на пост источника лида»). Записываем
-					// для комментариев, где i2crm передаёт src=URL поста.
-					// Перезаписываем при каждом новом комменте — актуальный пост.
-					if (postUrl) {
-						const existingLinks: any[] = Array.isArray(lead?.LINK) ? lead.LINK : [];
-						const link0 = existingLinks.find((l) => l?.VALUE_TYPE === "LINK0");
-						if (!link0 || link0.VALUE !== postUrl) {
-							// Сохраняем остальные значения LINK (не LINK0) + добавляем/обновляем LINK0
-							const newLinks: any[] = existingLinks
-								.filter((l) => l?.VALUE_TYPE !== "LINK0")
-								.map((l) => ({ ID: l.ID, VALUE: l.VALUE, VALUE_TYPE: l.VALUE_TYPE }));
-							newLinks.push({ VALUE: postUrl, VALUE_TYPE: "LINK0" });
-							if (upd) {
-								(upd as any).LINK = newLinks;
-							} else {
-								await this.callBitrix24Method(portalDomain, "crm.lead.update", {
-									id: ownerId,
-									fields: { LINK: newLinks },
-								});
-								this.logger.info(`i2crm: updated lead ${ownerId} LINK0=${postUrl}`);
-							}
-						}
-					}
+					// (Раньше также писали URL поста в multifield LINK[LINK0] —
+					// это создавало дубль в UI «Link 1». Убрано 2026-05-18: URL
+					// поста идёт через UF_CRM_1637656407829, BP заполняет «Link0».)
 
 					if (upd) {
 						await this.callBitrix24Method(portalDomain, "crm.lead.update", {
