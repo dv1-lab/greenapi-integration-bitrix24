@@ -163,6 +163,16 @@ export class Bitrix24Service extends BaseAdapter<
 	 * imconnector.list → массив CONNECTOR ID, зарегистрированных в портале.
 	 * Возвращает [] при ошибке (не throw'аем — health-check сам логирует).
 	 */
+	/**
+	 * Публичный wrapper для widget — отправка зеркала в B24 open line через
+	 * imconnector.send.messages с OAuth-токеном Social Connector V2 из БД.
+	 * Inbound webhook для этого метода не работает («Application context required»),
+	 * нужен именно app-OAuth.
+	 */
+	async sendImconnectorMessage(portalDomain: string, payload: Record<string, any>): Promise<unknown> {
+		return this.callBitrix24Method(portalDomain, "imconnector.send.messages", payload);
+	}
+
 	async listConnectors(portalDomain: string): Promise<string[]> {
 		const result = (await this.callBitrix24Method(portalDomain, "imconnector.list", {})) as unknown;
 		if (Array.isArray(result)) return result.map((x) => String(x));

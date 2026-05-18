@@ -451,31 +451,18 @@ export class WidgetController {
 			}],
 		};
 
-		// Приоритет: OAuth-токен Social Connector app (из placement-запроса B24).
-		// Fallback: Inbound Webhook URL (если когда-нибудь B24 разрешит для этого метода).
-		if (authId && domain) {
-			try {
-				const url = `https://${domain}/rest/imconnector.send.messages?auth=${encodeURIComponent(authId)}`;
-				const r = await axios.post(url, payload, { timeout: 10000 });
-				if (r.data?.error) return `b24:${r.data.error}`;
-				return true;
-			} catch (err: any) {
-				return `b24 mirror via OAuth failed: ${err.response?.data?.error_description || err.message}`;
-			}
-		}
-
-		const webhookUrl = this.config.get<string>("BITRIX_WEBHOOK_URL");
-		if (!webhookUrl) return false;
+		// Используем OAuth-токен Social Connector V2 из БД (через
+		// Bitrix24Service.sendImconnectorMessage). Inbound Webhook для этого
+		// метода не работает — B24 отвечает «Application context required».
+		// Placement authId тоже бывает протухает; токен из БД adapter сам
+		// рефрешит, если нужно.
+		const portalDomain = domain || this.config.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
 		try {
-			const r = await axios.post(
-				`${webhookUrl.replace(/\/$/, "")}/imconnector.send.messages`,
-				payload,
-				{ timeout: 10000 },
-			);
-			if (r.data?.error) return `b24:${r.data.error}`;
+			const r: any = await this.bitrix24.sendImconnectorMessage(portalDomain, payload);
+			if (r?.error) return `b24:${r.error}`;
 			return true;
 		} catch (err: any) {
-			return `b24 mirror via webhook failed: ${err.response?.data?.error_description || err.message}`;
+			return `b24 mirror via app-OAuth failed: ${err.response?.data?.error_description || err.message}`;
 		}
 	}
 
