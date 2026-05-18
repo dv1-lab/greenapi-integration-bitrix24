@@ -166,7 +166,10 @@ export class Bitrix24Service extends BaseAdapter<
 	async listConnectors(portalDomain: string): Promise<string[]> {
 		const result = (await this.callBitrix24Method(portalDomain, "imconnector.list", {})) as unknown;
 		if (Array.isArray(result)) return result.map((x) => String(x));
-		if (result && typeof result === "object") return Object.values(result as Record<string, unknown>).map(String);
+		// imconnector.list возвращает { "<connector_id>": "<display_label>" }.
+		// ID — это ключи, не values. Был баг: Object.values() возвращал labels
+		// ("Social Connector"), а проверка includes("social_connector") — false.
+		if (result && typeof result === "object") return Object.keys(result as Record<string, unknown>);
 		return [];
 	}
 
