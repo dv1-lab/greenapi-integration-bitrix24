@@ -385,9 +385,29 @@ export class WidgetController {
 		// Это создаст карточку диалога в B24 чтобы оператор видел свою же отправку.
 		// displayName = @username клиента (без пробелов) — иначе B24 покажет
 		// «i2crm_ig_<id>» в имени chat-user.
-		const displayName = input.username && !/\s/.test(input.username)
-			? input.username
-			: undefined;
+		let displayName = input.username && !/\s/.test(input.username) ? input.username : undefined;
+		// Если username явно не передан — ищем его в существующих лидах клиента
+		// по UF_CRM_IG_CHAT_ID. У старых лидов username сидит либо в
+		// UF_CRM_IG_USERNAME, либо в TITLE формата «… (Instagram: <username>)»
+		// (так писал старый i2crm-нативный коннектор).
+		if (!displayName && input.authId && input.domain) {
+			try {
+				const url = `https://${input.domain}/rest/crm.lead.list?auth=${encodeURIComponent(input.authId)}`;
+				const r = await axios.post(url, {
+					filter: { UF_CRM_IG_CHAT_ID: clientId },
+					select: ["ID", "TITLE", "UF_CRM_IG_USERNAME"],
+				}, { timeout: 8000 });
+				const leads: any[] = r.data?.result || [];
+				for (const lead of leads) {
+					const uf = String(lead?.UF_CRM_IG_USERNAME || "").trim();
+					if (uf) { displayName = uf; break; }
+					const m = String(lead?.TITLE || "").match(/\(Instagram:\s*([^\s)]+)\)/i);
+					if (m) { displayName = m[1]; break; }
+				}
+			} catch {
+				// non-fatal
+			}
+		}
 		const mirrored = await this.mirrorToBitrix(
 			`i2crm_ig_${clientId}`,
 			input.text,
