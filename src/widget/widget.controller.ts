@@ -435,9 +435,19 @@ export class WidgetController {
 		// Для Instagram передаём username клиента (UF_CRM_IG_USERNAME) через
 		// displayNameOverride, иначе оператор увидит «i2crm_ig_<id>» вместо
 		// dima_kuznetsov.
+		// Для IG без username делаем читаемый fallback «IG <client_id>» — без
+		// технического префикса «i2crm_ig_», иначе TITLE лида и имя контакта
+		// получаются вида «i2crm_ig_27986508» (видел 2026-05-18).
+		const igClientId = provider === "instagram" && idKey.startsWith("i2crm_ig_")
+			? idKey.slice("i2crm_ig_".length)
+			: idKey;
 		const displayName = (displayNameOverride && !/\s/.test(displayNameOverride))
 			? displayNameOverride
-			: (isPhoneLike ? (phoneE164 as string) : idKey);
+			: (isPhoneLike
+				? (phoneE164 as string)
+				: provider === "instagram"
+					? `IG ${igClientId}`
+					: idKey);
 		const userBlock: any = { id: userKey, name: displayName };
 		if (phoneE164) userBlock.phone = phoneE164;
 		const payload = {
