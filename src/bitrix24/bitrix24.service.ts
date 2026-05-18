@@ -589,7 +589,13 @@ export class Bitrix24Service extends BaseAdapter<
 			chat: {
 				id: userKey,
 				name: clientName,
-				url: username ? `https://instagram.com/${username}` : undefined,
+				// B24 рендерит chat.url как «Ссылка на исходный пост: <url>» в чате
+				// открытой линии. Для IG-comment — URL поста (igPostUrl), для IG-direct —
+				// URL профиля клиента. Раньше для обоих был профиль — для коммента это
+				// было неправильно (теряли контекст какой пост обсуждается).
+				url: isComment && igPostUrl
+					? igPostUrl
+					: username ? `https://instagram.com/${username}` : undefined,
 			},
 			extra: { crm: "Y" },
 		};
