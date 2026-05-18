@@ -87,3 +87,30 @@ model IgCommentContext {
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 }
+
+// Профилактика: журнал всех incoming-webhook'ов от i2crm Public API.
+// Если B24 заблокирован (OVERLOAD_LIMIT и др.) — сообщения сохраняются здесь
+// со status='pending'. После восстановления — endpoint /webhooks/internal/i2crm-replay
+// проходит по pending и доставляет в B24. payload — полный JSON для точного
+// воссоздания контекста (client_id, account_id, media_id, comment_id и т.д.).
+//
+// При успешной первой доставке: status='sent' + sentAt.
+// При повторных попытках если они нужны: attempts инкремент.
+// Очистка: cron удаляет записи старше 30 дней (если sent=success).
+model I2crmEventLog {
+  id        BigInt   @id @default(autoincrement())
+  messageId String   @db.VarChar(64)        // i2crm message_id
+  clientId  String   @db.VarChar(40)        // i2crm client_id (для индекса)
+  channel   String   @db.VarChar(16)        // instdir / instcom
+  incoming  Boolean                          // true=от клиента, false=outgoing-echo
+  payload   String   @db.Text                // полный JSON i2crm webhook
+  status    String   @default("pending") @db.VarChar(16)  // pending / sent / failed
+  attempts  Int      @default(0)
+  lastError String?  @db.Text
+  receivedAt DateTime @default(now())
+  sentAt    DateTime?
+
+  @@unique([messageId])
+  @@index([status, receivedAt])
+  @@index([clientId])
+}

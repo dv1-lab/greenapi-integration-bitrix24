@@ -136,6 +136,44 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: повторная доставка pending-событий i2crm в B24.
+	// Используется после восстановления B24 из OVERLOAD_LIMIT — webhook'и от i2crm
+	// уже сохранены в I2crmEventLog со status='pending', этот вызов берёт их
+	// (FIFO по receivedAt) и пробует доставить ещё раз. Auth: X-Hint-Secret.
+	@Post("internal/i2crm-replay")
+	@HttpCode(HttpStatus.OK)
+	async replayI2crm(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { limit?: number; since?: string; dryRun?: boolean };
+
+		let since: Date | undefined;
+		if (body.since) {
+			const d = new Date(body.since);
+			if (isNaN(d.getTime())) {
+				res.status(HttpStatus.BAD_REQUEST).json({ error: "invalid since (expected ISO8601)" });
+				return;
+			}
+			since = d;
+		}
+
+		try {
+			const result = await this.bitrix24Service.replayPendingI2crmEvents({
+				limit: body.limit,
+				since,
+				dryRun: body.dryRun === true,
+			});
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`i2crm-replay failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	private mapError(error: any) {
 		const mappings = [
 			{

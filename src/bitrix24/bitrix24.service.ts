@@ -459,6 +459,30 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, reason: `unsupported channel: ${channel}` };
 		}
 
+		// Профилактика: сохраняем payload в журнал ДО попытки доставки в B24.
+		// Если B24 в OVERLOAD_LIMIT — событие останется со status=pending и его
+		// можно replay'ить через /webhooks/internal/i2crm-replay. messageId
+		// уникален (upsert по нему — на случай retry-webhook от i2crm).
+		try {
+			await (this.prisma as any).i2crmEventLog.upsert({
+				where: { messageId: String(messageId) },
+				create: {
+					messageId: String(messageId),
+					clientId: String(clientId),
+					channel,
+					incoming: true,
+					payload: JSON.stringify(payload),
+					status: "pending",
+				},
+				update: {
+					// retry от i2crm — обновим payload (мало ли что), статус не меняем
+					payload: JSON.stringify(payload),
+				},
+			});
+		} catch (e: any) {
+			this.logger.warn(`i2crm: I2crmEventLog upsert failed (non-fatal): ${e.message}`);
+		}
+
 		// LINE id из env: instdir → I2CRM_LINE_ID_IG_DIRECT, instcom → I2CRM_LINE_ID_IG_COMMENT
 		const lineEnv = channel === "instdir" ? "I2CRM_LINE_ID_IG_DIRECT" : "I2CRM_LINE_ID_IG_COMMENT";
 		const lineId = Number(this.configService.get<string>(lineEnv));
@@ -605,6 +629,100 @@ export class Bitrix24Service extends BaseAdapter<
 		});
 
 		return { success: true };
+	}
+
+	// Профилактика: повторная доставка всех pending-событий i2crm в B24.
+	// Вызывается из /webhooks/internal/i2crm-replay после восстановления B24
+	// (например после OVERLOAD_LIMIT). Идёт по pending'ам один раз; неуспешные
+	// остаются pending и попадут в следующий replay.
+	async replayPendingI2crmEvents(opts: {
+		limit?: number;
+		since?: Date;
+		dryRun?: boolean;
+	}): Promise<{ total: number; sent: number; errors: number; skipped: number }> {
+		const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000));
+		const where: any = { status: "pending" };
+		if (opts.since) {
+			where.receivedAt = { gte: opts.since };
+		}
+
+		const pending = await (this.prisma as any).i2crmEventLog.findMany({
+			where,
+			orderBy: { receivedAt: "asc" },
+			take: limit,
+		});
+
+		const total = pending.length;
+		let sent = 0;
+		let errors = 0;
+		let skipped = 0;
+
+		for (const row of pending) {
+			if (opts.dryRun) {
+				skipped++;
+				continue;
+			}
+
+			let parsed: any;
+			try {
+				parsed = JSON.parse(row.payload);
+			} catch (e: any) {
+				errors++;
+				try {
+					await (this.prisma as any).i2crmEventLog.update({
+						where: { id: row.id },
+						data: {
+							attempts: { increment: 1 },
+							lastError: `payload parse error: ${e.message}`.slice(0, 2000),
+						},
+					});
+				} catch (updErr: any) {
+					this.logger.warn(`i2crm-replay: failed to update row ${row.id} after parse error: ${updErr.message}`);
+				}
+				continue;
+			}
+
+			try {
+				const result = await this.handleI2crmIncoming(parsed);
+				if (result.success) {
+					await (this.prisma as any).i2crmEventLog.update({
+						where: { id: row.id },
+						data: {
+							status: "sent",
+							sentAt: new Date(),
+							attempts: { increment: 1 },
+							lastError: null,
+						},
+					});
+					sent++;
+				} else {
+					await (this.prisma as any).i2crmEventLog.update({
+						where: { id: row.id },
+						data: {
+							attempts: { increment: 1 },
+							lastError: `handler skipped: ${result.reason || "unknown"}`.slice(0, 2000),
+						},
+					});
+					errors++;
+				}
+			} catch (e: any) {
+				errors++;
+				try {
+					await (this.prisma as any).i2crmEventLog.update({
+						where: { id: row.id },
+						data: {
+							attempts: { increment: 1 },
+							lastError: String(e?.message || e).slice(0, 2000),
+						},
+					});
+				} catch (updErr: any) {
+					this.logger.warn(`i2crm-replay: failed to update row ${row.id} after handler error: ${updErr.message}`);
+				}
+			}
+		}
+
+		this.logger.info(`i2crm-replay: total=${total} sent=${sent} errors=${errors} skipped=${skipped}`);
+		return { total, sent, errors, skipped };
 	}
 
 	private async backfillIgUfFields(
