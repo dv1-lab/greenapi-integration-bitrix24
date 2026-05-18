@@ -63,6 +63,7 @@ export class OAuthController {
 
 			await this.registerMessengerConnector(domain, accessToken);
 			await this.registerBitrix24Webhooks(domain, accessToken);
+			await this.registerCrmPlacements(domain, accessToken);
 
 			res.setHeader("Content-Type", "text/html");
 			res.setHeader("X-Frame-Options", "ALLOWALL");
@@ -445,6 +446,37 @@ export class OAuthController {
 					data: error.response?.data,
 					message: error.message,
 				});
+			}
+		}
+	}
+
+	private async registerCrmPlacements(domain: string, accessToken: string): Promise<void> {
+		// Регистрируем вкладку Social Connector во всех CRM-карточках. Без этого
+		// после переустановки приложения у клиента в B24-карточке не появляется
+		// вкладка — нужно делать placement.bind вручную через REST.
+		const appUrl = this.configService.get<string>("APP_URL");
+		const placements = [
+			"CRM_LEAD_DETAIL_TAB",
+			"CRM_DEAL_DETAIL_TAB",
+			"CRM_CONTACT_DETAIL_TAB",
+			"CRM_COMPANY_DETAIL_TAB",
+		];
+		for (const placement of placements) {
+			try {
+				await axios.post(`https://${domain}/rest/placement.bind?auth=${accessToken}`, {
+					PLACEMENT: placement,
+					HANDLER: appUrl,
+					TITLE: "Social Connector",
+				});
+				this.logger.info(`Bound placement: ${placement}`, { domain });
+			} catch (error: any) {
+				const desc = error.response?.data?.error_description || "";
+				// "ERROR_PLACEMENT_ALREADY_BINDED" — норм, идёмпотентно.
+				if (desc.includes("ALREADY_BINDED") || desc.includes("already")) {
+					this.logger.debug(`Placement ${placement} already bound, ok`);
+				} else {
+					this.logger.warn(`Failed to bind ${placement}: ${error.message}`);
+				}
 			}
 		}
 	}
