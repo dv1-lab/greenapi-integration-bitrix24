@@ -1654,6 +1654,33 @@ export class Bitrix24Service extends BaseAdapter<
 		const text = m.message?.text || "";
 		const files: any[] = (m.message as any)?.files || [];
 
+		// Pre-flight: Instagram Direct лимит 1000 символов. i2crm всё равно
+		// вернёт {error, validation:{text:[...]}} — но оператор узнаёт об этом
+		// только спустя минуту по серой плашке «не доставлено» в B24. Шлём
+		// alerts заранее системным сообщением в B24-чат открытой линии.
+		const IG_DIRECT_TEXT_LIMIT = 1000;
+		if (isDirect && text && text.length > IG_DIRECT_TEXT_LIMIT) {
+			const chatId = (m as any)?.im?.chat_id;
+			const alertText =
+				`❌ Не отправлено: Instagram Direct ограничен ${IG_DIRECT_TEXT_LIMIT} символами. ` +
+				`Сейчас ${text.length}. Сократи и попробуй заново.`;
+			if (chatId) {
+				try {
+					await this.callBitrix24Method(webhook.auth.domain, "im.message.add", {
+						DIALOG_ID: `chat${chatId}`,
+						MESSAGE: alertText,
+						SYSTEM: "Y",
+					});
+				} catch (e: any) {
+					this.logger.warn(`pre-flight alert failed: ${e.message}`);
+				}
+			}
+			return {
+				success: false,
+				message: `text exceeds ${IG_DIRECT_TEXT_LIMIT} chars (${text.length})`,
+			};
+		}
+
 		const apiBase = this.configService.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
 		const targetKey = this.configService.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
 		if (!targetKey) {
@@ -1996,7 +2023,10 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		try {
 			const resp: any = await this.callBitrix24Method(domain, "user.get", { ID: userId });
-			const u = Array.isArray(resp?.result) ? resp.result[0] : null;
+			// callBitrix24Method уже возвращает response.data.result — не оборачивай ещё раз.
+			// Был баг: проверяли resp.result (внутри уже-result'а), всегда null → hint
+			// до wa-tg-bridge не доходил, в TG-зеркале висел fallback «отправлено с мобильного».
+			const u = Array.isArray(resp) ? resp[0] : null;
 			if (!u) return null;
 			const name = [u.NAME, u.LAST_NAME].filter(Boolean).join(" ").trim()
 				|| u.WORK_POSITION
