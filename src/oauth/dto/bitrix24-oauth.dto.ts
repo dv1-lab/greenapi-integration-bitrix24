@@ -22,4 +22,8 @@ export class Bitrix24InstallDto {
 	@IsOptional()
 	@IsString()
 	PLACEMENT_OPTIONS?: string;
+
+	@IsOptional()
+	@IsString()
+	APPLICATION_TOKEN?: string;
 }

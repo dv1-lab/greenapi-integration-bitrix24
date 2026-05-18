@@ -45,7 +45,10 @@ export class OAuthController {
 
 		try {
 			const expiresAt = expiresIn ? new Date(Date.now() + parseInt(expiresIn) * 1000) : null;
-			const tempApplicationToken = `temp_${Date.now()}`;
+			// B24 шлёт APPLICATION_TOKEN прямо в POST install payload — используем
+			// его, чтобы Guard сразу принимал ONIMCONNECTORMESSAGEADD webhook'и.
+			// Fallback на temp_ нужен только если поле отсутствует (старые версии B24).
+			const applicationToken = body.APPLICATION_TOKEN || `temp_${Date.now()}`;
 
 			await this.prisma.createUser({
 				id: domain,
@@ -53,7 +56,7 @@ export class OAuthController {
 				accessToken: accessToken,
 				refreshToken: refreshToken,
 				tokenExpiresAt: expiresAt,
-				applicationToken: tempApplicationToken,
+				applicationToken: applicationToken,
 			});
 
 			this.logger.log(`Bitrix24 app installed for portal: ${domain}`);
