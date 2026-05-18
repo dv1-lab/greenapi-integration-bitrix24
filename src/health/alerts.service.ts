@@ -34,7 +34,7 @@ export class AlertsService {
 				`https://api.telegram.org/bot${this.token}/sendMessage`,
 				{
 					chat_id: this.chatId,
-					text: `⚠️ greenapi-b24:\n${text}`,
+					text: `🔌 social-connector:\n${text}`,
 					disable_web_page_preview: true,
 				},
 				{ timeout: 10000 },
