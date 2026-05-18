@@ -854,13 +854,13 @@ export class Bitrix24Service extends BaseAdapter<
 					// Перезаписываем при каждом новом комменте — актуальный пост.
 					if (postUrl) {
 						const existingLinks: any[] = Array.isArray(lead?.LINK) ? lead.LINK : [];
-						const link0 = existingLinks.find((l) => l?.VALUE_TYPE === "LINK0");
+						const link0 = existingLinks.find((l) => l?.VALUE_TYPE === "LINK1");
 						if (!link0 || link0.VALUE !== postUrl) {
 							// Сохраняем остальные значения LINK (не LINK0) + добавляем/обновляем LINK0
 							const newLinks: any[] = existingLinks
-								.filter((l) => l?.VALUE_TYPE !== "LINK0")
+								.filter((l) => l?.VALUE_TYPE !== "LINK1")
 								.map((l) => ({ ID: l.ID, VALUE: l.VALUE, VALUE_TYPE: l.VALUE_TYPE }));
-							newLinks.push({ VALUE: postUrl, VALUE_TYPE: "LINK0" });
+							newLinks.push({ VALUE: postUrl, VALUE_TYPE: "LINK1" });
 							if (upd) {
 								(upd as any).LINK = newLinks;
 							} else {
