@@ -448,9 +448,9 @@ export class WidgetController {
 		for (let attempt = 0; attempt < 6; attempt++) {
 			await new Promise((res) => setTimeout(res, attempt === 0 ? 3000 : 4000));
 			try {
-				const url = `https://${domain}/rest/crm.lead.list?auth=${encodeURIComponent(authId)}`;
+				const listUrl = `https://${domain}/rest/crm.lead.list?auth=${encodeURIComponent(authId)}`;
 				const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-				const r = await axios.post(url, {
+				const r = await axios.post(listUrl, {
 					filter: {
 						">DATE_CREATE": cutoff,
 						"=SOURCE_ID": "18|I2CRM",
@@ -459,7 +459,6 @@ export class WidgetController {
 					order: { DATE_CREATE: "DESC" },
 				}, { timeout: 8000 });
 				const leads: any[] = r.data?.result || [];
-				// Ищем тот у которого UF пусто или TITLE содержит i2crm_ig_<clientId>
 				const target = leads.find((l) =>
 					String(l?.TITLE || "").includes(`i2crm_ig_${clientId}`)
 					|| String(l?.TITLE || "").includes(clientId)
@@ -473,12 +472,34 @@ export class WidgetController {
 				if (username) {
 					fields.UF_CRM_IG_USERNAME = username;
 					fields.UF_CRM_INSTAGRAM = `https://instagram.com/${username}/`;
-					// TITLE = "<username> - Instagram Direct - 1begovoy.ru" (только если в TITLE сейчас служебный префикс)
 					if (String(target.TITLE || "").includes(`i2crm_ig_${clientId}`)) {
 						fields.TITLE = `${username} - Instagram Direct - 1begovoy.ru`;
 						fields.NAME = username;
 					}
 				}
+
+				// Поиск исходного открытого Comment-лида клиента (SOURCE_ID=22|I2CRM,
+				// STATUS_SEMANTIC_ID != F). Если есть — UF_CRM_LEAD_ID = ID.
+				// Тогда в карточке нового Direct-лида видна связь с тем коммент-лидом
+				// откуда оператор инициировал переход в Direct.
+				try {
+					const relR = await axios.post(listUrl, {
+						filter: {
+							UF_CRM_IG_CHAT_ID: clientId,
+							"=SOURCE_ID": "22|I2CRM",
+							"!STATUS_SEMANTIC_ID": "F",
+						},
+						select: ["ID"],
+						order: { DATE_CREATE: "DESC" },
+					}, { timeout: 8000 });
+					const related: any[] = relR.data?.result || [];
+					if (related.length > 0 && related[0].ID && Number(related[0].ID) !== Number(target.ID)) {
+						fields.UF_CRM_LEAD_ID = Number(related[0].ID);
+					}
+				} catch {
+					// non-fatal
+				}
+
 				const upd = `https://${domain}/rest/crm.lead.update?auth=${encodeURIComponent(authId)}`;
 				await axios.post(upd, { id: target.ID, fields }, { timeout: 8000 });
 				return;
