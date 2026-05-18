@@ -859,7 +859,7 @@ export class Bitrix24Service extends BaseAdapter<
 					// значение в UF_CRM_1638376742616 (тип url, поле «Link0 (активная
 					// ссылка на пост источника лида)» — оно read-only через REST).
 					// Перезаписываем при каждом новом комменте — актуальный пост.
-					if (isComment && postUrl && String(lead?.UF_CRM_1637656407829 || "") !== postUrl) {
+					if (channel === "instcom" && postUrl && String(lead?.UF_CRM_1637656407829 || "") !== postUrl) {
 						if (!upd) upd = {};
 						upd.UF_CRM_1637656407829 = postUrl;
 					}
