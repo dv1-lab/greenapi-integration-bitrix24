@@ -461,9 +461,10 @@ export class Bitrix24Service extends BaseAdapter<
 			contactLastName?: string;
 			channelLabel: string;
 			displayNameInMirror?: string; // что мы передали как user.name в imconnector
+			openEntity?: { kind: "deal" | "lead"; id: number };
 		},
 	): Promise<{ leadId?: number; updated?: boolean }> {
-		const { lineId, userKey, chatId, phoneE164, contactId, contactName, contactLastName, channelLabel, displayNameInMirror } = params;
+		const { lineId, userKey, chatId, phoneE164, contactId, contactName, contactLastName, channelLabel, displayNameInMirror, openEntity } = params;
 		let sourceId: string | undefined;
 		try {
 			const config: any = await this.callBitrix24Method(portalDomain, "imopenlines.config.get", {
@@ -523,6 +524,23 @@ export class Bitrix24Service extends BaseAdapter<
 					updateFields.NAME = contactName;
 					if (contactLastName) updateFields.LAST_NAME = contactLastName;
 				}
+				// Когда у клиента есть открытая сделка/лид — этот свежий
+				// imconnector-лид закрываем как «Дубликат» (STATUS_ID=12,
+				// семантика F в портале 1begovoy.bitrix24.ru) и привязываем
+				// к открытой сущности через UF_CRM_LEAD_ID. Сама сессия
+				// открытой линии остаётся в Контакт-центре — её id внутри B24
+				// привязан к этому лиду, не теряется.
+				if (openEntity) {
+					updateFields.STATUS_ID = "12";
+					if (openEntity.kind === "lead") {
+						updateFields.UF_CRM_LEAD_ID = openEntity.id;
+					}
+					const origTitle = String(target.TITLE || "").trim();
+					const prefix = `[Дубликат → ${openEntity.kind} ${openEntity.id}]`;
+					if (!origTitle.startsWith("[Дубликат")) {
+						updateFields.TITLE = origTitle ? `${prefix} ${origTitle}` : prefix;
+					}
+				}
 				if (Object.keys(updateFields).length === 0) {
 					this.logger.info(`backfillSendLead: lead ${target.ID} already linked, nothing to update`);
 					return { leadId: Number(target.ID), updated: false };
@@ -531,7 +549,10 @@ export class Bitrix24Service extends BaseAdapter<
 					id: target.ID,
 					fields: updateFields,
 				});
-				this.logger.info(`backfillSendLead: lead ${target.ID} → CONTACT_ID=${contactId} (${Object.keys(updateFields).join(",")})`);
+				const action = openEntity
+					? `marked as duplicate of ${openEntity.kind} ${openEntity.id}`
+					: `CONTACT_ID=${contactId}`;
+				this.logger.info(`backfillSendLead: lead ${target.ID} → ${action} (${Object.keys(updateFields).join(",")})`);
 				return { leadId: Number(target.ID), updated: true };
 			} catch (e: any) {
 				this.logger.warn(`backfillSendLead attempt ${attempt + 1} failed: ${e?.message || e}`);

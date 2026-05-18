@@ -322,12 +322,12 @@ export class WidgetController {
 			}
 		}
 
-		// Если у контакта есть открытая сделка или лид — пишем timeline-comment
-		// в неё, новую imconnector-сессию НЕ создаём. Бизнес-логика: исходящее
-		// первого касания должно влиться в текущую воронку клиента, а не плодить
-		// рядом ещё один лид. Приоритет: сделка → лид. Когда клиент ответит —
-		// adapter incoming flow создаст сессию через mirrorToBitrix и она
-		// прицепится к контакту через UF_CRM_*_CHAT_ID.
+		// Ищем открытую сделку/лид у контакта. Если есть — imconnector всё равно
+		// дёргаем (нужна карточка диалога в Контакт-центре, чтобы оператор в
+		// конце дня прошёлся по «кому отправили — не ответили»), но в backfill
+		// созданный лид закрывается как «Дубликат» (STATUS_ID=12) с
+		// UF_CRM_LEAD_ID на открытую сущность. В open entity параллельно пишем
+		// timeline-comment, чтобы из карточки клиента было видно исходящее.
 		let openEntity: { kind: "deal" | "lead"; id: number; title?: string } | null = null;
 		if (resolvedContactId && inst.user?.portalDomain) {
 			try {
@@ -340,26 +340,6 @@ export class WidgetController {
 			}
 		}
 
-		if (openEntity && inst.user?.portalDomain) {
-			const comment =
-				`📩 Отправлено в ${channelLabel}:\n${text}` +
-				(idMessage ? `\n\n[green-api ${idMessage}]` : "");
-			const commentId = await this.bitrix24.addTimelineComment(
-				inst.user.portalDomain,
-				openEntity.kind,
-				openEntity.id,
-				comment,
-			);
-			return {
-				ok: true, idMessage, chatId, idInstance,
-				line: lineForMirror,
-				mirrored: commentId
-					? `attached to ${openEntity.kind} ${openEntity.id} as timeline comment ${commentId}`
-					: `b24 timeline.comment.add failed for ${openEntity.kind} ${openEntity.id}`,
-			};
-		}
-
-		// Открытой сущности нет — обычный imconnector-flow с backfillSendLead.
 		// displayName для mirror: имя из карточки контакта, чтобы TITLE свежего
 		// лида и подпись chat-user'а были читаемые («Олег - Telegram 79584983354»
 		// вместо «396522892 - …»). mirrorToBitrix требует name без пробелов —
@@ -374,10 +354,25 @@ export class WidgetController {
 			displayNameForMirror,
 		);
 
-		// Backfill свежесозданного imconnector-лида: проставляем CONTACT_ID,
-		// UF_CRM_*_CHAT_ID, PHONE, имя клиента. Идёт асинхронно — оператор
-		// не ждёт. Запускается только если нашли контакт; иначе лид остаётся
-		// несвязанным (B24 сам предложит дедуп при следующем редактировании).
+		// Timeline-comment в открытую сделку/лид — отдельно от backfill,
+		// потому что в open entity мы пишем сразу, не дожидаясь пока B24
+		// создаст imconnector-лид (это 0-15с).
+		if (openEntity && inst.user?.portalDomain) {
+			const commentText =
+				`📩 Отправлено в ${channelLabel}:\n${text}` +
+				(idMessage ? `\n\n[green-api ${idMessage}]` : "");
+			this.bitrix24.addTimelineComment(
+				inst.user.portalDomain, openEntity.kind, openEntity.id, commentText,
+			).catch((e: any) => {
+				console.warn(`[widget] addTimelineComment failed (non-fatal): ${e?.message || e}`);
+			});
+		}
+
+		// Backfill свежесозданного imconnector-лида. Асинхронно — оператор не ждёт.
+		// Запускается только если нашли контакт; иначе лид остаётся несвязанным
+		// (B24 сам предложит дедуп при следующем редактировании).
+		// Когда openEntity задан — backfill закроет лид как «Дубликат» с
+		// UF_CRM_LEAD_ID на открытую сущность вместо обычной привязки.
 		if (resolvedContactId && lineForMirror && inst.user?.portalDomain) {
 			const userKey = provider === "wa"
 				? `wa_${mirrorKey}`
@@ -392,12 +387,17 @@ export class WidgetController {
 				contactLastName: resolvedContactLastName,
 				channelLabel,
 				displayNameInMirror: displayNameForMirror,
+				openEntity: openEntity || undefined,
 			}).catch((e: any) => {
 				console.warn(`[widget] backfillSendLead failed (non-fatal): ${e?.message || e}`);
 			});
 		}
 
-		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
+		return {
+			ok: true, idMessage, chatId, idInstance,
+			line: lineForMirror, mirrored,
+			openEntity: openEntity || undefined,
+		};
 	}
 
 	// Отправка в Instagram Direct через i2crm Public API. Для клиентов, чей
