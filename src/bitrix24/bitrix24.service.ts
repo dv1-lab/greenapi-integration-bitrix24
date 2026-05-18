@@ -33,6 +33,13 @@ import {
 import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 
+export interface EnsureLeadResult {
+	contactId?: number;
+	contactName?: string;
+	contactLastName?: string;
+	createdLeadId?: number;
+}
+
 @Injectable()
 export class Bitrix24Service extends BaseAdapter<
 	Bitrix24WebhookDto,
@@ -201,7 +208,7 @@ export class Bitrix24Service extends BaseAdapter<
 
 	// Простой мьютекс на phone, чтобы два одновременных webhook'а от Green API не
 	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
-	private readonly _ensureLeadLocks = new Map<string, Promise<void>>();
+	private readonly _ensureLeadLocks = new Map<string, Promise<EnsureLeadResult>>();
 
 	/**
 	 * Гарантирует что у клиента (по phone) есть открытый лид/сделка к моменту
@@ -215,6 +222,10 @@ export class Bitrix24Service extends BaseAdapter<
 	 *   3. Если есть открытое — ничего не делать (новые сообщения прицепятся).
 	 *   4. Если нет — создать лид с привязкой к контакту.
 	 *
+	 * Когда вызывается из widget /send: skipLeadCreation=true. Тогда шаги 1-3
+	 * выполняются (поиск контакта + запись UF_CRM_*_CHAT_ID), но auto-лид НЕ
+	 * создаётся — за лид отвечает imconnector.send.messages + backfillSendLead.
+	 *
 	 * Идемпотентность обеспечивается мьютексом по phone и проверкой 2-3.
 	 */
 	async ensureOpenLeadForPhone(
@@ -224,14 +235,12 @@ export class Bitrix24Service extends BaseAdapter<
 		lineId: number,
 		channelLabel: string = "WhatsApp",
 		chatId?: string,
-	): Promise<void> {
+		skipLeadCreation: boolean = false,
+	): Promise<EnsureLeadResult> {
 		const lockKey = `${portalDomain}:${phoneE164}:${chatId || ""}`;
 		const existing = this._ensureLeadLocks.get(lockKey);
-		if (existing) {
-			await existing;
-			return;
-		}
-		const task = (async () => {
+		if (existing) return existing;
+		const task: Promise<EnsureLeadResult> = (async (): Promise<EnsureLeadResult> => {
 			try {
 				// 1. Поиск контакта по phone. Если phone пустой/невалидный —
 				// ищем по сохранённому chatId в UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID
@@ -263,14 +272,20 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 				if (!contactId) {
 					this.logger.info(`ensureLead: no existing contact for ${phoneE164}/${chatId || "-"}, leaving creation to B24`);
-					return;
+					return {};
 				}
 				// Если нашли контакт И есть chatId — сохраняем chatId в UF контакта
 				// (только если поле сейчас пустое). Это даст матч по chatId для
-				// будущих сообщений когда phone недоступен.
-				if (chatId && chatIdUf) {
-					try {
-						const contactData: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
+				// будущих сообщений когда phone недоступен. Заодно читаем имя
+				// для возврата вызывающему (widget использует его как displayName
+				// в imconnector и для backfill созданного лида).
+				let contactName: string | undefined;
+				let contactLastName: string | undefined;
+				try {
+					const contactData: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
+					contactName = (contactData?.NAME || "").toString().trim() || undefined;
+					contactLastName = (contactData?.LAST_NAME || "").toString().trim() || undefined;
+					if (chatId && chatIdUf) {
 						const existingValue = contactData?.[chatIdUf];
 						if (!existingValue) {
 							await this.callBitrix24Method(portalDomain, "crm.contact.update", {
@@ -279,9 +294,16 @@ export class Bitrix24Service extends BaseAdapter<
 							});
 							this.logger.info(`ensureLead: saved ${chatIdUf}=${chatId} on contact ${contactId}`);
 						}
-					} catch (e: any) {
-						this.logger.warn(`ensureLead: failed to save chatId on contact ${contactId}: ${e.message}`);
 					}
+				} catch (e: any) {
+					this.logger.warn(`ensureLead: failed to read/save contact ${contactId}: ${e.message}`);
+				}
+
+				const baseResult: EnsureLeadResult = { contactId, contactName, contactLastName };
+
+				if (skipLeadCreation) {
+					// Widget-flow: лид создаст imconnector, мы только зарезолвили контакт
+					return baseResult;
 				}
 
 				// 2. Открытые лиды (фильтр: статус не F=failed, не S=success)
@@ -294,7 +316,7 @@ export class Bitrix24Service extends BaseAdapter<
 				});
 				if (Array.isArray(openLeads) && openLeads.length > 0) {
 					this.logger.info(`ensureLead: contact ${contactId} has ${openLeads.length} open lead(s) — no action`);
-					return;
+					return baseResult;
 				}
 
 				// 3. Открытые сделки
@@ -307,7 +329,7 @@ export class Bitrix24Service extends BaseAdapter<
 				});
 				if (Array.isArray(openDeals) && openDeals.length > 0) {
 					this.logger.info(`ensureLead: contact ${contactId} has ${openDeals.length} open deal(s) — no action`);
-					return;
+					return baseResult;
 				}
 
 				// 4. Создать лид. SOURCE_ID берём из конфига линии (то что у обычных
@@ -336,17 +358,121 @@ export class Bitrix24Service extends BaseAdapter<
 
 				const createdId: any = await this.callBitrix24Method(portalDomain, "crm.lead.add", { fields });
 				this.logger.info(`ensureLead: created lead ${createdId} for contact ${contactId} (phone ${phoneE164})`);
+				return { ...baseResult, createdLeadId: Number(createdId) || undefined };
 			} catch (err: any) {
 				// Не блокируем доставку сообщения, только логируем
 				this.logger.error(`ensureLead failed: ${err.message}`);
+				return {};
 			}
 		})();
 		this._ensureLeadLocks.set(lockKey, task);
 		try {
-			await task;
+			return await task;
 		} finally {
 			this._ensureLeadLocks.delete(lockKey);
 		}
+	}
+
+	/**
+	 * Backfill свежесозданного лида от imconnector.send.messages (widget /send).
+	 * B24 создаёт лид асинхронно после первой messages — без CONTACT_ID и с
+	 * технической TITLE/NAME (chatId или E.164). Этот метод догоняет лид и
+	 * проставляет CONTACT_ID + UF_CRM_*_CHAT_ID + UF_CRM_NF_YM_CLIENT_ID,
+	 * чтобы оператор видел его в карточке контакта.
+	 *
+	 * Если лид не нашёлся за все попытки — non-fatal (B24 мог не создать лид,
+	 * например если в настройках линии «не создавать лид»).
+	 */
+	async backfillSendLead(
+		portalDomain: string,
+		params: {
+			lineId: number;
+			userKey: string;  // sc_<chatId> / wa_<phone> — приходит в TITLE как user.name fallback
+			chatId: string;   // для UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID
+			phoneE164: string | null;
+			contactId: number;
+			contactName?: string;
+			contactLastName?: string;
+			channelLabel: string;
+			displayNameInMirror?: string; // что мы передали как user.name в imconnector
+		},
+	): Promise<{ leadId?: number; updated?: boolean }> {
+		const { lineId, userKey, chatId, phoneE164, contactId, contactName, contactLastName, channelLabel, displayNameInMirror } = params;
+		let sourceId: string | undefined;
+		try {
+			const config: any = await this.callBitrix24Method(portalDomain, "imopenlines.config.get", {
+				CONFIG_ID: lineId,
+			});
+			sourceId = config?.CRM_SOURCE;
+		} catch (e: any) {
+			this.logger.warn(`backfillSendLead: failed to read line ${lineId} CRM_SOURCE: ${e.message}`);
+		}
+
+		const chatIdUfMap: Record<string, string> = {
+			"Telegram": "UF_CRM_TG_CHAT_ID",
+			"MAX": "UF_CRM_MAX_CHAT_ID",
+			"Instagram": "UF_CRM_IG_CHAT_ID",
+		};
+		const chatIdUf = chatIdUfMap[channelLabel];
+		const titleNeedles = [chatId, userKey, displayNameInMirror, phoneE164?.replace(/^\+/, "")]
+			.filter((x): x is string => Boolean(x));
+
+		// B24 создаёт лид через 0-15с после imconnector.send.messages. Шесть попыток,
+		// первая через 3с (B24 обычно успевает), дальше 4с между.
+		for (let attempt = 0; attempt < 6; attempt++) {
+			await new Promise((res) => setTimeout(res, attempt === 0 ? 3000 : 4000));
+			try {
+				const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+				const filter: Record<string, any> = { ">DATE_CREATE": cutoff };
+				if (sourceId) filter["=SOURCE_ID"] = sourceId;
+				const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+					filter,
+					select: ["ID", "TITLE", "NAME", "LAST_NAME", "CONTACT_ID", "PHONE", "UF_CRM_NF_YM_CLIENT_ID", chatIdUf || "UF_CRM_TG_CHAT_ID"],
+					order: { DATE_CREATE: "DESC" },
+				});
+				if (!Array.isArray(leads) || leads.length === 0) continue;
+				const target = leads.find((l: any) => {
+					const title = String(l?.TITLE || "");
+					return titleNeedles.some((n) => title.includes(n));
+				});
+				if (!target) continue;
+				const updateFields: Record<string, any> = {};
+				if (!target.CONTACT_ID || Number(target.CONTACT_ID) === 0) {
+					updateFields.CONTACT_ID = contactId;
+				}
+				if (chatIdUf && !target[chatIdUf]) {
+					updateFields[chatIdUf] = chatId;
+				}
+				if (!target.UF_CRM_NF_YM_CLIENT_ID) {
+					updateFields.UF_CRM_NF_YM_CLIENT_ID = "-";
+				}
+				if (phoneE164 && !(Array.isArray(target.PHONE) && target.PHONE.length > 0)) {
+					updateFields.PHONE = [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }];
+				}
+				// Имя клиента в лиде: B24 при создании кладёт displayName в NAME
+				// (или в NAME+LAST_NAME, если был пробел). Если у нас есть real
+				// имя контакта — поправляем, чтобы оператор видел «Олег Ремфон»
+				// вместо «396522892» или «79253267624».
+				if (contactName && (!target.NAME || /^\+?\d+$/.test(String(target.NAME).trim()) || String(target.NAME).trim() === userKey)) {
+					updateFields.NAME = contactName;
+					if (contactLastName) updateFields.LAST_NAME = contactLastName;
+				}
+				if (Object.keys(updateFields).length === 0) {
+					this.logger.info(`backfillSendLead: lead ${target.ID} already linked, nothing to update`);
+					return { leadId: Number(target.ID), updated: false };
+				}
+				await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+					id: target.ID,
+					fields: updateFields,
+				});
+				this.logger.info(`backfillSendLead: lead ${target.ID} → CONTACT_ID=${contactId} (${Object.keys(updateFields).join(",")})`);
+				return { leadId: Number(target.ID), updated: true };
+			} catch (e: any) {
+				this.logger.warn(`backfillSendLead attempt ${attempt + 1} failed: ${e?.message || e}`);
+			}
+		}
+		this.logger.warn(`backfillSendLead: no matching lead found after 6 attempts (userKey=${userKey}, chatId=${chatId})`);
+		return {};
 	}
 
 	async sendToPlatform(message: Bitrix24PlatformMessage, instance: Instance & { user: User }): Promise<void> {

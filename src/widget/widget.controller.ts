@@ -292,30 +292,73 @@ export class WidgetController {
 		const lineForMirror = inst.bitrixLine || undefined;
 		const mirrorKey = (provider === "max" || provider === "telegram") ? chatId : phone;
 
-		// Поиск существующего B24-контакта и привязка к нему. Для WA — по phone.
-		// Для MAX/Telegram — по сохранённому chatId в UF_CRM_*_CHAT_ID
-		// (адаптер заполняет это поле при incoming, если уже было общение).
-		if (lineForMirror && inst.user?.portalDomain) {
-			const phoneE164 = (phone.length >= 10 && phone.length <= 15) ? `+${phone}` : "";
-			const channelLabel = provider === "max" ? "MAX" : provider === "telegram" ? "Telegram" : "WhatsApp";
-			const chatIdForUf = (provider === "max" || provider === "telegram") ? chatId : undefined;
-			if (phoneE164 || chatIdForUf) {
-				try {
-					await this.bitrix24.ensureOpenLeadForPhone(
-						inst.user.portalDomain,
-						phoneE164,
-						phoneE164 || (chatIdForUf || ""),
-						lineForMirror,
-						channelLabel,
-						chatIdForUf,
-					);
-				} catch (e: any) {
-					console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
-				}
+		// Резолвим существующий B24-контакт (по phone или UF_CRM_*_CHAT_ID),
+		// сохраняем chatId в карточке контакта если его там ещё не было.
+		// Auto-лид в widget /send НЕ создаём (skipLeadCreation=true) — за лид
+		// отвечает imconnector.send.messages ниже, а привязку к контакту
+		// проставляет backfillSendLead.
+		const phoneE164 = (phone.length >= 10 && phone.length <= 15) ? `+${phone}` : "";
+		const channelLabel = provider === "max" ? "MAX" : provider === "telegram" ? "Telegram" : "WhatsApp";
+		const chatIdForUf = (provider === "max" || provider === "telegram") ? chatId : undefined;
+		let resolvedContactId: number | undefined;
+		let resolvedContactName: string | undefined;
+		let resolvedContactLastName: string | undefined;
+		if (lineForMirror && inst.user?.portalDomain && (phoneE164 || chatIdForUf)) {
+			try {
+				const res = await this.bitrix24.ensureOpenLeadForPhone(
+					inst.user.portalDomain,
+					phoneE164,
+					phoneE164 || (chatIdForUf || ""),
+					lineForMirror,
+					channelLabel,
+					chatIdForUf,
+					true, // skipLeadCreation — лид сделает imconnector
+				);
+				resolvedContactId = res.contactId;
+				resolvedContactName = res.contactName;
+				resolvedContactLastName = res.contactLastName;
+			} catch (e: any) {
+				console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
 			}
 		}
 
-		const mirrored = await this.mirrorToBitrix(mirrorKey, text, idMessage, body.authId, body.domain, lineForMirror, provider);
+		// displayName для mirror: имя из карточки контакта, чтобы TITLE свежего
+		// лида и подпись chat-user'а были читаемые («Олег - Telegram 79584983354»
+		// вместо «396522892 - …»). mirrorToBitrix требует name без пробелов —
+		// берём только NAME (LAST_NAME проставит backfill через crm.lead.update).
+		const displayNameForMirror = resolvedContactName && !/\s/.test(resolvedContactName)
+			? resolvedContactName
+			: undefined;
+
+		const mirrored = await this.mirrorToBitrix(
+			mirrorKey, text, idMessage,
+			body.authId, body.domain, lineForMirror, provider,
+			displayNameForMirror,
+		);
+
+		// Backfill свежесозданного imconnector-лида: проставляем CONTACT_ID,
+		// UF_CRM_*_CHAT_ID, PHONE, имя клиента. Идёт асинхронно — оператор
+		// не ждёт. Запускается только если нашли контакт; иначе лид остаётся
+		// несвязанным (B24 сам предложит дедуп при следующем редактировании).
+		if (resolvedContactId && lineForMirror && inst.user?.portalDomain) {
+			const userKey = provider === "wa"
+				? `wa_${mirrorKey}`
+				: `sc_${mirrorKey}`;
+			this.bitrix24.backfillSendLead(inst.user.portalDomain, {
+				lineId: lineForMirror,
+				userKey,
+				chatId: mirrorKey,
+				phoneE164: phoneE164 || null,
+				contactId: resolvedContactId,
+				contactName: resolvedContactName,
+				contactLastName: resolvedContactLastName,
+				channelLabel,
+				displayNameInMirror: displayNameForMirror,
+			}).catch((e: any) => {
+				console.warn(`[widget] backfillSendLead failed (non-fatal): ${e?.message || e}`);
+			});
+		}
+
 		return { ok: true, idMessage, chatId, idInstance, line: lineForMirror, mirrored };
 	}
 
