@@ -180,8 +180,8 @@ export class I2crmTgMirrorService {
 		// ФИО клиента из B24 — через HTTP self-call к собственному endpoint
 		// /webhooks/internal/contact-name. Прямая инжекция bitrix24Service'а
 		// сюда даст circular dep (он же инжектит i2crm-tg-mirror), поэтому
-		// идём через HTTP — overhead ~5-10мс на localhost, приемлемо для
-		// создания темы (1 раз за время жизни клиента).
+		// идём через HTTP. Timeout 15с т.к. под нагрузкой backfill B24 может
+		// отвечать медленно (OPERATION_TIME_LIMIT).
 		let b24Name: string | null = null;
 		try {
 			const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
@@ -191,7 +191,7 @@ export class I2crmTgMirrorService {
 				{ igClientId: String(clientId) },
 				{
 					headers: secret ? { "X-Hint-Secret": secret } : undefined,
-					timeout: 3000,
+					timeout: 15000,
 					validateStatus: () => true,
 				},
 			);
@@ -390,7 +390,10 @@ export class I2crmTgMirrorService {
 			total++;
 
 			try {
-				// ФИО из B24 через self-call (избегаем circular dep)
+				// ФИО из B24 через self-call (избегаем circular dep). Timeout
+				// большой (30с), т.к. при параллельной нагрузке (backfill #22)
+				// B24-квота OPERATION_TIME_LIMIT может задерживать crm.contact.list
+				// и crm.lead.list до 5-15 секунд.
 				let b24Name: string | null = null;
 				try {
 					const resp = await axios.post(
@@ -398,7 +401,7 @@ export class I2crmTgMirrorService {
 						{ igClientId: String(clientId) },
 						{
 							headers: secret ? { "X-Hint-Secret": secret } : undefined,
-							timeout: 3000,
+							timeout: 30000,
 							validateStatus: () => true,
 						},
 					);
