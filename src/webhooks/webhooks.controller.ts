@@ -146,6 +146,28 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: backfill pinned-карточек в существующих IG-топиках.
+	// Идёт фоновой задачей с rate-limit delay_sec секунд между топиками.
+	// Идемпотентен через state.pinnedCards. Auth: X-Hint-Secret.
+	@Post("internal/backfill-ig-pinned-cards")
+	@HttpCode(HttpStatus.OK)
+	async backfillIgPinnedCards(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { delay_sec?: number };
+		const delaySec = Math.max(5, Number(body.delay_sec) || 30);
+		// Запускаем фоновой задачей, отвечаем сразу.
+		this.i2crmTgMirror.backfillExistingTopicCards(delaySec).then(
+			(r) => this.logger.info(`IG backfill done: ${JSON.stringify(r)}`),
+			(e) => this.logger.error(`IG backfill failed: ${e.message}`),
+		);
+		res.json({ started: true, delay_sec: delaySec });
+	}
+
 	// Internal endpoint: массовое переименование всех IG-тем (refresh_all для IG).
 	// Идёт по state.topics в i2crm-tg-mirror, для каждой темы дёргает B24 за
 	// актуальным ФИО, формирует новое имя в текущем формате и edit'ит топик.

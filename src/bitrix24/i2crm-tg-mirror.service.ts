@@ -14,6 +14,7 @@ import { GreenApiLogger } from "@green-api/greenapi-integration";
 interface MirrorState {
 	topics: Record<string, number>;       // clientId → topic_id
 	cardsPosted: Record<string, true>;    // leadId → true (карточка клиента уже постилась)
+	pinnedCards?: Record<string, true>;   // `<groupId>:<clientId>` → true (pinned-card готова)
 }
 
 @Injectable()
@@ -23,7 +24,7 @@ export class I2crmTgMirrorService {
 	private readonly groupIdDirect: string | undefined;
 	private readonly groupIdComment: string | undefined;
 	private readonly mapPath: string;
-	private state: MirrorState = { topics: {}, cardsPosted: {} };
+	private state: MirrorState = { topics: {}, cardsPosted: {}, pinnedCards: {} };
 	private mapLoaded = false;
 	private writeLock: Promise<void> = Promise.resolve();
 
@@ -62,9 +63,10 @@ export class I2crmTgMirrorService {
 					this.state = {
 						topics: parsed.topics || {},
 						cardsPosted: parsed.cardsPosted || {},
+						pinnedCards: parsed.pinnedCards || {},
 					};
 				} else {
-					this.state = { topics: parsed || {}, cardsPosted: {} };
+					this.state = { topics: parsed || {}, cardsPosted: {}, pinnedCards: {} };
 				}
 			} else {
 				const dir = path.dirname(this.mapPath);
@@ -202,10 +204,97 @@ export class I2crmTgMirrorService {
 					this.logger.debug(`tg-mirror: IG pinChatMessage failed: ${e.message}`);
 				}
 			}
+			const clientId = String(payload?.client_id || "");
+			if (clientId) {
+				if (!this.state.pinnedCards) this.state.pinnedCards = {};
+				this.state.pinnedCards[this.topicKey(groupId, clientId)] = true;
+				await this.persistMap();
+			}
 		} catch (e: any) {
 			this.logger.warn(`tg-mirror: IG pinned card failed: ${e.message}`);
 		}
 	}
+
+	/**
+	 * One-shot backfill для существующих IG-топиков. Идёт по state.topics,
+	 * пропускает уже отмеченные в state.pinnedCards. Для каждого:
+	 *   1. Дёргает adapter self-call /internal/contact-name по clientId
+	 *      (узнаёт ФИО + UF_CRM_IG_USERNAME из B24).
+	 *   2. Постит pinned-карточку: имя + ссылка instagram.com/<username>/.
+	 *      Аватарки нет (state не хранил profile_pic_url; для новых
+	 *      incoming-сообщений аватарка приходит сразу через postIgPinnedCard).
+	 *   3. pin_chat_message + mark в pinnedCards.
+	 * Между топиками sleep delaySec секунд.
+	 */
+	async backfillExistingTopicCards(delaySec: number = 30): Promise<{
+		total: number; posted: number; skipped: number; errors: number;
+	}> {
+		if (!this.enabled) return { total: 0, posted: 0, skipped: 0, errors: 0 };
+		await this.loadMap();
+		const delay = Math.max(5, delaySec);
+		const pinned = this.state.pinnedCards || {};
+		const entries = Object.entries(this.state.topics).filter(([k]) => !pinned[k]);
+		let posted = 0; let skipped = 0; let errors = 0;
+		const total = entries.length;
+		this.logger.info(
+			`tg-mirror: IG backfill started, ${total} topic(s), delay=${delay}s ETA ~${Math.round((total * delay) / 60)}min`,
+		);
+		const port = this.configService.get<string>("PORT") || "3000";
+		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+		for (const [key, topicId] of entries) {
+			let groupId: string; let clientId: string;
+			if (key.includes(":")) {
+				const parts = key.split(":", 2);
+				groupId = parts[0]; clientId = parts[1];
+			} else {
+				groupId = this.groupIdComment || "";
+				clientId = key;
+			}
+			if (!groupId || !clientId) { skipped++; continue; }
+			let channel: string;
+			if (groupId === this.groupIdComment) channel = "instcom";
+			else if (groupId === this.groupIdDirect) channel = "instdir";
+			else { skipped++; continue; }
+
+			let name: string | null = null;
+			let username: string | null = null;
+			try {
+				const resp = await axios.post(
+					`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
+					{ igClientId: String(clientId) },
+					{
+						headers: secret ? { "X-Hint-Secret": secret } : undefined,
+						timeout: 20000,
+						validateStatus: () => true,
+					},
+				);
+				if (resp.status === 200) {
+					name = (resp.data?.name as string) || null;
+					username = (resp.data?.igUsername as string) || null;
+				}
+			} catch (e: any) {
+				this.logger.debug(`IG backfill: contact-name lookup failed for ${clientId}: ${e.message}`);
+			}
+
+			try {
+
+				await this.postIgPinnedCard(groupId, topicId, {
+					client_id: clientId,
+					client_name: name || (username ? username : `IG_${clientId}`),
+					client_username: username || "",
+					channel,
+				});
+				posted++;
+			} catch (e: any) {
+				this.logger.warn(`IG backfill: failed for ${key}: ${e.message}`);
+				errors++;
+			}
+			await new Promise((r) => setTimeout(r, delay * 1000));
+		}
+		this.logger.info(`tg-mirror: IG backfill finished total=${total} posted=${posted} skipped=${skipped} errors=${errors}`);
+		return { total, posted, skipped, errors };
+	}
+
 
 	private buildCaption(payload: any): string {
 		// HTML-формат: @username из IG оборачиваем в <a href="instagram.com/...">

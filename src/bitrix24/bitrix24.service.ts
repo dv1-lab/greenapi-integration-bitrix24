@@ -2189,22 +2189,67 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	/**
+	 * Найти UF_CRM_IG_USERNAME клиента в B24 по IG client_id. Сначала ищет
+	 * среди лидов (там username чаще backfill'ится), потом среди контактов.
+	 * Используется backfill'ом IG-pinned-карточек (нужно знать @username для
+	 * ссылки https://instagram.com/<username>/).
+	 */
+	async findIgUsername(clientId: string): Promise<string | null> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return null;
+		try {
+			const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+				filter: { UF_CRM_IG_CHAT_ID: String(clientId) },
+				select: ["UF_CRM_IG_USERNAME"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(leads)) {
+				for (const l of leads) {
+					const u = String(l?.UF_CRM_IG_USERNAME || "").trim();
+					if (u) return u.replace(/^@/, "");
+				}
+			}
+		} catch (e: any) {
+			this.logger.debug(`findIgUsername: lead.list failed for ${clientId}: ${e.message}`);
+		}
+		try {
+			const contacts: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+				filter: { UF_CRM_IG_CHAT_ID: String(clientId) },
+				select: ["UF_CRM_IG_USERNAME"],
+			});
+			if (Array.isArray(contacts)) {
+				for (const c of contacts) {
+					const u = String(c?.UF_CRM_IG_USERNAME || "").trim();
+					if (u) return u.replace(/^@/, "");
+				}
+			}
+		} catch (e: any) {
+			this.logger.debug(`findIgUsername: contact.list failed for ${clientId}: ${e.message}`);
+		}
+		return null;
+	}
+
 	// ----- Contact-name lookup (для wa-tg-bridge: имя темы из B24) ---
 	// Кеш phone/igClientId → ФИО клиента из B24. TTL 10 мин, чтобы не дёргать
 	// B24 на каждое incoming-сообщение. При обновлении ФИО в B24 — мост подтянет
 	// новое имя через max 10 минут (а если был direct refresh — мгновенно).
-	private contactNameCache = new Map<string, { name: string | null; expires: number; entityId?: number | null; link?: string | null }>();
+	private contactNameCache = new Map<string, { name: string | null; expires: number; entityId?: number | null; link?: string | null; igUsername?: string | null }>();
 
-	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null; entityId: number | null; link: string | null }> {
+	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null; entityId: number | null; link: string | null; igUsername?: string | null }> {
 		const phone = (input.phone || "").trim();
 		const igClientId = (input.igClientId || "").trim();
-		const empty = { name: null, source: null, entityId: null, link: null };
+		const empty = { name: null, source: null, entityId: null, link: null, igUsername: null };
 		if (!phone && !igClientId) return empty;
 		const key = phone ? `phone:${phone}` : `ig:${igClientId}`;
-		const cached = this.contactNameCache.get(key);
+		const cached: any = this.contactNameCache.get(key);
 		if (cached && cached.expires > Date.now()) {
-			const c: any = cached;
-			return { name: c.name, source: c.name ? "cache" : null, entityId: c.entityId || null, link: c.link || null };
+			return {
+				name: cached.name, source: cached.name ? "cache" : null,
+				entityId: cached.entityId || null, link: cached.link || null,
+				igUsername: cached.igUsername || null,
+			};
 		}
 
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
@@ -2222,6 +2267,7 @@ export class Bitrix24Service extends BaseAdapter<
 		let source: string | null = null;
 		let entityId: number | null = null;
 		let link: string | null = null;
+		let igUsername: string | null = null;
 
 		try {
 			if (phone) {
@@ -2256,24 +2302,33 @@ export class Bitrix24Service extends BaseAdapter<
 			} else if (igClientId) {
 				const cList: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
 					filter: { UF_CRM_IG_CHAT_ID: igClientId },
-					select: ["ID", "NAME", "LAST_NAME"],
+					select: ["ID", "NAME", "LAST_NAME", "UF_CRM_IG_USERNAME"],
 				});
 				if (Array.isArray(cList) && cList.length > 0) {
 					name = buildName(cList[0]);
 					source = "contact";
 					entityId = parseInt(cList[0].ID, 10);
 					link = `https://${portalDomain}/crm/contact/details/${entityId}/`;
+					igUsername = String(cList[0]?.UF_CRM_IG_USERNAME || "").trim().replace(/^@/, "") || null;
 				}
-				if (!name) {
+				if (!name || !igUsername) {
 					const lList: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
 						filter: { UF_CRM_IG_CHAT_ID: igClientId },
-						select: ["ID", "NAME", "LAST_NAME"],
+						select: ["ID", "NAME", "LAST_NAME", "UF_CRM_IG_USERNAME"],
 					});
 					if (Array.isArray(lList) && lList.length > 0) {
-						name = buildName(lList[0]);
-						source = "lead";
-						entityId = parseInt(lList[0].ID, 10);
-						link = `https://${portalDomain}/crm/lead/details/${entityId}/`;
+						if (!name) {
+							name = buildName(lList[0]);
+							source = "lead";
+							entityId = parseInt(lList[0].ID, 10);
+							link = `https://${portalDomain}/crm/lead/details/${entityId}/`;
+						}
+						if (!igUsername) {
+							for (const l of lList) {
+								const u = String(l?.UF_CRM_IG_USERNAME || "").trim().replace(/^@/, "");
+								if (u) { igUsername = u; break; }
+							}
+						}
 					}
 				}
 			}
@@ -2281,14 +2336,14 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`getContactName failed for ${key}: ${e.message}`);
 		}
 
-		this.contactNameCache.set(key, { name, expires: Date.now() + 600_000, entityId, link } as any);
+		this.contactNameCache.set(key, { name, expires: Date.now() + 600_000, entityId, link, igUsername } as any);
 		if (this.contactNameCache.size > 1000) {
 			const now = Date.now();
 			for (const [k, v] of this.contactNameCache) {
 				if (v.expires < now) this.contactNameCache.delete(k);
 			}
 		}
-		return { name, source, entityId, link };
+		return { name, source, entityId, link, igUsername };
 	}
 
 	// ----- Operator name cache + hint forwarding ----------------------
