@@ -111,10 +111,12 @@ export class I2crmTgMirrorService {
 		return topicId;
 	}
 
-	private async findOrCreateTopic(groupId: string, clientId: string, name: string): Promise<number> {
+	private async findOrCreateTopic(
+		groupId: string, clientId: string, name: string,
+	): Promise<{ topicId: number; created: boolean }> {
 		await this.loadMap();
 		const key = this.topicKey(groupId, clientId);
-		if (this.state.topics[key]) return this.state.topics[key];
+		if (this.state.topics[key]) return { topicId: this.state.topics[key], created: false };
 		// Legacy: один клиент мог быть сохранён как просто `<clientId>` (без groupId)
 		// до разделения групп. Подхватываем такие записи в группу Comments
 		// (где раньше был fallback).
@@ -124,9 +126,85 @@ export class I2crmTgMirrorService {
 			delete this.state.topics[clientId];
 			await this.persistMap();
 			this.logger.info(`tg-mirror: migrated legacy topic ${oldTopic} to key ${key}`);
-			return oldTopic;
+			return { topicId: oldTopic, created: false };
 		}
-		return this.createTopic(groupId, clientId, name);
+		const topicId = await this.createTopic(groupId, clientId, name);
+		return { topicId, created: true };
+	}
+
+	/**
+	 * Постит pinned-карточку клиента в новый IG-топик: аватарка из IG
+	 * (profile_pic_url из i2crm payload) + имя + ссылка
+	 * https://instagram.com/<username>/ + Direct/Comment отметка.
+	 * Идёт async-задачей, чтобы не блокировать первое incoming-сообщение.
+	 * При ошибке download/sendPhoto — fallback на текст. Pin best-effort.
+	 */
+	private async postIgPinnedCard(
+		groupId: string, topicId: number, payload: any,
+	): Promise<void> {
+		try {
+			const username = String(payload?.client_username || "").trim();
+			const clientName = String(payload?.client_name || username || `IG_${payload?.client_id || ""}`).trim();
+			const channel = String(payload?.channel || "");
+			const channelLabel = channel === "instcom" ? "📷 Instagram коммент" : "💬 Instagram Direct";
+			const igLink = username
+				? `\nInstagram: <a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>`
+				: "";
+			const accountName = String(payload?.account_name || "").trim();
+			const accountLine = accountName ? `\nЛиния: @${this.escapeHtml(accountName)}` : "";
+			const caption =
+				`📋 Карточка клиента (${channelLabel.replace(/^[^\s]+\s+/, "")})\n` +
+				`Имя: ${this.escapeHtml(clientName)}` +
+				igLink + accountLine;
+
+			let photoUrl: string | undefined;
+			const profilePic = payload?.profile_pic_url || payload?.client_profile_pic_url
+				|| payload?.client_pic_url || payload?.client?.profile_pic_url;
+			if (profilePic && typeof profilePic === "string") {
+				photoUrl = profilePic;
+			}
+
+			let sentMessageId: number | undefined;
+			if (photoUrl) {
+				try {
+					const res = await this.botApi("sendPhoto", {
+						chat_id: groupId,
+						message_thread_id: topicId,
+						photo: photoUrl,
+						caption,
+						parse_mode: "HTML",
+						disable_notification: true,
+					});
+					sentMessageId = res?.message_id;
+				} catch (e: any) {
+					this.logger.debug(`tg-mirror: IG pinned sendPhoto failed (${e.message}), falling back to text`);
+				}
+			}
+			if (!sentMessageId) {
+				const res = await this.botApi("sendMessage", {
+					chat_id: groupId,
+					message_thread_id: topicId,
+					text: caption,
+					parse_mode: "HTML",
+					disable_web_page_preview: true,
+					disable_notification: true,
+				});
+				sentMessageId = res?.message_id;
+			}
+			if (sentMessageId) {
+				try {
+					await this.botApi("pinChatMessage", {
+						chat_id: groupId,
+						message_id: sentMessageId,
+						disable_notification: true,
+					});
+				} catch (e: any) {
+					this.logger.debug(`tg-mirror: IG pinChatMessage failed: ${e.message}`);
+				}
+			}
+		} catch (e: any) {
+			this.logger.warn(`tg-mirror: IG pinned card failed: ${e.message}`);
+		}
 	}
 
 	private buildCaption(payload: any): string {
@@ -205,7 +283,14 @@ export class I2crmTgMirrorService {
 		const topicName = `${channelPrefix} · ${baseName}`;
 
 		try {
-			const topicId = await this.findOrCreateTopic(groupId, clientId, topicName);
+			const { topicId, created } = await this.findOrCreateTopic(groupId, clientId, topicName);
+			if (created) {
+				// Pinned-карточка идёт фоновой задачей — не блокирует основное
+				// зеркало incoming-сообщения. Аватарка из IG (profile_pic_url
+				// из i2crm payload, если есть) + кликабельная ссылка
+				// https://instagram.com/<username>/.
+				void this.postIgPinnedCard(groupId, topicId, payload);
+			}
 			const caption = this.buildCaption(payload);
 			const mediaUrl = payload?.media_url || payload?.media?.url;
 			const type = String(payload?.type || "text");

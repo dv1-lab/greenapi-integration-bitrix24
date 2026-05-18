@@ -412,6 +412,56 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Установить PHOTO у CRM-контакта или лида, если поле сейчас пустое.
+	 * Ручную работу оператора (если фото уже стоит) не перезатираем.
+	 * Используется фоновым воркером avatar_sync wa-tg-bridge'а — он берёт
+	 * аватарку из мессенджера и шлёт base64 сюда.
+	 */
+	async setEntityPhotoIfEmpty(
+		kind: "contact" | "lead",
+		entityId: number,
+		filename: string,
+		base64: string,
+	): Promise<{ result: "updated" | "already_set" | "skipped"; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) {
+			return { result: "skipped", reason: "no authorized portal" };
+		}
+		const getMethod = kind === "contact" ? "crm.contact.get" : "crm.lead.get";
+		const updateMethod = kind === "contact" ? "crm.contact.update" : "crm.lead.update";
+		let current: any;
+		try {
+			current = await this.callBitrix24Method(portalDomain, getMethod, { id: entityId });
+		} catch (e: any) {
+			return { result: "skipped", reason: `get failed: ${e.message}` };
+		}
+		if (!current) return { result: "skipped", reason: "entity not found" };
+		// PHOTO у crm.contact / crm.lead может вернуться как
+		// {"id":"...","showUrl":"...","downloadUrl":"..."} (есть фото)
+		// или null/"" (нет фото). При создании контактов import-ом B24 иногда
+		// кладёт пустой объект {} — тоже считаем "пусто".
+		const existing = current.PHOTO;
+		const hasPhoto = existing && typeof existing === "object"
+			? Boolean(existing.id || existing.downloadUrl || existing.showUrl)
+			: typeof existing === "string"
+				? existing.trim().length > 0
+				: false;
+		if (hasPhoto) {
+			return { result: "already_set", reason: "PHOTO field is not empty" };
+		}
+		try {
+			await this.callBitrix24Method(portalDomain, updateMethod, {
+				id: entityId,
+				fields: { PHOTO: { fileData: [filename, base64] } },
+			});
+			return { result: "updated" };
+		} catch (e: any) {
+			return { result: "skipped", reason: `update failed: ${e.message}` };
+		}
+	}
+
+	/**
 	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
 	 * или null при ошибке (логируется warn). Используется в widget /send для
 	 * фиксации исходящего сообщения в открытой сущности клиента вместо создания

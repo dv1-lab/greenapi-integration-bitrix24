@@ -110,6 +110,42 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: установить PHOTO у B24-контакта/лида (если поле пустое).
+	// Используется avatar_sync воркером wa-tg-bridge: он скачивает аватарку
+	// из мессенджера и шлёт base64 сюда. Auth: X-Hint-Secret.
+	@Post("internal/b24-set-photo")
+	@HttpCode(HttpStatus.OK)
+	async setB24Photo(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			kind?: string; id?: number; filename?: string; base64?: string;
+		};
+		const kind = body.kind === "lead" ? "lead" : "contact";
+		const id = Number(body.id);
+		const filename = String(body.filename || "avatar.jpg");
+		const base64 = String(body.base64 || "");
+		if (!id || !base64) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "id and base64 required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.setEntityPhotoIfEmpty(
+				kind, id, filename, base64,
+			);
+			res.json(result);
+		} catch (e: any) {
+			this.logger.error(`b24-set-photo failed: ${e.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+				result: "skipped", reason: e.message,
+			});
+		}
+	}
+
 	// Internal endpoint: массовое переименование всех IG-тем (refresh_all для IG).
 	// Идёт по state.topics в i2crm-tg-mirror, для каждой темы дёргает B24 за
 	// актуальным ФИО, формирует новое имя в текущем формате и edit'ит топик.
