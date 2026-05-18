@@ -153,6 +153,39 @@ export class Bitrix24Service extends BaseAdapter<
 		return axios.create();
 	}
 
+	// ===== health-check helpers ==========================================
+	// Используются B24HealthCheckService — проверяют что коннектор
+	// social_connector зарегистрирован в портале и активирован на каждой
+	// маппированной линии. Инкапсулируют callBitrix24Method (он private),
+	// чтобы health-check не знал о token refresh / retry.
+
+	/**
+	 * imconnector.list → массив CONNECTOR ID, зарегистрированных в портале.
+	 * Возвращает [] при ошибке (не throw'аем — health-check сам логирует).
+	 */
+	async listConnectors(portalDomain: string): Promise<string[]> {
+		const result = (await this.callBitrix24Method(portalDomain, "imconnector.list", {})) as unknown;
+		if (Array.isArray(result)) return result.map((x) => String(x));
+		if (result && typeof result === "object") return Object.values(result as Record<string, unknown>).map(String);
+		return [];
+	}
+
+	/**
+	 * imconnector.status для пары CONNECTOR+LINE → { CONFIGURED, STATUS, ACTIVE_STATUS }.
+	 * connectorId по умолчанию social_connector.
+	 */
+	async getConnectorStatus(
+		portalDomain: string,
+		line: number,
+		connectorId = "social_connector",
+	): Promise<{ CONFIGURED?: boolean; STATUS?: boolean; ACTIVE_STATUS?: boolean }> {
+		const result = (await this.callBitrix24Method(portalDomain, "imconnector.status", {
+			CONNECTOR: connectorId,
+			LINE: line,
+		})) as { CONFIGURED?: boolean; STATUS?: boolean; ACTIVE_STATUS?: boolean } | null;
+		return result || {};
+	}
+
 	// Простой мьютекс на phone, чтобы два одновременных webhook'а от Green API не
 	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
 	private readonly _ensureLeadLocks = new Map<string, Promise<void>>();

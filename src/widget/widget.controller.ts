@@ -645,11 +645,7 @@ const B24_AUTH = ${authJs};
   }
 
   // Подгружаем список инстансов (с какого номера слать) из adapter.
-  // Hardcoded labels — fallback для старых WA-номеров (БД у них без label).
-  const INSTANCE_LABELS = {
-    "1103487233": "WhatsApp +7 958 498-33-54 (1Begovoy)",
-    "1101948511": "WhatsApp +7 924 077-85-66",
-  };
+  // Labels приходят из БД (Instance.settings.label) через /widget/instances.
   // Карты для multi-channel UX:
   //   PROVIDER_MAP — idInstance → provider (wa/max/telegram) для subtitle
   //   INSTANCE_BY_ID — idInstance → весь Instance объект из API
@@ -759,8 +755,8 @@ const B24_AUTH = ${authJs};
       INSTANCE_BY_ID[it.idInstance] = it;
       const opt = document.createElement("option");
       opt.value = it.idInstance;
-      // Приоритет: hardcoded label (для WA) → label из БД (для MAX и др.) → ID
-      opt.textContent = INSTANCE_LABELS[it.idInstance] || it.label || it.idInstance;
+      // Label из БД (Instance.settings.label) с fallback на idInstance.
+      opt.textContent = it.label || it.idInstance;
       sel.appendChild(opt);
     });
     sel.addEventListener("change", updateSubtitle);
