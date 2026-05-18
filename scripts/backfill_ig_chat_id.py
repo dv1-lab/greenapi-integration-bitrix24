@@ -33,11 +33,6 @@ from migrate_ig_username import Bitrix, load_env, PORTAL  # type: ignore
 
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 RATE_DELAY = float(os.environ.get("RATE_DELAY", "0.25"))
-BACKFILL_WORKERS = int(os.environ.get("BACKFILL_WORKERS", "2"))
-# Базовая пауза после OPERATION_TIME_LIMIT (в секундах). attempt * step добавляется
-# поверх неё в каждой попытке. Делать большой при щадящих параметрах перезапуска.
-BLOCK_BASE_SEC = int(os.environ.get("BLOCK_BASE_SEC", "90"))
-BLOCK_STEP_SEC = int(os.environ.get("BLOCK_STEP_SEC", "30"))
 
 # Глобальный back-off для OPERATION_TIME_LIMIT. Все потоки проверяют
 # `_block_until` перед запросом — если ещё не прошло, ждут. Это лучше
@@ -139,17 +134,13 @@ def collect_lead_to_client_parallel(bx, line_id, num_workers, lead_data, lock):
                 except Exception as e:
                     msg = str(e)
                     if "OPERATION_TIME_LIMIT" in msg:
-                        mark_blocked(BLOCK_BASE_SEC + attempt * BLOCK_STEP_SEC)
+                        mark_blocked(90 + attempt * 30)
                         continue
                     print(f"  line {line_id} w{worker_idx} list error at start={start}: {e}", flush=True)
                     time.sleep(5)
                     break
             if r is None:
                 continue
-            # Дроссель: пауза после успешного list, чтобы не давить B24 даже
-            # когда квота свободна. Контролируется RATE_DELAY env.
-            if RATE_DELAY > 0:
-                time.sleep(RATE_DELAY)
             items = r.get("result", []) or []
             if not items:
                 continue
@@ -247,7 +238,7 @@ def backfill_leads(bx, lead_data):
 
         # Если UF уже заполнен И LINK0 уже добавлен — пропускаем (idempotency)
         existing_link0 = next(
-            (l for l in (state["link"] or []) if isinstance(l, dict) and l.get("VALUE_TYPE") == "LINK1"),
+            (l for l in (state["link"] or []) if isinstance(l, dict) and l.get("VALUE_TYPE") == "LINK0"),
             None,
         )
         need_chat_id = not state["chat_id_already"]
@@ -268,13 +259,13 @@ def backfill_leads(bx, lead_data):
                 # Сохраняем все НЕ-LINK0 значения и добавляем/обновляем LINK0
                 new_links = []
                 for l in (state["link"] or []):
-                    if isinstance(l, dict) and l.get("VALUE_TYPE") != "LINK1":
+                    if isinstance(l, dict) and l.get("VALUE_TYPE") != "LINK0":
                         new_links.append({
                             "ID": l.get("ID"),
                             "VALUE": l.get("VALUE"),
                             "VALUE_TYPE": l.get("VALUE_TYPE"),
                         })
-                new_links.append({"VALUE": post_url, "VALUE_TYPE": "LINK1"})
+                new_links.append({"VALUE": post_url, "VALUE_TYPE": "LINK0"})
                 for i, link in enumerate(new_links):
                     for k, v in link.items():
                         if v is not None:
@@ -328,16 +319,11 @@ def retry_call(bx, method, params, counters, lock, item_id, kind="lead"):
         wait_if_blocked()
         try:
             bx.call(method, params, timeout=60)
-            # Дроссель после успешного update — RATE_DELAY между REST-запросами
-            # держит средний темп ниже порога OPERATION_TIME_LIMIT. На 2-worker'ах
-            # с RATE_DELAY=0 (старый дефолт) почти каждый процесс ловил блок.
-            if RATE_DELAY > 0:
-                time.sleep(RATE_DELAY)
             return True
         except Exception as e:
             msg = str(e)
             if "OPERATION_TIME_LIMIT" in msg and attempt < 4:
-                mark_blocked(BLOCK_BASE_SEC + attempt * BLOCK_STEP_SEC)
+                mark_blocked(90 + attempt * 30)
                 continue
             with lock:
                 counters["errors"] += 1
