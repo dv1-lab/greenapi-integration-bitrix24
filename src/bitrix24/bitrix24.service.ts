@@ -757,7 +757,44 @@ export class Bitrix24Service extends BaseAdapter<
 		eventBody[`b24${entity.charAt(0).toUpperCase() + entity.slice(1)}Id`] = entityId;
 
 		await this._eventsIngest(eventBody);
+
+		// Customer-360 auto-promote: когда B24 шлёт ONCRMCONTACTADD — это значит
+		// клиент сконвертился из лида в контакт (или создан напрямую как
+		// контакт). customer-service выдаёт ему customer_no, display_code
+		// меняется с L-XXXXXX на PB-N.
+		if (entity === "contact" && action === "added") {
+			await this._csPromote(String(entityId));
+		}
 		return { ok: true };
+	}
+
+	private async _csPromote(b24ContactId: string): Promise<void> {
+		const url = (process.env.CUSTOMER_SERVICE_URL || "").replace(/\/+$/, "");
+		const secret = process.env.CUSTOMER_SERVICE_SECRET || "";
+		if (!url || !secret) return;
+		try {
+			// Сначала резолвим контакт в UUID
+			const r0 = await axios.post(
+				`${url}/customers/find-or-create`,
+				{ aliasType: "b24_contact", aliasValue: b24ContactId, addedBy: "adapter-promote" },
+				{ headers: { "X-Service-Secret": secret, "Content-Type": "application/json" }, timeout: 5000 },
+			);
+			const uuid = r0.data?.customer?.uuid;
+			if (!uuid) return;
+			const r = await axios.post(
+				`${url}/customers/${uuid}/promote`,
+				{ b24ContactId, addedBy: "adapter-promote" },
+				{ headers: { "X-Service-Secret": secret, "Content-Type": "application/json" }, timeout: 5000 },
+			);
+			const newCode = r.data?.customer?.displayCode;
+			if (newCode) {
+				this.logger.info(`auto-promote contact ${b24ContactId} → ${newCode}`);
+			}
+		} catch (e: any) {
+			this.logger.warn(
+				`auto-promote contact ${b24ContactId} failed: ${e?.response?.data?.message || e.message}`,
+			);
+		}
 	}
 
 	// ===== Customer-360 sync ============================================
