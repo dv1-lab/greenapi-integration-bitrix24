@@ -206,6 +206,15 @@ export class WidgetController {
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		const chatIdOverride = (body.chatIdOverride || "").trim();
+		// Validate chatIdOverride: Telegram numeric user_id, MAX internal id,
+		// либо username@c.us. Запрещаем HTML/JS — может попасть в TITLE B24
+		// imconnector-лида и отрисоваться в браузере оператора.
+		if (chatIdOverride && !/^[a-zA-Z0-9_@\-\.:]+$/.test(chatIdOverride)) {
+			throw new HttpException(
+				`chatIdOverride содержит недопустимые символы: "${chatIdOverride.slice(0, 30)}"`,
+				HttpStatus.BAD_REQUEST,
+			);
+		}
 		// Telegram-only: @username, который оператор ввёл вручную. Не путать с
 		// chatIdOverride (числовой user_id из B24-привязки). Сами @ срезаем —
 		// добавим позже в нужном формате под Green API.
