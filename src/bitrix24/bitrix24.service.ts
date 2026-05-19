@@ -32,6 +32,7 @@ import {
 } from "../types";
 import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
+import { mask } from "../common/mask";
 
 export interface EnsureLeadResult {
 	contactId?: number;
@@ -43,6 +44,13 @@ export interface EnsureLeadResult {
 // TTL для записи OutgoingMessage: Green API после доставки не шлёт более
 // чем 24 часа.
 const OUTGOING_MAP_TTL_MS = 24 * 3600 * 1000;
+
+// Per-portal mutex для token refresh — без него два concurrent 401-ответа
+// (например, две параллельные imconnector.send.messages на один портал)
+// оба запустили бы refreshAccessToken, перезатёрли друг друга в БД и
+// пошли retry'ить с разными токенами. См. agent-аудит 2026-05-19.
+type RefreshKey = string;  // portalDomain или portalDomain:appKind
+const _refreshLocks: Map<RefreshKey, Promise<string>> = new Map();
 
 @Injectable()
 export class Bitrix24Service extends BaseAdapter<
@@ -82,32 +90,51 @@ export class Bitrix24Service extends BaseAdapter<
 		if (!user.refreshToken) {
 			throw new IntegrationError("No refresh token available", "UNAUTHORIZED");
 		}
-
+		const key: RefreshKey = `${user.portalDomain}:social`;
+		const existing = _refreshLocks.get(key);
+		if (existing) {
+			// Кто-то уже рефрешит — ждём его результат вместо параллельного запуска.
+			return existing;
+		}
+		const promise = (async () => {
+			try {
+				// Re-read user из БД — другой инстанс мог уже обновить токен.
+				const fresh = await this.prisma.findUser(user.portalDomain);
+				if (fresh && fresh.tokenExpiresAt && new Date(fresh.tokenExpiresAt).getTime() > Date.now() + 30_000) {
+					this.logger.info(`Token already fresh for ${user.portalDomain} (TTL>30s), skip refresh`);
+					return fresh.accessToken;
+				}
+				const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
+					params: {
+						grant_type: "refresh_token",
+						client_id: this.configService.get<string>("BITRIX24_CLIENT_ID"),
+						client_secret: this.configService.get<string>("BITRIX24_CLIENT_SECRET"),
+						refresh_token: user.refreshToken,
+					},
+				});
+				const {access_token, refresh_token, expires_in} = response.data;
+				const expiresAt = expires_in ? new Date(Date.now() + expires_in * 1000) : undefined;
+				await this.prisma.updateUserTokens(
+					user.id,
+					access_token,
+					refresh_token,
+					expiresAt,
+				);
+				this.logger.info(`Token refreshed for portal: ${user.portalDomain}`);
+				return access_token;
+			} catch (error: any) {
+				this.logger.error(
+					`Failed to refresh token for ${user.portalDomain}:`,
+					mask(error.response?.data || { message: error.message }) as any,
+				);
+				throw new IntegrationError("Failed to refresh access token", "UNAUTHORIZED");
+			}
+		})();
+		_refreshLocks.set(key, promise);
 		try {
-			const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
-				params: {
-					grant_type: "refresh_token",
-					client_id: this.configService.get<string>("BITRIX24_CLIENT_ID"),
-					client_secret: this.configService.get<string>("BITRIX24_CLIENT_SECRET"),
-					refresh_token: user.refreshToken,
-				},
-			});
-
-			const {access_token, refresh_token, expires_in} = response.data;
-
-			const expiresAt = expires_in ? new Date(Date.now() + expires_in * 1000) : undefined;
-			await this.prisma.updateUserTokens(
-				user.id,
-				access_token,
-				refresh_token,
-				expiresAt,
-			);
-
-			this.logger.info(`Token refreshed for portal: ${user.portalDomain}`);
-			return access_token;
-		} catch (error: any) {
-			this.logger.error(`Failed to refresh token for ${user.portalDomain}:`, error.response?.data || error.message);
-			throw new IntegrationError("Failed to refresh access token", "UNAUTHORIZED");
+			return await promise;
+		} finally {
+			_refreshLocks.delete(key);
 		}
 	}
 
@@ -115,21 +142,48 @@ export class Bitrix24Service extends BaseAdapter<
 		if (!app?.refreshToken) {
 			throw new IntegrationError("No refresh token for OAuth app", "UNAUTHORIZED");
 		}
-		const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
-			params: {
-				grant_type: "refresh_token",
-				client_id: app.clientId,
-				client_secret: app.clientSecret,
-				refresh_token: app.refreshToken,
-			},
-		});
-		const { access_token, refresh_token, expires_in } = response.data;
-		const expiresAt = expires_in ? new Date(Date.now() + expires_in * 1000) : undefined;
-		await this.prisma.updateOAuthAppTokens(
-			app.portalDomain, app.appKind, access_token, refresh_token, expiresAt,
-		);
-		this.logger.info(`OAuthApp[${app.appKind}] token refreshed for ${app.portalDomain}`);
-		return access_token;
+		const key: RefreshKey = `${app.portalDomain}:${app.appKind}`;
+		const existing = _refreshLocks.get(key);
+		if (existing) {
+			return existing;
+		}
+		const promise = (async () => {
+			try {
+				// Re-read app из БД — другой запрос мог уже обновить токен.
+				const fresh = await this.prisma.findOAuthApp(app.portalDomain, app.appKind);
+				if (fresh && fresh.tokenExpiresAt && new Date(fresh.tokenExpiresAt).getTime() > Date.now() + 30_000) {
+					this.logger.info(`OAuthApp[${app.appKind}] token already fresh for ${app.portalDomain}, skip refresh`);
+					return fresh.accessToken;
+				}
+				const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
+					params: {
+						grant_type: "refresh_token",
+						client_id: app.clientId,
+						client_secret: app.clientSecret,
+						refresh_token: app.refreshToken,
+					},
+				});
+				const { access_token, refresh_token, expires_in } = response.data;
+				const expiresAt = expires_in ? new Date(Date.now() + expires_in * 1000) : undefined;
+				await this.prisma.updateOAuthAppTokens(
+					app.portalDomain, app.appKind, access_token, refresh_token, expiresAt,
+				);
+				this.logger.info(`OAuthApp[${app.appKind}] token refreshed for ${app.portalDomain}`);
+				return access_token;
+			} catch (error: any) {
+				this.logger.error(
+					`Failed to refresh OAuthApp[${app.appKind}] token for ${app.portalDomain}:`,
+					mask(error.response?.data || { message: error.message }) as any,
+				);
+				throw new IntegrationError("Failed to refresh OAuth app token", "UNAUTHORIZED");
+			}
+		})();
+		_refreshLocks.set(key, promise);
+		try {
+			return await promise;
+		} finally {
+			_refreshLocks.delete(key);
+		}
 	}
 
 	private async callBitrix24Method(

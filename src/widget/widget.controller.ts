@@ -4,6 +4,7 @@ import { Request, Response } from "express";
 import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
 import { Bitrix24Service } from "../bitrix24/bitrix24.service";
+import { mask } from "../common/mask";
 
 // Карта префикса idInstance → API URL Green API. У свежих instance shard в host'е,
 // у старых (вроде 1101948511) — общий api.green-api.com.
@@ -15,6 +16,51 @@ function greenApiUrl(idInstance: string): string {
 		"4100621194": "https://4100.api.green-api.com",
 	};
 	return known[idInstance] || "https://api.green-api.com";
+}
+
+// Авторизация для widget endpoints. Сервис доступен публично через
+// https://social.9wb.ru (Caddy reverse_proxy), поэтому любой может POST
+// payload с правильным форматом и спровоцировать отправку через наш
+// instance. Защита трёхуровневая:
+//  1. body.domain должен быть в whitelist (наш портал 1begovoy.bitrix24.ru
+//     или другой явно разрешённый — через env WIDGET_ALLOWED_DOMAINS,
+//     comma-separated; default = "1begovoy.bitrix24.ru").
+//  2. Origin/Referer должен указывать на тот же body.domain — это блокирует
+//     запросы с любого стороннего сайта/curl без правильного header (browser
+//     добавляет Origin автоматически на cross-origin POST).
+//  3. body.authId должен быть корректного формата (B24 OAuth токен
+//     [a-f0-9]+, длина 30-100). Это не криптографическая защита, но отсекает
+//     случайные/тестовые запросы.
+// Полноценная проверка authId через server.info добавит ~200ms latency на
+// каждый /widget/send — пока не делаем, можно включить через WIDGET_VERIFY_AUTHID=1.
+function assertWidgetAuth(
+	req: Request,
+	body: any,
+	config: ConfigService,
+): void {
+	const allowed = (config.get<string>("WIDGET_ALLOWED_DOMAINS") || "1begovoy.bitrix24.ru")
+		.split(",").map(s => s.trim()).filter(Boolean);
+	const domain = String(body?.domain || body?.DOMAIN || "").toLowerCase();
+	if (!domain || !allowed.includes(domain)) {
+		throw new HttpException(
+			`Widget: домен "${domain}" не в whitelist. Используется через placement B24 портал?`,
+			HttpStatus.FORBIDDEN,
+		);
+	}
+	const origin = String(req.headers.origin || req.headers.referer || "").toLowerCase();
+	if (!origin.includes(domain) && !origin.includes("bitrix24.ru")) {
+		throw new HttpException(
+			`Widget: Origin "${origin || "<empty>"}" не совпадает с domain "${domain}".`,
+			HttpStatus.FORBIDDEN,
+		);
+	}
+	const authId = String(body?.authId || body?.AUTH_ID || "").trim();
+	if (!authId || !/^[a-f0-9]{30,100}$/.test(authId)) {
+		throw new HttpException(
+			`Widget: authId отсутствует или невалидного формата.`,
+			HttpStatus.UNAUTHORIZED,
+		);
+	}
 }
 
 @Controller("widget")
@@ -71,8 +117,10 @@ export class WidgetController {
 
 	@Post("entity-phone")
 	async setEntityPhone(
-		@Body() body: { portal?: string; type?: string; id?: string; phone?: string },
+		@Req() req: Request,
+		@Body() body: { portal?: string; type?: string; id?: string; phone?: string; authId?: string; domain?: string },
 	): Promise<{ ok: boolean }> {
+		assertWidgetAuth(req, body, this.config);
 		if (!body?.portal || !body?.type || !body?.id || !body?.phone) {
 			throw new HttpException("portal, type, id, phone required", HttpStatus.BAD_REQUEST);
 		}
@@ -95,7 +143,11 @@ export class WidgetController {
 	}
 
 	@Post("check-account")
-	async checkAccount(@Body() body: { phone?: string; idInstance?: string }) {
+	async checkAccount(
+		@Req() req: Request,
+		@Body() body: { phone?: string; idInstance?: string; authId?: string; domain?: string },
+	) {
+		assertWidgetAuth(req, body, this.config);
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		if (phone.length < 10 || phone.length > 15) {
 			throw new HttpException(`Неверный номер: "${body.phone}"`, HttpStatus.BAD_REQUEST);
@@ -139,14 +191,18 @@ export class WidgetController {
 		} catch (err: any) {
 			const msg = err.response?.data || err.message;
 			throw new HttpException(
-				`Green API check: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`,
+				`Green API check: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}`,
 				HttpStatus.BAD_GATEWAY,
 			);
 		}
 	}
 
 	@Post("send")
-	async send(@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string }) {
+	async send(
+		@Req() req: Request,
+		@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string },
+	) {
+		assertWidgetAuth(req, body, this.config);
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
 		const text = (body.text || "").trim();
 		const chatIdOverride = (body.chatIdOverride || "").trim();
@@ -264,7 +320,7 @@ export class WidgetController {
 					} catch (err: any) {
 						if (err instanceof HttpException) throw err;
 						const msg = err.response?.data || err.message;
-						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}`, HttpStatus.BAD_GATEWAY);
 					}
 				}
 				chatId = cached.chatId;
@@ -283,7 +339,7 @@ export class WidgetController {
 			idMessage = r.data?.idMessage;
 		} catch (err: any) {
 			const msg = err.response?.data || err.message;
-			throw new HttpException(`Green API: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`, HttpStatus.BAD_GATEWAY);
+			throw new HttpException(`Green API: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}`, HttpStatus.BAD_GATEWAY);
 		}
 
 		// Зеркалим в ту B24 open line, к которой привязан выбранный инстанс.
@@ -1217,7 +1273,7 @@ const B24_AUTH = ${authJs};
       const r = await fetch("/widget/check-account", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, idInstance }),
+        body: JSON.stringify({ phone, idInstance, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -1313,7 +1369,7 @@ const B24_AUTH = ${authJs};
           fetch("/widget/entity-phone", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ portal: B24_AUTH.domain, type: entityCtx.type, id: entityCtx.id, phone }),
+            body: JSON.stringify({ portal: B24_AUTH.domain, type: entityCtx.type, id: entityCtx.id, phone, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
           }).catch(e => dbg("pref save err", e.message));
         }
       } else {
