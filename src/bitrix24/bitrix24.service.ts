@@ -782,6 +782,7 @@ export class Bitrix24Service extends BaseAdapter<
 		fetched: number;
 		updated: number;
 		skipped_no_alias: number;
+		skipped_no_name: number;
 		failed: number;
 	}> {
 		const entity = opts.entity;
@@ -791,7 +792,7 @@ export class Bitrix24Service extends BaseAdapter<
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
 		const portalDomain = users[0]?.portalDomain;
 		if (!portalDomain) {
-			return { entity, fetched: 0, updated: 0, skipped_no_alias: 0, failed: 0 };
+			return { entity, fetched: 0, updated: 0, skipped_no_alias: 0, skipped_no_name: 0, failed: 0 };
 		}
 		const listMethod = `crm.${entity}.list`;
 		const updateMethod = `crm.${entity}.update`;
@@ -804,11 +805,25 @@ export class Bitrix24Service extends BaseAdapter<
 		const items: any[] = Array.isArray(list) ? list : [];
 		let updated = 0;
 		let skippedNoAlias = 0;
+		let skippedNoName = 0;
 		let failed = 0;
 		for (let i = 0; i < Math.min(items.length, limit); i++) {
 			const item = items[i];
 			const id = Number(item.ID);
 			if (!id) { failed++; continue; }
+			// Для contact B24 валидирует наличие NAME или LAST_NAME даже при UPDATE
+			// одного UF поля. Контакты без обоих имён — обычно мусор/импорт, для
+			// них bekfill UF UUID откладываем (skipped_no_name). Лиды имеют TITLE
+			// который всегда заполнен, валидации нет.
+			if (entity === "contact") {
+				const hasName = String(item.NAME || "").trim().length > 0;
+				const hasLast = String(item.LAST_NAME || "").trim().length > 0;
+				if (!hasName && !hasLast) {
+					skippedNoName++;
+					if (i < limit - 1) await new Promise((r) => setTimeout(r, rateMsec));
+					continue;
+				}
+			}
 			const phone = this._pickFirstPhone(item);
 			const email = this._pickFirstEmail(item);
 			let resolved: { uuid: string; created: boolean } | null = null;
@@ -854,6 +869,7 @@ export class Bitrix24Service extends BaseAdapter<
 			fetched: items.length,
 			updated,
 			skipped_no_alias: skippedNoAlias,
+			skipped_no_name: skippedNoName,
 			failed,
 		};
 	}
