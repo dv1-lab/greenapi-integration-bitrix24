@@ -411,22 +411,54 @@ export class WidgetController {
 		domain?: string;
 		username?: string;
 	}): Promise<any> {
-		const clientId = (input.clientId || "").trim().replace(/^@/, "");
+		let clientId = (input.clientId || "").trim().replace(/^@/, "");
+		let resolvedUsername = input.username;
 		if (!clientId) {
 			throw new HttpException(
 				"Не нашли Instagram client_id у клиента. Открой карточку лида созданного из Instagram (там IG_CHAT_ID есть), либо введи числовой client_id вручную.",
 				HttpStatus.BAD_REQUEST,
 			);
 		}
-		// client_id у Instagram — числовой. Если ввели @username, мы не сможем
-		// его сразу резолвить (нет такого endpoint у i2crm). Заставим ввести
-		// именно client_id.
+		// client_id у Instagram — числовой. Если оператор ввёл @username,
+		// у i2crm нет endpoint resolve username → client_id. Но client_id
+		// мог быть записан в наших лидах при прошлых incoming от того же
+		// username — попробуем lookup по UF_CRM_IG_USERNAME перед тем как падать.
+		if (!/^\d+$/.test(clientId) && input.authId && input.domain) {
+			const usernameLookup = clientId; // изначально это username
+			try {
+				const r = await axios.post(
+					`https://${input.domain}/rest/crm.lead.list?auth=${encodeURIComponent(input.authId)}`,
+					{
+						filter: { UF_CRM_IG_USERNAME: usernameLookup },
+						select: ["ID", "UF_CRM_IG_CHAT_ID"],
+						order: { DATE_CREATE: "DESC" },
+					},
+					{ timeout: 8000 },
+				);
+				const leads: any[] = r.data?.result || [];
+				for (const lead of leads) {
+					const cid = String(lead?.UF_CRM_IG_CHAT_ID || "").trim();
+					if (/^\d+$/.test(cid)) {
+						clientId = cid;
+						resolvedUsername = usernameLookup;
+						break;
+					}
+				}
+			} catch {
+				// non-fatal: упадём ниже на оригинальной валидации
+			}
+		}
 		if (!/^\d+$/.test(clientId)) {
 			throw new HttpException(
-				`Instagram client_id должен быть числом, получено "${clientId}". Либо открой карточку лида с Instagram — там UF_CRM_IG_CHAT_ID подставится автоматически.`,
+				`Instagram client_id должен быть числом, получено "${clientId}". ` +
+					`Не нашли этого username в существующих лидах с заполненным IG_CHAT_ID. ` +
+					`Дождись incoming-сообщения от клиента (i2crm запишет client_id автоматически) ` +
+					`либо открой карточку лида созданного из Instagram где IG_CHAT_ID есть.`,
 				HttpStatus.BAD_REQUEST,
 			);
 		}
+		// Прокинем resolvedUsername в input для последующего display-кода
+		input.username = resolvedUsername;
 
 		const apiBase = this.config.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
 		const targetKey = this.config.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
