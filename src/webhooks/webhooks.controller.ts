@@ -45,6 +45,19 @@ export class WebhooksController {
 			return;
 		}
 
+		// Outgoing-from-mobile: оператор написал клиенту с мобильного WhatsApp
+		// (не из B24). Green API шлёт outgoingAPIMessageReceived с sendByApi=true
+		// и sender=наш wid. Adapter SDK Skipping — мы обрабатываем сами, чтобы
+		// в B24 был след сообщения в timeline сделки/лида клиента.
+		if (webhook.typeWebhook === "outgoingAPIMessageReceived") {
+			try {
+				await this.bitrix24Service.handleOutgoingFromMobile(webhook);
+			} catch (error: any) {
+				this.logger.warn(`outgoingAPIMessageReceived handler failed: ${error.message}`);
+			}
+			return;
+		}
+
 		try {
 			await this.bitrix24Service.handleGreenApiWebhook(webhook, [
 				"incomingMessageReceived",

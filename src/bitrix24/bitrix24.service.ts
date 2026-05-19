@@ -875,6 +875,85 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Обработчик outgoingAPIMessageReceived от Green API — оператор написал
+	 * клиенту с МОБИЛЬНОГО WhatsApp (не из B24). Цель — оставить след в
+	 * B24 чтобы в карточке клиента было видно факт ответа.
+	 *
+	 * Действия:
+	 * 1. timeline-comment в открытый deal/lead клиента (по phone клиента)
+	 *    с текстом сообщения + меткой «📱 ответ с мобильного WA».
+	 * 2. Customer-360 event ingest (source=bridge_wa, eventType=message_out,
+	 *    payload включает sendByMobile: true) — пойдёт в CH + KBD-лента.
+	 *
+	 * Sebsenderом B24 не видит ни в Bizz-chat ни в OpenLines — там нужна
+	 * B24-side сессия (а её нет, оператор писал мимо B24). Это compromise:
+	 * timeline-comment виден в карточке.
+	 */
+	async handleOutgoingFromMobile(webhook: any): Promise<void> {
+		const senderData = webhook?.senderData || {};
+		const ourWid = String(webhook?.instanceData?.wid || "");
+		const senderWid = String(senderData?.sender || "");
+		// Игнорируем если sender != наш wid (это echo от echo, не наша операция)
+		if (!ourWid || !senderWid || ourWid !== senderWid) return;
+
+		const clientChatId = String(senderData?.chatId || "");
+		if (!clientChatId || clientChatId.endsWith("@g.us")) return;  // группы skip
+		const phoneDigits = clientChatId.split("@", 1)[0];
+		if (!/^\d{10,15}$/.test(phoneDigits)) return;
+		const phone = "+" + phoneDigits;
+
+		const messageData = webhook?.messageData || {};
+		const mtype = String(messageData?.typeMessage || "");
+		let text = "";
+		if (mtype === "textMessage") {
+			text = String(messageData?.textMessageData?.textMessage || "");
+		} else if (mtype === "extendedTextMessage") {
+			text = String(messageData?.extendedTextMessageData?.text || "");
+		} else if (mtype === "imageMessage" || mtype === "videoMessage"
+			|| mtype === "documentMessage" || mtype === "audioMessage") {
+			const fdata = messageData?.fileMessageData || {};
+			text = `[${mtype.replace("Message", "")}]` +
+				(fdata.caption ? ` ${fdata.caption}` : ``) +
+				(fdata.fileName ? ` (${fdata.fileName})` : ``);
+		} else {
+			text = `[${mtype || "media"}]`;
+		}
+		text = text.slice(0, 2000);
+
+		const comment =
+			`📱 <b>Ответ оператора с мобильного WhatsApp</b>\n` +
+			`Клиент: ${phone}\n\n${text}`;
+
+		try {
+			const result = await this.addTimelineCommentByPhone(phone, comment);
+			this.logger.info(
+				`outgoing-from-mobile: timeline-comment ${result.ok ? "OK" : "skipped"} (${result.entity || "?"}/${result.entityId || "?"}: ${result.reason || ""})`,
+			);
+		} catch (e: any) {
+			this.logger.warn(`outgoing-from-mobile timeline failed: ${e.message}`);
+		}
+
+		// Customer-360 event ingest (best-effort, не блокируем)
+		try {
+			await this._eventsIngest({
+				resolveAlias: { type: "phone", value: phone },
+				source: "bridge_wa",
+				eventType: "message_out",
+				channel: "WA",
+				summary: text.slice(0, 300),
+				payload: {
+					idMessage: webhook?.idMessage,
+					mtype,
+					sender_by_mobile: true,
+					chatId: clientChatId,
+				},
+			});
+		} catch (e: any) {
+			this.logger.debug(`outgoing-from-mobile event ingest failed: ${e.message}`);
+		}
+	}
+
+	/**
 	 * Найти открытую сделку или лид клиента по phone и добавить timeline-comment.
 	 * Используется bridge'ем для событий типа avatar_changed (Customer-360
 	 * Этап 5): не отправляем сообщение клиенту, не меняем PHOTO — просто
