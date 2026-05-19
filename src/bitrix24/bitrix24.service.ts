@@ -587,21 +587,56 @@ export class Bitrix24Service extends BaseAdapter<
 			"ONCRMCONTACTADD", "ONCRMCONTACTUPDATE",
 			"ONCRMDEALADD", "ONCRMDEALUPDATE",
 		];
+		const expectedHandlers: Record<string, string> = {};
+		for (const ev of events) {
+			expectedHandlers[ev] = `${handlerBaseUrl}/webhooks/b24-event?event=${ev}`;
+		}
+		// Сначала смотрим event.get — какие биндинги уже есть. Это даёт нам
+		// точный список зарегистрированных, а не угадываем по ошибкам bind.
+		let bound: Record<string, string> = {};
+		try {
+			const existing: any = await this.callBitrix24Method(portalDomain, "event.get", {});
+			if (Array.isArray(existing)) {
+				for (const row of existing) {
+					const e = String(row?.event || "").toUpperCase();
+					const h = String(row?.handler || "");
+					if (e) bound[e] = h;
+				}
+			}
+		} catch (e: any) {
+			this.logger.warn(`event.get failed: ${e.message}`);
+		}
 		const results: Array<{ event: string; result: string; reason?: string }> = [];
 		for (const ev of events) {
+			const expected = expectedHandlers[ev];
+			const existingHandler = bound[ev];
+			if (existingHandler === expected) {
+				results.push({ event: ev, result: "exists" });
+				continue;
+			}
+			if (existingHandler && existingHandler !== expected) {
+				// Старый handler от прошлого URL — отвязать и привязать заново.
+				try {
+					await this.callBitrix24Method(portalDomain, "event.unbind", {
+						event: ev, handler: existingHandler,
+					});
+				} catch (e: any) {
+					this.logger.warn(`event.unbind ${ev} stale handler failed: ${e.message}`);
+				}
+			}
 			try {
 				await this.callBitrix24Method(portalDomain, "event.bind", {
 					event: ev,
-					handler: `${handlerBaseUrl}/webhooks/b24-event?event=${ev}`,
+					handler: expected,
 				});
 				results.push({ event: ev, result: "bound" });
 			} catch (e: any) {
 				const msg = String(e?.message || "");
-				// ERROR_EVENT_BIND_EXISTS — уже зарегистрировано, считаем OK
-				if (/EVENT_BIND_EXISTS|already/i.test(msg)) {
+				const detail = (e as any)?.response?.data?.error_description || msg;
+				if (/EVENT_BIND_EXISTS|already/i.test(detail)) {
 					results.push({ event: ev, result: "exists" });
 				} else {
-					results.push({ event: ev, result: "failed", reason: msg });
+					results.push({ event: ev, result: "failed", reason: detail });
 				}
 			}
 		}
