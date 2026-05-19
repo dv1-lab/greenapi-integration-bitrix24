@@ -462,6 +462,76 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Идемпотентно создаёт пользовательское поле UF_CRM_* у сущности CRM
+	 * (lead/contact/deal). Возвращает 'created' | 'exists' | 'skipped'.
+	 * Использует OAuth-токен установленного приложения — scope crm должен быть
+	 * включён в манифесте app (он есть в greenapi-integration-bitrix24).
+	 *
+	 * Поле создаётся как string c указанным maxLength (по умолчанию 36 для UUID).
+	 */
+	async ensureUfField(
+		entity: "lead" | "contact" | "deal",
+		fieldName: string,
+		opts: {
+			label?: string;
+			xmlId?: string;
+			maxLength?: number;
+			searchable?: boolean;
+		} = {},
+	): Promise<{ result: "created" | "exists" | "skipped"; id?: number; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) {
+			return { result: "skipped", reason: "no authorized portal" };
+		}
+		const listMethod = `crm.${entity}.userfield.list`;
+		const addMethod = `crm.${entity}.userfield.add`;
+		try {
+			const existing: any = await this.callBitrix24Method(portalDomain, listMethod, {
+				order: { ID: "ASC" },
+			});
+			if (Array.isArray(existing)) {
+				const match = existing.find((x: any) => x.FIELD_NAME === fieldName);
+				if (match) {
+					return { result: "exists", id: Number(match.ID) };
+				}
+			}
+		} catch (e: any) {
+			return { result: "skipped", reason: `list failed: ${e.message}` };
+		}
+		const label = opts.label || fieldName;
+		try {
+			const newId: any = await this.callBitrix24Method(portalDomain, addMethod, {
+				fields: {
+					FIELD_NAME: fieldName,
+					USER_TYPE_ID: "string",
+					XML_ID: opts.xmlId || fieldName,
+					EDIT_FORM_LABEL: { ru: label, en: label },
+					LIST_COLUMN_LABEL: { ru: label, en: label },
+					LIST_FILTER_LABEL: { ru: label, en: label },
+					SETTINGS: {
+						DEFAULT_VALUE: "",
+						SIZE: 40,
+						ROWS: 1,
+						REGEXP: "",
+						MIN_LENGTH: 0,
+						MAX_LENGTH: opts.maxLength ?? 36,
+					},
+					MANDATORY: "N",
+					MULTIPLE: "N",
+					SHOW_FILTER: "Y",
+					SHOW_IN_LIST: "N",
+					EDIT_IN_LIST: "N",
+					IS_SEARCHABLE: opts.searchable === false ? "N" : "Y",
+				},
+			});
+			return { result: "created", id: Number(newId) };
+		} catch (e: any) {
+			return { result: "skipped", reason: `add failed: ${e.message}` };
+		}
+	}
+
+	/**
 	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
 	 * или null при ошибке (логируется warn). Используется в widget /send для
 	 * фиксации исходящего сообщения в открытой сущности клиента вместо создания

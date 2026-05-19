@@ -168,6 +168,33 @@ export class WebhooksController {
 		res.json({ started: true, delay_sec: delaySec });
 	}
 
+	// Internal endpoint: идемпотентно создать UF_CRM_PB_CUSTOMER_UUID на lead /
+	// contact / deal. Используется один раз при инициализации Customer-360
+	// (Этап 1). Auth: X-Hint-Secret.
+	@Post("internal/init-uf-fields")
+	@HttpCode(HttpStatus.OK)
+	async initUfFields(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const fieldName = "UF_CRM_PB_CUSTOMER_UUID";
+		const opts = { label: "Customer UUID", xmlId: "PB_CUSTOMER_UUID", maxLength: 36 };
+		try {
+			const [lead, contact, deal] = await Promise.all([
+				this.bitrix24Service.ensureUfField("lead", fieldName, opts),
+				this.bitrix24Service.ensureUfField("contact", fieldName, opts),
+				this.bitrix24Service.ensureUfField("deal", fieldName, opts),
+			]);
+			res.json({ lead, contact, deal });
+		} catch (error: any) {
+			this.logger.error(`init-uf-fields failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: массовое переименование всех IG-тем (refresh_all для IG).
 	// Идёт по state.topics в i2crm-tg-mirror, для каждой темы дёргает B24 за
 	// актуальным ФИО, формирует новое имя в текущем формате и edit'ит топик.
