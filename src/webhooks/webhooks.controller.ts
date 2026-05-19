@@ -168,6 +168,47 @@ export class WebhooksController {
 		res.json({ started: true, delay_sec: delaySec });
 	}
 
+	// B24 event.bind webhook: принимает события ONCRMLEADADD/UPDATE и т.д.
+	// Зарегистрированы через /internal/register-b24-events. Не требует auth —
+	// B24 шлёт без секрета, контейнер торчит наружу через Caddy social.9wb.ru.
+	// Безопасность: handleB24CrmEvent проверяет domain authorized portal.
+	@Post("b24-event")
+	@HttpCode(HttpStatus.OK)
+	async b24Event(@Req() req: Request, @Res() res: Response): Promise<void> {
+		// ACK сразу — B24 ждёт быстрый 200 OK иначе ретраит
+		res.json({ result: true });
+		const rawEvent = String(req.query?.event || req.body?.event || "").toUpperCase();
+		try {
+			const result = await this.bitrix24Service.handleB24CrmEvent(rawEvent, req.body);
+			if (!result.ok) {
+				this.logger.warn(`b24-event ${rawEvent} skipped: ${result.reason}`);
+			}
+		} catch (error: any) {
+			this.logger.error(`b24-event ${rawEvent} failed: ${error.message}`);
+		}
+	}
+
+	// Internal endpoint: одноразово регистрирует все CRM event.bind через
+	// OAuth-токен adapter'а. Идемпотентно. Auth: X-Hint-Secret.
+	@Post("internal/register-b24-events")
+	@HttpCode(HttpStatus.OK)
+	async registerB24Events(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const handlerBaseUrl = (req.body?.handlerBaseUrl || process.env.B24_EVENTS_HANDLER_BASE || "https://social.9wb.ru").replace(/\/+$/, "");
+		try {
+			const result = await this.bitrix24Service.registerB24CrmEvents(handlerBaseUrl);
+			res.json({ handlerBaseUrl, result });
+		} catch (error: any) {
+			this.logger.error(`register-b24-events failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: один батч бэкфилла UF_CRM_PB_CUSTOMER_UUID. Запускается
 	// по cron каждые 15 минут (через systemd timer на сервере). Делает по 20
 	// entity за раз с rate-limit 2 sec → 40 sec/батч, нагрузка минимальная.

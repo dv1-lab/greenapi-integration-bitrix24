@@ -531,6 +531,137 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	// ===== Customer-360: B24 event.bind + handler ========================
+
+	private async _eventsIngest(body: Record<string, any>): Promise<void> {
+		const url = (process.env.CUSTOMER_SERVICE_URL || "").replace(/\/+$/, "");
+		const secret = process.env.CUSTOMER_SERVICE_SECRET || "";
+		if (!url || !secret) return;
+		try {
+			await axios.post(`${url}/events/ingest`, body, {
+				headers: { "X-Service-Secret": secret, "Content-Type": "application/json" },
+				timeout: 5000,
+			});
+		} catch (e: any) {
+			this.logger.warn(
+				`events/ingest failed (${body.source}/${body.eventType}): ${e?.response?.data?.message || e.message}`,
+			);
+		}
+	}
+
+	/**
+	 * Регистрирует event.bind для всех CRM-событий что мы слушаем
+	 * (lead/contact/deal add+update). Идемпотентно — повторный bind для
+	 * того же (event, handler) возвращает ошибку, мы её глотаем.
+	 *
+	 * handler URL = базовый URL adapter'а + /webhooks/b24-event.
+	 * Передаём ?event=... в query, чтобы один endpoint умел маршрутизировать.
+	 */
+	async registerB24CrmEvents(
+		handlerBaseUrl: string,
+	): Promise<Array<{ event: string; result: string; reason?: string }>> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) {
+			return [{ event: "*", result: "skipped", reason: "no authorized portal" }];
+		}
+		const events = [
+			"ONCRMLEADADD", "ONCRMLEADUPDATE",
+			"ONCRMCONTACTADD", "ONCRMCONTACTUPDATE",
+			"ONCRMDEALADD", "ONCRMDEALUPDATE",
+		];
+		const results: Array<{ event: string; result: string; reason?: string }> = [];
+		for (const ev of events) {
+			try {
+				await this.callBitrix24Method(portalDomain, "event.bind", {
+					event: ev,
+					handler: `${handlerBaseUrl}/webhooks/b24-event?event=${ev}`,
+				});
+				results.push({ event: ev, result: "bound" });
+			} catch (e: any) {
+				const msg = String(e?.message || "");
+				// ERROR_EVENT_BIND_EXISTS — уже зарегистрировано, считаем OK
+				if (/EVENT_BIND_EXISTS|already/i.test(msg)) {
+					results.push({ event: ev, result: "exists" });
+				} else {
+					results.push({ event: ev, result: "failed", reason: msg });
+				}
+			}
+		}
+		return results;
+	}
+
+	/**
+	 * Обрабатывает входящий B24 event (ONCRMLEADADD и т.д.). Резолвит entity в
+	 * customer-service (по phone/email или по b24_<entity> alias) и пишет
+	 * event в customer_events через customer-service /events/ingest.
+	 */
+	async handleB24CrmEvent(rawEvent: string, payload: any): Promise<{ ok: boolean; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, reason: "no authorized portal" };
+
+		const fields = payload?.data?.FIELDS || payload?.FIELDS || {};
+		const entityId = Number(fields.ID);
+		if (!entityId) return { ok: false, reason: "no entity id" };
+
+		let entity: "lead" | "contact" | "deal";
+		let action: "added" | "updated";
+		const ev = rawEvent.toUpperCase();
+		if (ev.startsWith("ONCRMLEAD")) entity = "lead";
+		else if (ev.startsWith("ONCRMCONTACT")) entity = "contact";
+		else if (ev.startsWith("ONCRMDEAL")) entity = "deal";
+		else return { ok: false, reason: `unknown event ${ev}` };
+		action = ev.endsWith("ADD") ? "added" : "updated";
+
+		// Снимок entity для phone/email/title/stage
+		let snap: any;
+		try {
+			snap = await this.callBitrix24Method(portalDomain, `crm.${entity}.get`, { id: entityId });
+		} catch (e: any) {
+			return { ok: false, reason: `crm.${entity}.get failed: ${e.message}` };
+		}
+		if (!snap) return { ok: false, reason: "snapshot empty" };
+
+		// Резолвим customer
+		const phone = this._pickFirstPhone(snap);
+		const email = this._pickFirstEmail(snap);
+		let resolveAlias: { type: string; value: string } | null = null;
+		if (phone) resolveAlias = { type: "phone", value: phone };
+		else if (email) resolveAlias = { type: "email", value: email };
+		else resolveAlias = { type: entity === "lead" ? "b24_lead" : entity === "contact" ? "b24_contact" : "b24_deal", value: String(entityId) };
+
+		// Если UF_CRM_PB_CUSTOMER_UUID уже стоит — используем напрямую
+		const customerUuid: string | undefined = snap.UF_CRM_PB_CUSTOMER_UUID || undefined;
+
+		// Summary
+		const title = snap.TITLE || `${snap.NAME || ""} ${snap.LAST_NAME || ""}`.trim() || `#${entityId}`;
+		let summary = `${entity} ${action}: ${title}`;
+		if (entity !== "contact" && snap.STATUS_ID) summary += ` [STATUS=${snap.STATUS_ID}]`;
+		if (entity === "deal" && snap.STAGE_ID) summary += ` [STAGE=${snap.STAGE_ID}]`;
+
+		const eventBody: Record<string, any> = {
+			source: `b24_${entity}`,
+			eventType: `${entity}_${action}`,
+			summary: summary.slice(0, 4000),
+			payload: {
+				entityId, action,
+				title,
+				status: snap.STATUS_ID,
+				stage: snap.STAGE_ID,
+				phone, email,
+				rawEvent: ev,
+			},
+			operator: String(snap.ASSIGNED_BY_ID || ""),
+		};
+		if (customerUuid) eventBody.customerUuid = customerUuid;
+		else eventBody.resolveAlias = resolveAlias;
+		eventBody[`b24${entity.charAt(0).toUpperCase() + entity.slice(1)}Id`] = entityId;
+
+		await this._eventsIngest(eventBody);
+		return { ok: true };
+	}
+
 	// ===== Customer-360 sync ============================================
 	// Backfill UF_CRM_PB_CUSTOMER_UUID для существующих лидов/контактов B24:
 	// для каждого без UUID берём первый phone (или email) и вызываем
