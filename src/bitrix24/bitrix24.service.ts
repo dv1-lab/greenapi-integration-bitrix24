@@ -52,6 +52,7 @@ export class Bitrix24Service extends BaseAdapter<
 	Instance
 > {
 	private readonly logger = GreenApiLogger.getInstance(Bitrix24Service.name);
+	private _outgoingCleanupInterval: NodeJS.Timeout | null = null;
 
 	constructor(
 		protected readonly bitrix24Transformer: Bitrix24Transformer,
@@ -60,6 +61,21 @@ export class Bitrix24Service extends BaseAdapter<
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
 	) {
 		super(bitrix24Transformer, prisma);
+		// Cleanup expired OutgoingMessage записей раз в час. Делаем через
+		// setInterval а не cron, чтобы не вводить новую инфру. Первый запуск
+		// через 5 минут после старта (даём миграциям прокатиться).
+		this._outgoingCleanupInterval = setInterval(
+			() => { void this.cleanupExpiredOutgoingMessages(); },
+			60 * 60 * 1000,
+		);
+		setTimeout(() => { void this.cleanupExpiredOutgoingMessages(); }, 5 * 60 * 1000);
+	}
+
+	onModuleDestroy() {
+		if (this._outgoingCleanupInterval) {
+			clearInterval(this._outgoingCleanupInterval);
+			this._outgoingCleanupInterval = null;
+		}
 	}
 
 	private async refreshAccessToken(user: User): Promise<string> {
