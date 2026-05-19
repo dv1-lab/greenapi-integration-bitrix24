@@ -40,6 +40,23 @@ export interface EnsureLeadResult {
 	createdLeadId?: number;
 }
 
+// In-memory mapping idMessage Green API → B24 (chat_id, message_id, line).
+// Сохраняется при успешной отправке через handleBitrix24Webhook, читается при
+// поступлении outgoingMessageStatus webhook'а от Green API для проксирования
+// статусов sent/delivered/read обратно в B24. После рестарта adapter Map
+// пустой — для исторических сообщений статус не обновится, новые работают.
+const outgoingStatusMap = new Map<string, {
+	chatId: string;
+	messageId: string;
+	externalChatId: string;
+	line: number;
+	connector: string;
+	expiresAt: number;
+}>();
+
+// TTL ~24 часа для записи в Map: Green API после доставки не шлёт более.
+const OUTGOING_MAP_TTL_MS = 24 * 3600 * 1000;
+
 @Injectable()
 export class Bitrix24Service extends BaseAdapter<
 	Bitrix24WebhookDto,
@@ -2560,12 +2577,74 @@ export class Bitrix24Service extends BaseAdapter<
 				externalChatId,
 			});
 
+			// Сохраняем mapping для проксирования статусов sent/read когда Green API
+			// уведомит позже через outgoingMessageStatus webhook.
+			if (externalMessageId && originalMessage.im?.chat_id && originalMessage.im?.message_id) {
+				outgoingStatusMap.set(String(externalMessageId), {
+					chatId: String(originalMessage.im.chat_id),
+					messageId: String(originalMessage.im.message_id),
+					externalChatId,
+					line,
+					connector: connectorId,
+					expiresAt: Date.now() + OUTGOING_MAP_TTL_MS,
+				});
+			}
 		} catch (error: any) {
 			this.logger.error(`Failed to send delivery confirmation: ${error.message}`, {
 				domain,
 				line,
 				error: error.stack,
 			});
+		}
+	}
+
+	/**
+	 * Обработчик outgoingMessageStatus от Green API: когда Green API уведомляет
+	 * что наше outgoing-сообщение прошло через sent → delivered → read, мы
+	 * проксируем статус в B24 чтобы оператор видел синие галочки.
+	 *
+	 * Без mapping'а (т.е. для сообщений отправленных через мобильный WA, не
+	 * через adapter) — молча игнорируем (separate task).
+	 */
+	async handleOutgoingMessageStatus(webhook: any): Promise<void> {
+		const idMessage = String(webhook?.idMessage || "");
+		const status = String(webhook?.status || "").toLowerCase();
+		if (!idMessage || !["sent", "delivered", "read"].includes(status)) return;
+
+		const entry = outgoingStatusMap.get(idMessage);
+		if (!entry) {
+			// Сообщение не отправлено через adapter (мобильный WA / устройство) —
+			// нет mapping'а для проксирования статуса. См. Task #47 follow-up.
+			return;
+		}
+		if (entry.expiresAt < Date.now()) {
+			outgoingStatusMap.delete(idMessage);
+			return;
+		}
+
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return;
+
+		try {
+			await this.callBitrix24Method(portalDomain, "imconnector.send.status.delivery", {
+				CONNECTOR: entry.connector,
+				LINE: entry.line,
+				MESSAGES: [{
+					im: { chat_id: entry.chatId, message_id: entry.messageId },
+					message: { id: [idMessage], status },
+					chat: { id: entry.externalChatId },
+				}],
+			});
+			this.logger.debug(
+				`Forwarded outgoing status ${status} for idMessage=${idMessage} → B24 chat_id=${entry.chatId}`,
+			);
+			// Когда дошло до read — можно удалить из Map (дальше Green API не шлёт).
+			if (status === "read") {
+				outgoingStatusMap.delete(idMessage);
+			}
+		} catch (e: any) {
+			this.logger.warn(`Forward outgoing status ${status} for ${idMessage} failed: ${e.message}`);
 		}
 	}
 

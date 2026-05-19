@@ -33,6 +33,18 @@ export class WebhooksController {
 
 		res.status(HttpStatus.OK).send();
 
+		// Customer-360 / Social Connector: проксируем outgoingMessageStatus в B24
+		// чтобы B24 видел галочки sent/delivered/read. Делаем ДО SDK-фильтра,
+		// потому что SDK по умолчанию отбрасывает этот тип webhook'а.
+		if (webhook.typeWebhook === "outgoingMessageStatus") {
+			try {
+				await this.bitrix24Service.handleOutgoingMessageStatus(webhook);
+			} catch (error: any) {
+				this.logger.warn(`outgoingMessageStatus handler failed: ${error.message}`);
+			}
+			return;
+		}
+
 		try {
 			await this.bitrix24Service.handleGreenApiWebhook(webhook, [
 				"incomingMessageReceived",
