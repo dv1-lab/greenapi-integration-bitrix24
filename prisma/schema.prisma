@@ -23,6 +23,25 @@ model User {
   updatedAt        DateTime   @updatedAt
 }
 
+// Mapping для проксирования outgoingMessageStatus webhook'ов от Green API в
+// B24 OpenLines. Adapter сохраняет при первом sendDeliveryConfirmation
+// после успешной отправки, читает при поступлении статуса от Green API.
+// Раньше было in-memory Map — теряется при рестарте adapter'а, новые
+// статусы по «висящим» сообщениям не доходили до B24 (часики не уходили).
+model OutgoingMessage {
+  idMessage        String    @id @db.VarChar(100)  // Green API idMessage
+  b24ChatId        String    @map("b24_chat_id") @db.VarChar(100)
+  b24MessageId     String    @map("b24_message_id") @db.VarChar(100)
+  externalChatId   String    @map("external_chat_id") @db.VarChar(190)
+  line             Int
+  connector        String    @db.VarChar(64)
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime
+
+  @@map("OutgoingMessage")
+  @@index([expiresAt])
+}
+
 // Дополнительные OAuth-приложения в том же B24-портале. Один процесс
 // adapter'а может управлять несколькими app'ами на одном портале для
 // распределения CRM-операций (Customer-360) и операций imconnector/OpenLines

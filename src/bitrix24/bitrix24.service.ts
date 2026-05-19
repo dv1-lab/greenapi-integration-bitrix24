@@ -40,21 +40,8 @@ export interface EnsureLeadResult {
 	createdLeadId?: number;
 }
 
-// In-memory mapping idMessage Green API → B24 (chat_id, message_id, line).
-// Сохраняется при успешной отправке через handleBitrix24Webhook, читается при
-// поступлении outgoingMessageStatus webhook'а от Green API для проксирования
-// статусов sent/delivered/read обратно в B24. После рестарта adapter Map
-// пустой — для исторических сообщений статус не обновится, новые работают.
-const outgoingStatusMap = new Map<string, {
-	chatId: string;
-	messageId: string;
-	externalChatId: string;
-	line: number;
-	connector: string;
-	expiresAt: number;
-}>();
-
-// TTL ~24 часа для записи в Map: Green API после доставки не шлёт более.
+// TTL для записи OutgoingMessage: Green API после доставки не шлёт более
+// чем 24 часа.
 const OUTGOING_MAP_TTL_MS = 24 * 3600 * 1000;
 
 @Injectable()
@@ -2862,17 +2849,34 @@ export class Bitrix24Service extends BaseAdapter<
 				externalChatId,
 			});
 
-			// Сохраняем mapping для проксирования статусов sent/read когда Green API
-			// уведомит позже через outgoingMessageStatus webhook.
+			// Сохраняем mapping в БД для проксирования статусов sent/read когда
+			// Green API уведомит позже через outgoingMessageStatus webhook.
+			// Persistent — переживает рестарт adapter'а.
 			if (externalMessageId && originalMessage.im?.chat_id && originalMessage.im?.message_id) {
-				outgoingStatusMap.set(String(externalMessageId), {
-					chatId: String(originalMessage.im.chat_id),
-					messageId: String(originalMessage.im.message_id),
-					externalChatId,
-					line,
-					connector: connectorId,
-					expiresAt: Date.now() + OUTGOING_MAP_TTL_MS,
-				});
+				try {
+					await (this.prisma as any).outgoingMessage.upsert({
+						where: { idMessage: String(externalMessageId) },
+						create: {
+							idMessage: String(externalMessageId),
+							b24ChatId: String(originalMessage.im.chat_id),
+							b24MessageId: String(originalMessage.im.message_id),
+							externalChatId,
+							line,
+							connector: connectorId,
+							expiresAt: new Date(Date.now() + OUTGOING_MAP_TTL_MS),
+						},
+						update: {
+							b24ChatId: String(originalMessage.im.chat_id),
+							b24MessageId: String(originalMessage.im.message_id),
+							externalChatId,
+							line,
+							connector: connectorId,
+							expiresAt: new Date(Date.now() + OUTGOING_MAP_TTL_MS),
+						},
+					});
+				} catch (e: any) {
+					this.logger.debug(`OutgoingMessage upsert failed for ${externalMessageId}: ${e.message}`);
+				}
 			}
 		} catch (error: any) {
 			this.logger.error(`Failed to send delivery confirmation: ${error.message}`, {
@@ -2896,14 +2900,16 @@ export class Bitrix24Service extends BaseAdapter<
 		const status = String(webhook?.status || "").toLowerCase();
 		if (!idMessage || !["sent", "delivered", "read"].includes(status)) return;
 
-		const entry = outgoingStatusMap.get(idMessage);
+		const entry = await (this.prisma as any).outgoingMessage.findUnique({
+			where: { idMessage },
+		});
 		if (!entry) {
 			// Сообщение не отправлено через adapter (мобильный WA / устройство) —
-			// нет mapping'а для проксирования статуса. См. Task #47 follow-up.
+			// нет mapping'а для проксирования статуса.
 			return;
 		}
-		if (entry.expiresAt < Date.now()) {
-			outgoingStatusMap.delete(idMessage);
+		if (entry.expiresAt.getTime() < Date.now()) {
+			await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
 			return;
 		}
 
@@ -2916,20 +2922,40 @@ export class Bitrix24Service extends BaseAdapter<
 				CONNECTOR: entry.connector,
 				LINE: entry.line,
 				MESSAGES: [{
-					im: { chat_id: entry.chatId, message_id: entry.messageId },
+					im: { chat_id: entry.b24ChatId, message_id: entry.b24MessageId },
 					message: { id: [idMessage], status },
 					chat: { id: entry.externalChatId },
 				}],
 			});
 			this.logger.debug(
-				`Forwarded outgoing status ${status} for idMessage=${idMessage} → B24 chat_id=${entry.chatId}`,
+				`Forwarded outgoing status ${status} for idMessage=${idMessage} → B24 chat_id=${entry.b24ChatId}`,
 			);
-			// Когда дошло до read — можно удалить из Map (дальше Green API не шлёт).
+			// Когда дошло до read — удаляем (дальше Green API не шлёт).
 			if (status === "read") {
-				outgoingStatusMap.delete(idMessage);
+				await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
 			}
 		} catch (e: any) {
 			this.logger.warn(`Forward outgoing status ${status} for ${idMessage} failed: ${e.message}`);
+		}
+	}
+
+	/**
+	 * Cleanup expired OutgoingMessage записей. Запускается раз в час
+	 * фоновой задачей (см. AppController.scheduleOutgoingCleanup или
+	 * cron-вызов /internal/cleanup-outgoing).
+	 */
+	async cleanupExpiredOutgoingMessages(): Promise<number> {
+		try {
+			const result = await (this.prisma as any).outgoingMessage.deleteMany({
+				where: { expiresAt: { lt: new Date() } },
+			});
+			if (result.count > 0) {
+				this.logger.info(`Cleaned up ${result.count} expired OutgoingMessage rows`);
+			}
+			return result.count;
+		} catch (e: any) {
+			this.logger.warn(`OutgoingMessage cleanup failed: ${e.message}`);
+			return 0;
 		}
 	}
 
