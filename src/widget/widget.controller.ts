@@ -413,18 +413,19 @@ export class WidgetController {
 	}): Promise<any> {
 		let clientId = (input.clientId || "").trim().replace(/^@/, "");
 		let resolvedUsername = input.username;
+		let sentByUsername = false;
 		if (!clientId) {
 			throw new HttpException(
-				"Не нашли Instagram client_id у клиента. Открой карточку лида созданного из Instagram (там IG_CHAT_ID есть), либо введи числовой client_id вручную.",
+				"Нужен Instagram username или client_id клиента. Введи @username (если знаешь) или открой карточку лида с заполненным UF_CRM_IG_CHAT_ID.",
 				HttpStatus.BAD_REQUEST,
 			);
 		}
-		// client_id у Instagram — числовой. Если оператор ввёл @username,
-		// у i2crm нет endpoint resolve username → client_id. Но client_id
-		// мог быть записан в наших лидах при прошлых incoming от того же
-		// username — попробуем lookup по UF_CRM_IG_USERNAME перед тем как падать.
+		// Если ввели username (не числовой) — сначала пытаемся резолвить
+		// через B24 лиды: у клиента мог быть incoming с тем же username,
+		// тогда UF_CRM_IG_CHAT_ID у нас уже записан.
 		if (!/^\d+$/.test(clientId) && input.authId && input.domain) {
-			const usernameLookup = clientId; // изначально это username
+			const usernameLookup = clientId;
+			resolvedUsername = usernameLookup;
 			try {
 				const r = await axios.post(
 					`https://${input.domain}/rest/crm.lead.list?auth=${encodeURIComponent(input.authId)}`,
@@ -440,22 +441,21 @@ export class WidgetController {
 					const cid = String(lead?.UF_CRM_IG_CHAT_ID || "").trim();
 					if (/^\d+$/.test(cid)) {
 						clientId = cid;
-						resolvedUsername = usernameLookup;
 						break;
 					}
 				}
 			} catch {
-				// non-fatal: упадём ниже на оригинальной валидации
+				// non-fatal
 			}
 		}
+		// Если по-прежнему не numeric — пробуем отправить через i2crm по
+		// username. У i2crm API нет публичного endpoint resolve username →
+		// client_id, но при cold-start (первый исходящий клиенту с которым
+		// мы ещё не переписывались) это единственный вариант. После
+		// ответа клиента incoming webhook принесёт client_id и заполнит UF
+		// автоматически — последующие сообщения пойдут по числовому id.
 		if (!/^\d+$/.test(clientId)) {
-			throw new HttpException(
-				`Instagram client_id должен быть числом, получено "${clientId}". ` +
-					`Не нашли этого username в существующих лидах с заполненным IG_CHAT_ID. ` +
-					`Дождись incoming-сообщения от клиента (i2crm запишет client_id автоматически) ` +
-					`либо открой карточку лида созданного из Instagram где IG_CHAT_ID есть.`,
-				HttpStatus.BAD_REQUEST,
-			);
+			sentByUsername = true;
 		}
 		// Прокинем resolvedUsername в input для последующего display-кода
 		input.username = resolvedUsername;
@@ -468,15 +468,25 @@ export class WidgetController {
 			throw new HttpException("I2CRM не настроен (TARGET_KEY/ACCOUNT_ID)", HttpStatus.INTERNAL_SERVER_ERROR);
 		}
 
-		const body = {
+		// Если отправляем по username (cold-start без client_id) — параллельно
+		// шлём client_username чтобы i2crm мог resolve на их стороне.
+		// При обычной отправке по числовому client_id — username опционально
+		// для отладки/логов на стороне i2crm.
+		const body: Record<string, any> = {
 			domain: "instagram",
 			source: String(accountId),
 			client: String(clientId),
 			type: "direct",
 			text: input.text,
 		};
+		if (sentByUsername) {
+			body.client_username = clientId;
+		} else if (resolvedUsername) {
+			body.client_username = String(resolvedUsername).replace(/^@/, "");
+		}
 
 		let idMessage: string | undefined;
+		let returnedClientId: string | undefined;
 		try {
 			const r = await axios.post(`${apiBase}/target/feedback`, body, {
 				params: { key: targetKey },
@@ -486,7 +496,23 @@ export class WidgetController {
 			const result = r.data;
 			if (result?.error) {
 				const errMsg = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
+				if (sentByUsername) {
+					throw new HttpException(
+						`i2crm не принял отправку по @username ("${clientId}"): ${errMsg}. ` +
+							`Возможно у клиента нет открытого Instagram-аккаунта на этом username, ` +
+							`либо i2crm требует только числовой client_id. ` +
+							`Если клиент когда-либо ответит — incoming webhook принесёт client_id, и следующая отправка пойдёт.`,
+						HttpStatus.BAD_GATEWAY,
+					);
+				}
 				throw new HttpException(`i2crm: ${errMsg}`, HttpStatus.BAD_GATEWAY);
+			}
+			// i2crm может вернуть client_id в response при отправке по username —
+			// сохраним для post-обработки (заполнение UF в B24 лида).
+			returnedClientId = String(result?.data?.client_id || result?.data?.client || "") || undefined;
+			if (returnedClientId && /^\d+$/.test(returnedClientId) && sentByUsername) {
+				clientId = returnedClientId;
+				sentByUsername = false; // теперь у нас числовой
 			}
 			idMessage = String(result?.data?.id || result?.data?.external_ids?.[0] || `i2crm_${Date.now()}`);
 		} catch (err: any) {
