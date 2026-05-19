@@ -875,6 +875,58 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Найти открытую сделку или лид клиента по phone и добавить timeline-comment.
+	 * Используется bridge'ем для событий типа avatar_changed (Customer-360
+	 * Этап 5): не отправляем сообщение клиенту, не меняем PHOTO — просто
+	 * фиксируем факт в B24-карточке.
+	 *
+	 * Поиск: crm.duplicate.findbycomm по phone → CONTACT_ID → ищем
+	 * открытую сделку / лид → добавляем comment.
+	 */
+	async addTimelineCommentByPhone(
+		phone: string, text: string,
+	): Promise<{ ok: boolean; entity?: "deal" | "lead" | "contact"; entityId?: number; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, reason: "no portal" };
+		try {
+			const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
+				type: "PHONE",
+				values: [phone],
+				entity_type: "CONTACT",
+			});
+			const contactId = Number(dup?.CONTACT?.[0]);
+			if (!contactId) return { ok: false, reason: "no contact" };
+
+			// Сначала ищем открытую сделку
+			const deals: any = await this.callBitrix24Method(portalDomain, "crm.deal.list", {
+				filter: { CONTACT_ID: contactId, "!STAGE_SEMANTIC_ID": ["F", "P"] },
+				select: ["ID"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(deals) && deals.length > 0) {
+				const dealId = Number(deals[0].ID);
+				const cid = await this.addTimelineComment(portalDomain, "deal", dealId, text);
+				if (cid) return { ok: true, entity: "deal", entityId: dealId };
+			}
+			// Потом открытый лид
+			const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+				filter: { CONTACT_ID: contactId, "!STATUS_SEMANTIC_ID": ["F", "S"] },
+				select: ["ID"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(leads) && leads.length > 0) {
+				const leadId = Number(leads[0].ID);
+				const cid = await this.addTimelineComment(portalDomain, "lead", leadId, text);
+				if (cid) return { ok: true, entity: "lead", entityId: leadId };
+			}
+			return { ok: false, reason: "no open deal/lead for contact", entity: "contact", entityId: contactId };
+		} catch (e: any) {
+			return { ok: false, reason: e.message };
+		}
+	}
+
+	/**
 	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
 	 * или null при ошибке (логируется warn). Используется в widget /send для
 	 * фиксации исходящего сообщения в открытой сущности клиента вместо создания

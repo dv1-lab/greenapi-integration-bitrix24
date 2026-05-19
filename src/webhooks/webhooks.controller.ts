@@ -122,6 +122,37 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: добавить timeline-comment в открытый лид/сделку клиента
+	// (по phone). Используется bridge для avatar_changed события (Customer-360
+	// Этап 5): PHOTO в B24 НЕ меняем, только оставляем след в timeline. Auth:
+	// X-Hint-Secret.
+	@Post("internal/timeline-comment")
+	@HttpCode(HttpStatus.OK)
+	async timelineComment(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			phone?: string; channel?: string; text?: string;
+		};
+		const phone = String(body.phone || "").trim();
+		const text = String(body.text || "").trim();
+		if (!phone || !text) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "phone and text required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.addTimelineCommentByPhone(phone, text);
+			res.json(result);
+		} catch (error: any) {
+			this.logger.warn(`timeline-comment failed: ${error.message}`);
+			res.status(HttpStatus.OK).json({ ok: false, reason: error.message });
+		}
+	}
+
 	// Internal endpoint: установить PHOTO у B24-контакта/лида (если поле пустое).
 	// Используется avatar_sync воркером wa-tg-bridge: он скачивает аватарку
 	// из мессенджера и шлёт base64 сюда. Auth: X-Hint-Secret.
