@@ -168,6 +168,46 @@ export class WebhooksController {
 		res.json({ started: true, delay_sec: delaySec });
 	}
 
+	// Internal endpoint: один батч бэкфилла UF_CRM_PB_CUSTOMER_UUID. Запускается
+	// по cron каждые 15 минут (через systemd timer на сервере). Делает по 20
+	// entity за раз с rate-limit 2 sec → 40 sec/батч, нагрузка минимальная.
+	// Auth: X-Hint-Secret.
+	@Post("internal/sync-customer-uuid")
+	@HttpCode(HttpStatus.OK)
+	async syncCustomerUuid(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			entity?: "lead" | "contact" | "both";
+			limit?: number;
+			rateMsec?: number;
+		};
+		const entity = body.entity || "both";
+		const limit = body.limit;
+		const rateMsec = body.rateMsec;
+		try {
+			const results: any[] = [];
+			if (entity === "lead" || entity === "both") {
+				results.push(
+					await this.bitrix24Service.syncCustomerUuidBatch({ entity: "lead", limit, rateMsec }),
+				);
+			}
+			if (entity === "contact" || entity === "both") {
+				results.push(
+					await this.bitrix24Service.syncCustomerUuidBatch({ entity: "contact", limit, rateMsec }),
+				);
+			}
+			res.json({ results });
+		} catch (error: any) {
+			this.logger.error(`sync-customer-uuid failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: идемпотентно создать UF_CRM_PB_CUSTOMER_UUID на lead /
 	// contact / deal. Используется один раз при инициализации Customer-360
 	// (Этап 1). Auth: X-Hint-Secret.

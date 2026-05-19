@@ -531,6 +531,185 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	// ===== Customer-360 sync ============================================
+	// Backfill UF_CRM_PB_CUSTOMER_UUID для существующих лидов/контактов B24:
+	// для каждого без UUID берём первый phone (или email) и вызываем
+	// customer-service /find-or-create → пишем UUID в B24. Rate-limited.
+
+	private async _csFindOrCreate(
+		aliasType: string,
+		aliasValue: string,
+		addedBy = "adapter-sync",
+	): Promise<{ uuid: string; created: boolean } | null> {
+		const url = (process.env.CUSTOMER_SERVICE_URL || "").replace(/\/+$/, "");
+		const secret = process.env.CUSTOMER_SERVICE_SECRET || "";
+		if (!url || !secret) return null;
+		try {
+			const r = await axios.post(
+				`${url}/customers/find-or-create`,
+				{ aliasType, aliasValue, addedBy },
+				{
+					headers: { "X-Service-Secret": secret, "Content-Type": "application/json" },
+					timeout: 5000,
+				},
+			);
+			const c = r.data?.customer;
+			if (!c?.uuid) return null;
+			return { uuid: String(c.uuid), created: Boolean(r.data?.created) };
+		} catch (e: any) {
+			this.logger.warn(
+				`customer-service find_or_create ${aliasType}=${aliasValue} failed: ${e?.response?.data?.message || e.message}`,
+			);
+			return null;
+		}
+	}
+
+	private async _csAddAlias(
+		uuid: string,
+		aliasType: string,
+		aliasValue: string,
+	): Promise<boolean> {
+		const url = (process.env.CUSTOMER_SERVICE_URL || "").replace(/\/+$/, "");
+		const secret = process.env.CUSTOMER_SERVICE_SECRET || "";
+		if (!url || !secret) return false;
+		try {
+			await axios.post(
+				`${url}/customers/${uuid}/aliases`,
+				{ aliasType, aliasValue, addedBy: "adapter-sync" },
+				{
+					headers: { "X-Service-Secret": secret, "Content-Type": "application/json" },
+					timeout: 5000,
+				},
+			);
+			return true;
+		} catch (e: any) {
+			const msg = e?.response?.data?.message || e.message;
+			// Если alias уже привязан другому customer'у — это auto-merge ситуация,
+			// customer-service вернёт 200 с autoMerged. Если 409 — alias уже наш.
+			if (/already/i.test(String(msg))) return true;
+			this.logger.warn(
+				`customer-service add_alias ${aliasType}=${aliasValue} to ${uuid} failed: ${msg}`,
+			);
+			return false;
+		}
+	}
+
+	private _pickFirstPhone(entity: any): string | null {
+		const phones = entity?.PHONE;
+		if (!Array.isArray(phones)) return null;
+		for (const p of phones) {
+			const v = String(p?.VALUE || "").trim();
+			const digits = v.replace(/[^\d+]/g, "");
+			if (digits.length >= 11) {
+				return digits.startsWith("+") ? digits : ("+" + digits);
+			}
+		}
+		return null;
+	}
+
+	private _pickFirstEmail(entity: any): string | null {
+		const emails = entity?.EMAIL;
+		if (!Array.isArray(emails)) return null;
+		for (const e of emails) {
+			const v = String(e?.VALUE || "").trim();
+			if (v.includes("@")) return v.toLowerCase();
+		}
+		return null;
+	}
+
+	/**
+	 * Один батч бэкфилла: берёт N entity без UF_CRM_PB_CUSTOMER_UUID, разрешает
+	 * их в customer-service по phone/email, прописывает UUID в B24. Между
+	 * entity спит rateMsec — лимит на нагрузку B24.
+	 *
+	 * Возвращает счётчики. Если processed < limit — батч исчерпал кандидатов
+	 * (бэкфилл закончен для этой entity).
+	 */
+	async syncCustomerUuidBatch(opts: {
+		entity: "lead" | "contact";
+		limit?: number;
+		rateMsec?: number;
+	}): Promise<{
+		entity: "lead" | "contact";
+		fetched: number;
+		updated: number;
+		skipped_no_alias: number;
+		failed: number;
+	}> {
+		const entity = opts.entity;
+		const limit = Math.max(1, Math.min(50, opts.limit ?? 20));
+		const rateMsec = Math.max(500, opts.rateMsec ?? 2000);
+
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) {
+			return { entity, fetched: 0, updated: 0, skipped_no_alias: 0, failed: 0 };
+		}
+		const listMethod = `crm.${entity}.list`;
+		const updateMethod = `crm.${entity}.update`;
+		const list: any = await this.callBitrix24Method(portalDomain, listMethod, {
+			filter: { "=UF_CRM_PB_CUSTOMER_UUID": "" },
+			select: ["ID", "PHONE", "EMAIL", "TITLE", "NAME", "LAST_NAME"],
+			order: { ID: "DESC" },
+			start: 0,
+		});
+		const items: any[] = Array.isArray(list) ? list : [];
+		let updated = 0;
+		let skippedNoAlias = 0;
+		let failed = 0;
+		for (let i = 0; i < Math.min(items.length, limit); i++) {
+			const item = items[i];
+			const id = Number(item.ID);
+			if (!id) { failed++; continue; }
+			const phone = this._pickFirstPhone(item);
+			const email = this._pickFirstEmail(item);
+			let resolved: { uuid: string; created: boolean } | null = null;
+			if (phone) {
+				resolved = await this._csFindOrCreate("phone", phone);
+			}
+			if (!resolved && email) {
+				resolved = await this._csFindOrCreate("email", email);
+			}
+			if (!resolved) {
+				// Нет alias'а — связываем по b24_lead/b24_contact как fallback.
+				resolved = await this._csFindOrCreate(
+					entity === "lead" ? "b24_lead" : "b24_contact",
+					String(id),
+				);
+			}
+			if (!resolved) {
+				skippedNoAlias++;
+				if (i < limit - 1) await new Promise((r) => setTimeout(r, rateMsec));
+				continue;
+			}
+			// Добавляем b24_* alias чтобы customer-service знал про связь.
+			await this._csAddAlias(
+				resolved.uuid,
+				entity === "lead" ? "b24_lead" : "b24_contact",
+				String(id),
+			);
+			try {
+				await this.callBitrix24Method(portalDomain, updateMethod, {
+					id,
+					fields: { UF_CRM_PB_CUSTOMER_UUID: resolved.uuid },
+				});
+				updated++;
+			} catch (e: any) {
+				this.logger.warn(`${updateMethod} #${id} failed: ${e.message}`);
+				failed++;
+			}
+			// Rate-limit: между entity. Последнюю не задерживаем.
+			if (i < limit - 1) await new Promise((r) => setTimeout(r, rateMsec));
+		}
+		return {
+			entity,
+			fetched: items.length,
+			updated,
+			skipped_no_alias: skippedNoAlias,
+			failed,
+		};
+	}
+
 	/**
 	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
 	 * или null при ошибке (логируется warn). Используется в widget /send для
