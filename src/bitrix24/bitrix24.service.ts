@@ -108,15 +108,48 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	private async _refreshOAuthAppToken(app: any): Promise<string> {
+		if (!app?.refreshToken) {
+			throw new IntegrationError("No refresh token for OAuth app", "UNAUTHORIZED");
+		}
+		const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
+			params: {
+				grant_type: "refresh_token",
+				client_id: app.clientId,
+				client_secret: app.clientSecret,
+				refresh_token: app.refreshToken,
+			},
+		});
+		const { access_token, refresh_token, expires_in } = response.data;
+		const expiresAt = expires_in ? new Date(Date.now() + expires_in * 1000) : undefined;
+		await this.prisma.updateOAuthAppTokens(
+			app.portalDomain, app.appKind, access_token, refresh_token, expiresAt,
+		);
+		this.logger.info(`OAuthApp[${app.appKind}] token refreshed for ${app.portalDomain}`);
+		return access_token;
+	}
+
 	private async callBitrix24Method(
 		portalDomain: string,
 		method: string,
 		params: Record<string, any> = {},
 		accessToken?: string,
 		retryCount: number = 0,
+		appKind: "social" | "customer360" = "social",
 	): Promise<unknown> {
-		const user = await this.prisma.findUser(portalDomain);
-		let token = accessToken || user?.accessToken;
+		// Customer-360 split (см. memory customer_360_split_b24): если для этого
+		// портала установлено отдельное приложение `customer360`, используем его
+		// токен для CRM-операций. Иначе fallback на стандартного social User —
+		// это даёт graceful degradation пока split не настроен в B24 admin.
+		let app: any = null;
+		let user: User | null = null;
+		if (!accessToken && appKind === "customer360") {
+			app = await this.prisma.findOAuthApp(portalDomain, "customer360");
+		}
+		if (!app) {
+			user = await this.prisma.findUser(portalDomain);
+		}
+		let token = accessToken || app?.accessToken || user?.accessToken;
 
 		if (!token) {
 			throw new IntegrationError(`No access token for portal ${portalDomain}`, "UNAUTHORIZED");
@@ -126,7 +159,7 @@ export class Bitrix24Service extends BaseAdapter<
 			const url = `https://${portalDomain}/rest/${method}?auth=${token}`;
 			// Маскируем токен в логах — он попадает в docker logs/transcript.
 			const safeUrl = url.replace(/(auth=)[^&]+/, "$1<masked>");
-			this.logger.debug(`Calling Bitrix24 method: ${method}`, {url: safeUrl, params});
+			this.logger.debug(`Calling Bitrix24 method: ${method}`, {url: safeUrl, params, app: app ? "customer360" : "social"});
 
 			const response = await axios.post(url, params);
 
@@ -137,12 +170,18 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 
 			if (response.data.error) {
-				if (response.data.error === "expired_token" && retryCount === 0 && user?.refreshToken) {
-					this.logger.warn(`Token expired for ${portalDomain}, attempting refresh...`);
-
+				if (response.data.error === "expired_token" && retryCount === 0) {
+					this.logger.warn(`Token expired for ${portalDomain} (${app ? "customer360" : "social"}), attempting refresh...`);
 					try {
-						const newToken = await this.refreshAccessToken(user);
-						return this.callBitrix24Method(portalDomain, method, params, newToken, retryCount + 1);
+						let newToken: string;
+						if (app?.refreshToken) {
+							newToken = await this._refreshOAuthAppToken(app);
+						} else if (user?.refreshToken) {
+							newToken = await this.refreshAccessToken(user);
+						} else {
+							throw new Error("No refresh token");
+						}
+						return this.callBitrix24Method(portalDomain, method, params, newToken, retryCount + 1, appKind);
 					} catch (refreshError) {
 						this.logger.error(`Token refresh failed for ${portalDomain}:`, refreshError);
 						throw new IntegrationError("Authentication failed - please reinstall the app", "UNAUTHORIZED");
@@ -153,11 +192,18 @@ export class Bitrix24Service extends BaseAdapter<
 
 			return response.data.result;
 		} catch (error: any) {
-			if (error.response?.status === 401 && retryCount === 0 && user?.refreshToken) {
-				this.logger.warn(`HTTP 401 error for ${portalDomain}, attempting token refresh...`);
+			if (error.response?.status === 401 && retryCount === 0) {
+				this.logger.warn(`HTTP 401 error for ${portalDomain} (${app ? "customer360" : "social"}), attempting token refresh...`);
 				try {
-					const newToken = await this.refreshAccessToken(user);
-					return this.callBitrix24Method(portalDomain, method, params, newToken, retryCount + 1);
+					let newToken: string;
+					if (app?.refreshToken) {
+						newToken = await this._refreshOAuthAppToken(app);
+					} else if (user?.refreshToken) {
+						newToken = await this.refreshAccessToken(user);
+					} else {
+						throw new Error("No refresh token");
+					}
+					return this.callBitrix24Method(portalDomain, method, params, newToken, retryCount + 1, appKind);
 				} catch (refreshError) {
 					this.logger.error(`Token refresh failed for ${portalDomain}:`, refreshError);
 					throw new IntegrationError("Authentication failed - please reinstall the app", "UNAUTHORIZED");
@@ -506,7 +552,7 @@ export class Bitrix24Service extends BaseAdapter<
 		try {
 			const existing: any = await this.callBitrix24Method(portalDomain, listMethod, {
 				order: { ID: "ASC" },
-			});
+			}, undefined, 0, "customer360");
 			if (Array.isArray(existing)) {
 				const match = existing.find((x: any) => x.FIELD_NAME === fieldName);
 				if (match) {
@@ -541,7 +587,7 @@ export class Bitrix24Service extends BaseAdapter<
 					EDIT_IN_LIST: "N",
 					IS_SEARCHABLE: opts.searchable === false ? "N" : "Y",
 				},
-			});
+			}, undefined, 0, "customer360");
 			return { result: "created", id: Number(newId) };
 		} catch (e: any) {
 			return { result: "skipped", reason: `add failed: ${e.message}` };
@@ -595,7 +641,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// точный список зарегистрированных, а не угадываем по ошибкам bind.
 		let bound: Record<string, string> = {};
 		try {
-			const existing: any = await this.callBitrix24Method(portalDomain, "event.get", {});
+			const existing: any = await this.callBitrix24Method(portalDomain, "event.get", {}, undefined, 0, "customer360");
 			if (Array.isArray(existing)) {
 				for (const row of existing) {
 					const e = String(row?.event || "").toUpperCase();
@@ -619,7 +665,7 @@ export class Bitrix24Service extends BaseAdapter<
 				try {
 					await this.callBitrix24Method(portalDomain, "event.unbind", {
 						event: ev, handler: existingHandler,
-					});
+					}, undefined, 0, "customer360");
 				} catch (e: any) {
 					this.logger.warn(`event.unbind ${ev} stale handler failed: ${e.message}`);
 				}
@@ -628,7 +674,7 @@ export class Bitrix24Service extends BaseAdapter<
 				await this.callBitrix24Method(portalDomain, "event.bind", {
 					event: ev,
 					handler: expected,
-				});
+				}, undefined, 0, "customer360");
 				results.push({ event: ev, result: "bound" });
 			} catch (e: any) {
 				const msg = String(e?.message || "");
@@ -669,7 +715,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// Снимок entity для phone/email/title/stage
 		let snap: any;
 		try {
-			snap = await this.callBitrix24Method(portalDomain, `crm.${entity}.get`, { id: entityId });
+			snap = await this.callBitrix24Method(portalDomain, `crm.${entity}.get`, { id: entityId }, undefined, 0, "customer360");
 		} catch (e: any) {
 			return { ok: false, reason: `crm.${entity}.get failed: ${e.message}` };
 		}
@@ -836,7 +882,7 @@ export class Bitrix24Service extends BaseAdapter<
 			select: ["ID", "PHONE", "EMAIL", "TITLE", "NAME", "LAST_NAME"],
 			order: { ID: "DESC" },
 			start: 0,
-		});
+		}, undefined, 0, "customer360");
 		const items: any[] = Array.isArray(list) ? list : [];
 		let updated = 0;
 		let skippedNoAlias = 0;
@@ -890,7 +936,7 @@ export class Bitrix24Service extends BaseAdapter<
 				await this.callBitrix24Method(portalDomain, updateMethod, {
 					id,
 					fields: { UF_CRM_PB_CUSTOMER_UUID: resolved.uuid },
-				});
+				}, undefined, 0, "customer360");
 				updated++;
 			} catch (e: any) {
 				this.logger.warn(`${updateMethod} #${id} failed: ${e.message}`);
@@ -1008,7 +1054,7 @@ export class Bitrix24Service extends BaseAdapter<
 				type: "PHONE",
 				values: [phone],
 				entity_type: "CONTACT",
-			});
+			}, undefined, 0, "customer360");
 			const contactId = Number(dup?.CONTACT?.[0]);
 			if (!contactId) return { ok: false, reason: "no contact" };
 
@@ -1017,10 +1063,10 @@ export class Bitrix24Service extends BaseAdapter<
 				filter: { CONTACT_ID: contactId, "!STAGE_SEMANTIC_ID": ["F", "P"] },
 				select: ["ID"],
 				order: { DATE_CREATE: "DESC" },
-			});
+			}, undefined, 0, "customer360");
 			if (Array.isArray(deals) && deals.length > 0) {
 				const dealId = Number(deals[0].ID);
-				const cid = await this.addTimelineComment(portalDomain, "deal", dealId, text);
+				const cid = await this.addTimelineComment(portalDomain, "deal", dealId, text, "customer360");
 				if (cid) return { ok: true, entity: "deal", entityId: dealId };
 			}
 			// Потом открытый лид
@@ -1028,10 +1074,10 @@ export class Bitrix24Service extends BaseAdapter<
 				filter: { CONTACT_ID: contactId, "!STATUS_SEMANTIC_ID": ["F", "S"] },
 				select: ["ID"],
 				order: { DATE_CREATE: "DESC" },
-			});
+			}, undefined, 0, "customer360");
 			if (Array.isArray(leads) && leads.length > 0) {
 				const leadId = Number(leads[0].ID);
-				const cid = await this.addTimelineComment(portalDomain, "lead", leadId, text);
+				const cid = await this.addTimelineComment(portalDomain, "lead", leadId, text, "customer360");
 				if (cid) return { ok: true, entity: "lead", entityId: leadId };
 			}
 			return { ok: false, reason: "no open deal/lead for contact", entity: "contact", entityId: contactId };
@@ -1051,6 +1097,7 @@ export class Bitrix24Service extends BaseAdapter<
 		entityType: "deal" | "lead",
 		entityId: number,
 		text: string,
+		appKind: "social" | "customer360" = "social",
 	): Promise<number | null> {
 		try {
 			const safe = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -1060,7 +1107,7 @@ export class Bitrix24Service extends BaseAdapter<
 					ENTITY_TYPE: entityType,
 					COMMENT: safe,
 				},
-			});
+			}, undefined, 0, appKind);
 			return result ? Number(result) : null;
 		} catch (e: any) {
 			this.logger.warn(`addTimelineComment(${entityType}/${entityId}) failed: ${e.message}`);

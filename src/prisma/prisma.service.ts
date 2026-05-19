@@ -105,6 +105,50 @@ export class PrismaService
 		});
 	}
 
+	// ===== OAuthApp (для split B24-режима, customer_360_split_b24) =========
+
+	async findOAuthApp(portalDomain: string, appKind: string) {
+		return (this as any).oAuthApp.findUnique({
+			where: { portalDomain_appKind: { portalDomain, appKind } },
+		});
+	}
+
+	async upsertOAuthApp(data: {
+		portalDomain: string;
+		appKind: string;
+		clientId: string;
+		clientSecret: string;
+		accessToken: string;
+		refreshToken?: string;
+		tokenExpiresAt?: Date;
+		applicationToken?: string;
+		scope?: string;
+	}) {
+		const where = { portalDomain_appKind: { portalDomain: data.portalDomain, appKind: data.appKind } };
+		const updateFields: any = { ...data };
+		delete updateFields.portalDomain;
+		delete updateFields.appKind;
+		return (this as any).oAuthApp.upsert({
+			where,
+			update: updateFields,
+			create: data,
+		});
+	}
+
+	async updateOAuthAppTokens(
+		portalDomain: string, appKind: string,
+		accessToken: string, refreshToken?: string, expiresAt?: Date,
+	) {
+		return (this as any).oAuthApp.update({
+			where: { portalDomain_appKind: { portalDomain, appKind } },
+			data: {
+				accessToken,
+				...(refreshToken && { refreshToken }),
+				...(expiresAt && { tokenExpiresAt: expiresAt }),
+			},
+		});
+	}
+
 	async updateUserTokens(
 		userId: string,
 		accessToken: string,

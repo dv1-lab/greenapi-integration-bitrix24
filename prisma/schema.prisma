@@ -23,6 +23,32 @@ model User {
   updatedAt        DateTime   @updatedAt
 }
 
+// Дополнительные OAuth-приложения в том же B24-портале. Один процесс
+// adapter'а может управлять несколькими app'ами на одном портале для
+// распределения CRM-операций (Customer-360) и операций imconnector/OpenLines
+// (Social Connector) по разным OAuth-ключам — лимиты B24 per app, ×2 запас
+// + изоляция риска бана. См. customer_360_split_b24 memory.
+//
+// Существующая модель User соответствует appKind='social' (Social Connector,
+// первое приложение). Эта таблица для дополнительных, например customer360.
+model OAuthApp {
+  id               Int       @id @default(autoincrement())
+  portalDomain     String    @db.VarChar(190)
+  appKind          String    @db.VarChar(32)  // 'customer360' | (будущее)
+  clientId         String    @db.VarChar(100)
+  clientSecret     String    @db.Text
+  accessToken      String    @db.Text
+  refreshToken     String?   @db.Text
+  tokenExpiresAt   DateTime?
+  applicationToken String?   @db.Text
+  scope            String?   @db.VarChar(500)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([portalDomain, appKind])
+  @@index([appKind])
+}
+
 enum InstanceState {
   notAuthorized
   authorized
