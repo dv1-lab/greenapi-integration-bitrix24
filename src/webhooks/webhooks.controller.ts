@@ -5,6 +5,7 @@ import { I2crmTgMirrorService } from "../bitrix24/i2crm-tg-mirror.service";
 import { GreenApiWebhook, GreenApiLogger } from "@green-api/greenapi-integration";
 import { Bitrix24WebhookDto } from "../bitrix24/dto/bitrix24-webhook.dto";
 import { Bitrix24WebhookGuard } from "./guards/bitrix24-webhook.guard";
+import { PrismaService } from "../prisma/prisma.service";
 
 // i2crm посылает client_id, message_id, external_id и пр. как 64-bit integers
 // (могут быть > 2^53). JSON.parse в Node превращает их в Number и теряет
@@ -24,6 +25,7 @@ export class WebhooksController {
 	constructor(
 		private readonly bitrix24Service: Bitrix24Service,
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
+		private readonly prisma: PrismaService,
 	) {}
 
 	@Post("green-api")
@@ -225,15 +227,41 @@ export class WebhooksController {
 	}
 
 	// B24 event.bind webhook: принимает события ONCRMLEADADD/UPDATE и т.д.
-	// Зарегистрированы через /internal/register-b24-events. Не требует auth —
-	// B24 шлёт без секрета, контейнер торчит наружу через Caddy social.9wb.ru.
-	// Безопасность: handleB24CrmEvent проверяет domain authorized portal.
+	// Зарегистрированы через /internal/register-b24-events.
+	// Безопасность: проверяем auth.application_token соответствует тому, что
+	// мы сохранили при OAuth install (User.applicationToken). B24 шлёт его
+	// в payload каждого event.bind webhook'а — если совпадает, это легитимный
+	// колбэк от нашего портала. Иначе — мусор от стороннего источника, skip
+	// (без 401 — B24 ретраил бы и засорял логи).
 	@Post("b24-event")
 	@HttpCode(HttpStatus.OK)
 	async b24Event(@Req() req: Request, @Res() res: Response): Promise<void> {
 		// ACK сразу — B24 ждёт быстрый 200 OK иначе ретраит
 		res.json({ result: true });
 		const rawEvent = String(req.query?.event || req.body?.event || "").toUpperCase();
+		const auth = (req.body && (req.body as any).auth) || {};
+		const portalDomain = String(auth.domain || "").trim();
+		const applicationToken = String(auth.application_token || "").trim();
+		if (!portalDomain || !applicationToken) {
+			this.logger.warn(`b24-event ${rawEvent} rejected: missing auth.domain or auth.application_token`);
+			return;
+		}
+		try {
+			const user = await this.prisma.findUser(portalDomain);
+			if (!user) {
+				this.logger.warn(`b24-event ${rawEvent} rejected: unknown portal ${portalDomain}`);
+				return;
+			}
+			if (user.applicationToken !== applicationToken) {
+				this.logger.warn(
+					`b24-event ${rawEvent} rejected: application_token mismatch for ${portalDomain}`,
+				);
+				return;
+			}
+		} catch (e: any) {
+			this.logger.error(`b24-event ${rawEvent} auth-check failed: ${e.message}`);
+			return;
+		}
 		try {
 			const result = await this.bitrix24Service.handleB24CrmEvent(rawEvent, req.body);
 			if (!result.ok) {

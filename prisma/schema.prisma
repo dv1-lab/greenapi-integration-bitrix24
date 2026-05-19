@@ -35,6 +35,12 @@ model OutgoingMessage {
   externalChatId   String    @map("external_chat_id") @db.VarChar(190)
   line             Int
   connector        String    @db.VarChar(64)
+  // Последний обработанный outgoingMessageStatus: sent < delivered < read.
+  // Защита от дублей вебхуков Green API: одна и та же status-доставка может
+  // прилететь несколько раз (retry на стороне Green API), а мы каждый раз
+  // вызывали бы imconnector.send.status.delivery в B24 — лишние API вызовы
+  // и риск превысить rate-limit.
+  lastStatusSeen   String?   @map("last_status_seen") @db.VarChar(16)
   createdAt        DateTime  @default(now())
   expiresAt        DateTime
 

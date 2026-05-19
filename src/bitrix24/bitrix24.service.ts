@@ -2,17 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosInstance } from "axios";
 
-// Маппинг префикса idInstance → API URL. Дублирует helper из widget.controller.ts.
-// При появлении новых shard'ов дополнять оба места.
-function greenApiUrlForInstance(idInstance: string): string {
-	const known: Record<string, string> = {
-		"1103487233": "https://1103.api.green-api.com",
-		"1101948511": "https://api.green-api.com",
-		"3100621187": "https://3100.api.green-api.com",
-		"4100621194": "https://4100.api.green-api.com",
-	};
-	return known[idInstance] || "https://api.green-api.com";
-}
+import { greenApiUrl as greenApiUrlForInstance } from "../common/green-api-url";
 import {
 	BaseAdapter,
 	IntegrationError,
@@ -2982,6 +2972,18 @@ export class Bitrix24Service extends BaseAdapter<
 			await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
 			return;
 		}
+		// Дедуп дублирующихся webhook'ов Green API. Если этот статус (или
+		// более продвинутый) уже обработан — skip. Иначе при retry'е
+		// Green API мы каждый раз дёргали бы B24 imconnector.send.status.delivery,
+		// забивая rate-limit и засоряя logs.
+		const STATUS_ORDER: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
+		const last = entry.lastStatusSeen ? String(entry.lastStatusSeen) : "";
+		if (last && (STATUS_ORDER[last] || 0) >= (STATUS_ORDER[status] || 0)) {
+			this.logger.debug(
+				`outgoingStatus dedup: idMessage=${idMessage} already at ${last}, ignoring ${status}`,
+			);
+			return;
+		}
 
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
 		const portalDomain = users[0]?.portalDomain;
@@ -3003,6 +3005,12 @@ export class Bitrix24Service extends BaseAdapter<
 			// Когда дошло до read — удаляем (дальше Green API не шлёт).
 			if (status === "read") {
 				await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
+			} else {
+				// Фиксируем последний обработанный статус для дедупа.
+				await (this.prisma as any).outgoingMessage.update({
+					where: { idMessage },
+					data: { lastStatusSeen: status },
+				}).catch(() => undefined);
 			}
 		} catch (e: any) {
 			this.logger.warn(`Forward outgoing status ${status} for ${idMessage} failed: ${e.message}`);

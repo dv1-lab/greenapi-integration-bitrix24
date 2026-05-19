@@ -5,18 +5,8 @@ import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
 import { Bitrix24Service } from "../bitrix24/bitrix24.service";
 import { mask } from "../common/mask";
-
-// Карта префикса idInstance → API URL Green API. У свежих instance shard в host'е,
-// у старых (вроде 1101948511) — общий api.green-api.com.
-function greenApiUrl(idInstance: string): string {
-	const known: Record<string, string> = {
-		"1103487233": "https://1103.api.green-api.com",
-		"1101948511": "https://api.green-api.com",
-		"3100621187": "https://3100.api.green-api.com",
-		"4100621194": "https://4100.api.green-api.com",
-	};
-	return known[idInstance] || "https://api.green-api.com";
-}
+import { greenApiUrl } from "../common/green-api-url";
+import { GreenApiLogger } from "@green-api/greenapi-integration";
 
 // Авторизация для widget endpoints. Сервис доступен публично через
 // https://social.9wb.ru (Caddy reverse_proxy), поэтому любой может POST
@@ -65,6 +55,7 @@ function assertWidgetAuth(
 
 @Controller("widget")
 export class WidgetController {
+	private readonly logger = GreenApiLogger.getInstance(WidgetController.name);
 	constructor(
 		private readonly config: ConfigService,
 		private readonly prisma: PrismaService,
@@ -383,7 +374,7 @@ export class WidgetController {
 				resolvedContactName = res.contactName;
 				resolvedContactLastName = res.contactLastName;
 			} catch (e: any) {
-				console.warn("[widget] ensureOpenLeadForPhone failed:", e?.message);
+				this.logger.warn(`[widget] ensureOpenLeadForPhone failed: ${e?.message || e}`);
 			}
 		}
 
@@ -401,7 +392,7 @@ export class WidgetController {
 					resolvedContactId,
 				);
 			} catch (e: any) {
-				console.warn("[widget] findOpenCrmEntity failed:", e?.message);
+				this.logger.warn(`[widget] findOpenCrmEntity failed: ${e?.message || e}`);
 			}
 		}
 
@@ -429,7 +420,7 @@ export class WidgetController {
 			this.bitrix24.addTimelineComment(
 				inst.user.portalDomain, openEntity.kind, openEntity.id, commentText,
 			).catch((e: any) => {
-				console.warn(`[widget] addTimelineComment failed (non-fatal): ${e?.message || e}`);
+				this.logger.warn(`[widget] addTimelineComment failed (non-fatal): ${e?.message || e}`);
 			});
 		}
 
@@ -454,7 +445,7 @@ export class WidgetController {
 				displayNameInMirror: displayNameForMirror,
 				openEntity: openEntity || undefined,
 			}).catch((e: any) => {
-				console.warn(`[widget] backfillSendLead failed (non-fatal): ${e?.message || e}`);
+				this.logger.warn(`[widget] backfillSendLead failed (non-fatal): ${e?.message || e}`);
 			});
 		}
 
@@ -683,7 +674,7 @@ export class WidgetController {
 			// backfill UF новосозданного лида
 			if (input.authId && input.domain) {
 				this.backfillNewDirectLead(input.authId, input.domain, clientId, displayName).catch((e: any) => {
-					console.warn(`backfillNewDirectLead failed (non-fatal): ${e?.message || e}`);
+					this.logger.warn(`[widget] backfillNewDirectLead failed (non-fatal): ${e?.message || e}`);
 				});
 			}
 		}
