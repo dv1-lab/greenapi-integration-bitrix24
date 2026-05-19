@@ -2349,6 +2349,15 @@ export class Bitrix24Service extends BaseAdapter<
 		const text = m.message?.text || "";
 		const files: any[] = (m.message as any)?.files || [];
 
+		// B24 webhook кладёт каждый file с двумя полями: link (короткий ~auth-only)
+		// и downloadLink (public ?FILE_ID=...&SIGN=... — открывается без cookie).
+		// i2crm должна СКАЧАТЬ файл и переслать в Instagram, поэтому используем
+		// downloadLink. Раньше код брал f.url (отсутствует в payload) → photo
+		// массив получался [undefined] и i2crm молча игнорировала, оператор
+		// видел "часики" вечно.
+		const fileUrl = (f: any) =>
+			String(f?.downloadLink || f?.link || f?.url || "").trim();
+
 		// Pre-flight: Instagram Direct лимит 1000 символов. i2crm всё равно
 		// вернёт {error, validation:{text:[...]}} — но оператор узнаёт об этом
 		// только спустя минуту по серой плашке «не доставлено» в B24. Шлём
@@ -2397,7 +2406,17 @@ export class Bitrix24Service extends BaseAdapter<
 		};
 		if (text) body.text = text;
 		if (files.length > 0) {
-			body.photo = files.map((f: any) => f.url);
+			const photoUrls = files.map(fileUrl).filter((u) => u.length > 0);
+			if (photoUrls.length > 0) {
+				// i2crm /target/feedback принимает 'photo' как массив URL'ов
+				// (видео не поддерживаются IG Direct API).
+				body.photo = photoUrls;
+				this.logger.info(`i2crm outgoing: ${photoUrls.length} photo URLs`, {
+					urls: photoUrls.map((u) => u.replace(/SIGN=[^&]+/, "SIGN=<masked>")),
+				});
+			} else {
+				this.logger.warn(`i2crm outgoing: files.length=${files.length} но URL не извлечён (link/downloadLink пустые)`);
+			}
 		}
 		// Для comment: media (post id) и comment (parent comment id) обязательны
 		// после переключения i2crm на «официальный» способ подключения. Берём из
