@@ -60,6 +60,18 @@ export class WebhooksController {
 			return;
 		}
 
+		// Outgoing-from-device: менеджер написал клиенту прямо из приложения
+		// мессенджера (Telegram/MAX офисного аккаунта), минуя B24. Зеркалим в
+		// открытую линию как is_self_message, чтобы ответ был виден в B24-диалоге.
+		if (webhook.typeWebhook === "outgoingMessageReceived") {
+			try {
+				await this.bitrix24Service.handleOutgoingFromDevice(webhook);
+			} catch (error: any) {
+				this.logger.warn(`outgoingMessageReceived handler failed: ${error.message}`);
+			}
+			return;
+		}
+
 		try {
 			await this.bitrix24Service.handleGreenApiWebhook(webhook, [
 				"incomingMessageReceived",
