@@ -10,6 +10,7 @@ import {
 } from "@green-api/greenapi-integration";
 import { Bitrix24PlatformMessage } from "../types";
 import { Bitrix24WebhookDto, BitrixFileDto } from "./dto/bitrix24-webhook.dto";
+import { mask } from "../common/mask";
 
 @Injectable()
 export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDto, Bitrix24PlatformMessage> {
@@ -23,7 +24,7 @@ export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDt
 	}
 
 	toPlatformMessage(webhook: GreenApiWebhook): Bitrix24PlatformMessage {
-		this.logger.debug(`Transforming GREEN-API webhook to Bitrix24 message: ${JSON.stringify(webhook)}`);
+		this.logger.debug(`Transforming GREEN-API webhook to Bitrix24 message: ${JSON.stringify(mask(webhook))}`);
 
 		let messageText = "";
 		const attachments: Bitrix24PlatformMessage["attachments"] = [];
@@ -386,7 +387,7 @@ export class Bitrix24Transformer implements MessageTransformer<Bitrix24WebhookDt
 	}
 
 	toGreenApiMessage(bitrixWebhook: Bitrix24WebhookDto): Message {
-		this.logger.debug(`Transforming Bitrix24 webhook to GREEN-API message: ${JSON.stringify(bitrixWebhook)}`);
+		this.logger.debug(`Transforming Bitrix24 webhook to GREEN-API message: ${JSON.stringify(mask(bitrixWebhook))}`);
 
 		if (bitrixWebhook.event?.toUpperCase() === "ONIMCONNECTORMESSAGEADD") {
 			if (!bitrixWebhook.data) {
