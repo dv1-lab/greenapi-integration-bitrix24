@@ -455,11 +455,26 @@ export class OAuthController {
 		// после переустановки приложения у клиента в B24-карточке не появляется
 		// вкладка — нужно делать placement.bind вручную через REST.
 		const appUrl = this.configService.get<string>("APP_URL");
+		// 14 placement'ов:
+		// — Карточки CRM (вкладки): Lead, Deal, Contact, Company, Quote (Предложение),
+		//   Smart Invoice, Order, Dynamic SmartProcess 141/1032/1036/1040
+		// — Глобальные: LEFT_MENU, USER_PROFILE_MENU
+		// — Контакт-центр: SETTING_CONNECTOR (настройка коннектора оператором)
 		const placements = [
 			"CRM_LEAD_DETAIL_TAB",
 			"CRM_DEAL_DETAIL_TAB",
 			"CRM_CONTACT_DETAIL_TAB",
 			"CRM_COMPANY_DETAIL_TAB",
+			"CRM_QUOTE_DETAIL_TAB",
+			"CRM_SMART_INVOICE_DETAIL_TAB",
+			"CRM_ORDER_DETAIL_TAB",
+			"CRM_DYNAMIC_141_DETAIL_TAB",
+			"CRM_DYNAMIC_1032_DETAIL_TAB",
+			"CRM_DYNAMIC_1036_DETAIL_TAB",
+			"CRM_DYNAMIC_1040_DETAIL_TAB",
+			"LEFT_MENU",
+			"USER_PROFILE_MENU",
+			"SETTING_CONNECTOR",
 		];
 		for (const placement of placements) {
 			try {
