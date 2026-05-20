@@ -10,6 +10,7 @@
 - [`GREENAPI_CHANNELS.md`](./GREENAPI_CHANNELS.md) — детально по WhatsApp / MAX / Telegram.
 - [`INSTAGRAM_FLOW.md`](./INSTAGRAM_FLOW.md) — детально по Instagram (i2crm).
 - [`CUSTOMER360.md`](./CUSTOMER360.md) — Customer-360 / KBD-лента.
+- [`TASK_TRACKER.md`](./TASK_TRACKER.md) — внутренний трекер техзадач (функция wa-tg-bridge).
 
 ---
 
