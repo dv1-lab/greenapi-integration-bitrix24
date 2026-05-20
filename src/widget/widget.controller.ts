@@ -38,7 +38,16 @@ function assertWidgetAuth(
 		);
 	}
 	const origin = String(req.headers.origin || req.headers.referer || "").toLowerCase();
-	if (!origin.includes(domain) && !origin.includes("bitrix24.ru")) {
+	// Виджет грузится с нашего APP_URL (social.9wb.ru) и шлёт fetch same-origin,
+	// поэтому его Origin = APP_URL, а не портал B24. Разрешаем свой собственный
+	// хост наравне с порталом — сторонние сайты так Origin не подделают.
+	const appHost = String(config.get<string>("APP_URL") || "")
+		.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+	if (
+		!origin.includes(domain) &&
+		!origin.includes("bitrix24.ru") &&
+		!(appHost && origin.includes(appHost))
+	) {
 		throw new HttpException(
 			`Widget: Origin "${origin || "<empty>"}" не совпадает с domain "${domain}".`,
 			HttpStatus.FORBIDDEN,
@@ -129,7 +138,11 @@ export class WidgetController {
 		// свежий OAuth-токен Social Connector app, валиден ~1 час. Передаём в JS,
 		// чтобы виджет мог отправить mirror через application context.
 		const authId = (body && body.AUTH_ID) || "";
-		const domain = (body && body.DOMAIN) || ((req.query.DOMAIN as string) || "");
+		// B24 не всегда кладёт DOMAIN в placement-POST. Портал один — дефолтим
+		// на BITRIX_PORTAL_DOMAIN, иначе виджет печёт domain="" и не проходит
+		// whitelist в assertWidgetAuth. Тот же паттерн, что в sendMirrorMessage.
+		const domain = (body && body.DOMAIN) || (req.query.DOMAIN as string)
+			|| this.config.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
 		res.type("html").send(this.renderHtml(authId, domain));
 	}
 
