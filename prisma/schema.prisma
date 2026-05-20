@@ -165,3 +165,22 @@ model I2crmEventLog {
   @@index([status, receivedAt])
   @@index([clientId])
 }
+
+// Снимок последнего известного состояния CRM-сущности B24 (lead/contact/deal).
+// B24 шлёт ONCRM*UPDATE на ЛЮБУЮ запись в сущность — даже когда для человека
+// ничего не изменилось. handleB24CrmEvent сравнивает свежий crm.<entity>.get
+// с этим снимком: если значимые поля не изменились — событие в KBD-ленту не
+// отправляется (убирает поток дублей «lead обновлён»); если изменились — в
+// summary пишется диф «поле: было → стало».
+// fields — полный crm.<entity>.get; волатильные авто-поля времени
+// (DATE_MODIFY, TIMESTAMP_X, LAST_ACTIVITY_*) при сравнении игнорируются.
+model B24EntitySnapshot {
+  id         BigInt   @id @default(autoincrement())
+  entityType String   @db.VarChar(10) // lead / contact / deal
+  entityId   Int
+  fields     Json     @db.Json
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+  @@unique([entityType, entityId])
+}

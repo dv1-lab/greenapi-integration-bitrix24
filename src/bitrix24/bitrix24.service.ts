@@ -42,6 +42,30 @@ const OUTGOING_MAP_TTL_MS = 24 * 3600 * 1000;
 type RefreshKey = string;  // portalDomain или portalDomain:appKind
 const _refreshLocks: Map<RefreshKey, Promise<string>> = new Map();
 
+// Авто-поля времени B24 — меняются при каждом касании сущности. Исключаем из
+// диф-сравнения снимков, иначе любое ONCRM*UPDATE выглядит как «изменилось»
+// и дедупликация событий не работает.
+const SNAPSHOT_IGNORE_FIELDS = new Set<string>([
+	"ID", "DATE_MODIFY", "TIMESTAMP_X", "MODIFY_BY_ID",
+	"LAST_ACTIVITY_TIME", "LAST_ACTIVITY_BY", "LAST_COMMUNICATION_TIME",
+	"MOVED_TIME", "MOVED_BY_ID", "DATE_CREATE",
+]);
+
+// RU-подписи частых полей CRM-сущностей для диф-сообщений «было → стало».
+// Неизвестные поля (в т.ч. UF_*) показываются сырым именем.
+const FIELD_LABELS: Record<string, string> = {
+	STATUS_ID: "Статус", STAGE_ID: "Стадия", ASSIGNED_BY_ID: "Ответственный",
+	CREATED_BY_ID: "Создал", TITLE: "Название", NAME: "Имя",
+	LAST_NAME: "Фамилия", SECOND_NAME: "Отчество", OPPORTUNITY: "Сумма",
+	CURRENCY_ID: "Валюта", SOURCE_ID: "Источник",
+	SOURCE_DESCRIPTION: "Описание источника", STATUS_DESCRIPTION: "Описание статуса",
+	COMMENTS: "Комментарий", COMPANY_TITLE: "Компания", POST: "Должность",
+	PHONE: "Телефон", EMAIL: "E-mail", WEB: "Сайт", IM: "Мессенджер",
+	OPENED: "Доступен всем", BEGINDATE: "Дата начала", CLOSEDATE: "Дата завершения",
+	IS_RETURN_CUSTOMER: "Повторное обращение", ADDRESS: "Адрес",
+	UTM_SOURCE: "UTM source", UTM_MEDIUM: "UTM medium", UTM_CAMPAIGN: "UTM campaign",
+};
+
 @Injectable()
 export class Bitrix24Service extends BaseAdapter<
 	Bitrix24WebhookDto,
@@ -809,11 +833,49 @@ export class Bitrix24Service extends BaseAdapter<
 		// Если UF_CRM_PB_CUSTOMER_UUID уже стоит — используем напрямую
 		const customerUuid: string | undefined = snap.UF_CRM_PB_CUSTOMER_UUID || undefined;
 
+		// Снимок-диф: B24 шлёт ONCRM*UPDATE на любое касание сущности. Сравниваем
+		// свежий snap с предыдущим снимком. Если значимые поля не изменились —
+		// событие в KBD-ленту не шлём (убирает поток дублей «lead обновлён»).
+		// Если изменились — в summary пишем «было → стало».
+		const snapWhere = { entityType_entityId: { entityType: entity, entityId } };
+		let changes: Array<{ field: string; old: any; new: any }> = [];
+		const prevSnap = await (this.prisma as any).b24EntitySnapshot
+			.findUnique({ where: snapWhere })
+			.catch(() => null);
+		if (action === "updated" && prevSnap) {
+			changes = this._diffSnapshots(prevSnap.fields || {}, snap);
+			if (changes.length === 0) {
+				// Ничего значимого не изменилось — обновляем снимок, событие не шлём.
+				await (this.prisma as any).b24EntitySnapshot
+					.update({ where: snapWhere, data: { fields: snap } })
+					.catch(() => undefined);
+				return { ok: true, reason: "no meaningful change" };
+			}
+		}
+		await (this.prisma as any).b24EntitySnapshot
+			.upsert({
+				where: snapWhere,
+				create: { entityType: entity, entityId, fields: snap },
+				update: { fields: snap },
+			})
+			.catch((e: any) => this.logger.warn(`snapshot upsert failed: ${e?.message || e}`));
+
 		// Summary
 		const title = snap.TITLE || `${snap.NAME || ""} ${snap.LAST_NAME || ""}`.trim() || `#${entityId}`;
 		let summary = `${entity} ${action}: ${title}`;
-		if (entity !== "contact" && snap.STATUS_ID) summary += ` [STATUS=${snap.STATUS_ID}]`;
-		if (entity === "deal" && snap.STAGE_ID) summary += ` [STAGE=${snap.STAGE_ID}]`;
+		if (changes.length > 0) {
+			const diffLines = await Promise.all(changes.map(async (c) => {
+				const label = FIELD_LABELS[c.field] || c.field;
+				const oldV = await this._fmtFieldValue(portalDomain, c.field, c.old);
+				const newV = await this._fmtFieldValue(portalDomain, c.field, c.new);
+				return `${label}: ${oldV} → ${newV}`;
+			}));
+			summary += "\n" + diffLines.join("\n");
+		} else {
+			// added, либо updated без предыдущего снимка — диф построить не из чего.
+			if (entity !== "contact" && snap.STATUS_ID) summary += ` [STATUS=${snap.STATUS_ID}]`;
+			if (entity === "deal" && snap.STAGE_ID) summary += ` [STAGE=${snap.STAGE_ID}]`;
+		}
 
 		const eventBody: Record<string, any> = {
 			source: `b24_${entity}`,
@@ -843,6 +905,86 @@ export class Bitrix24Service extends BaseAdapter<
 			await this._csPromote(String(entityId));
 		}
 		return { ok: true };
+	}
+
+	// ===== Снимки CRM-сущностей: диф «было → стало» ======================
+
+	private _statusNamesCache: Map<string, string> | null = null;
+	private _statusNamesCacheAt = 0;
+	private readonly _userNameCache = new Map<string, string>();
+
+	/** Изменённые поля между двумя снимками (волатильные авто-поля игнорируются). */
+	private _diffSnapshots(
+		prev: Record<string, any>,
+		next: Record<string, any>,
+	): Array<{ field: string; old: any; new: any }> {
+		const out: Array<{ field: string; old: any; new: any }> = [];
+		const keys = new Set([...Object.keys(prev || {}), ...Object.keys(next || {})]);
+		for (const k of keys) {
+			if (SNAPSHOT_IGNORE_FIELDS.has(k)) continue;
+			const a = (prev || {})[k];
+			const b = (next || {})[k];
+			if (JSON.stringify(a ?? null) !== JSON.stringify(b ?? null)) {
+				out.push({ field: k, old: a, new: b });
+			}
+		}
+		return out;
+	}
+
+	/** Справочник crm.status.list: `${ENTITY_ID}:${STATUS_ID}` → NAME. Кеш 1ч. */
+	private async _loadStatusNames(domain: string): Promise<Map<string, string>> {
+		if (this._statusNamesCache && Date.now() - this._statusNamesCacheAt < 3600_000) {
+			return this._statusNamesCache;
+		}
+		const m = new Map<string, string>();
+		try {
+			const res: any = await this.callBitrix24Method(domain, "crm.status.list", {}, undefined, 0, "customer360");
+			const rows: any[] = Array.isArray(res) ? res : (res?.items || []);
+			for (const r of rows) {
+				if (r?.ENTITY_ID && r?.STATUS_ID != null) {
+					m.set(`${r.ENTITY_ID}:${r.STATUS_ID}`, String(r.NAME ?? r.STATUS_ID));
+				}
+			}
+		} catch (e: any) {
+			this.logger.warn(`crm.status.list failed: ${e?.message || e}`);
+		}
+		this._statusNamesCache = m;
+		this._statusNamesCacheAt = Date.now();
+		return m;
+	}
+
+	/** Имя сотрудника B24 по ID (кеш на время жизни процесса). */
+	private async _userDisplayName(domain: string, id: string): Promise<string> {
+		if (!id) return "—";
+		if (this._userNameCache.has(id)) return this._userNameCache.get(id)!;
+		let name = `#${id}`;
+		try {
+			const res: any = await this.callBitrix24Method(domain, "user.get", { ID: id }, undefined, 0, "customer360");
+			const u = Array.isArray(res) ? res[0] : res;
+			if (u) name = [u.NAME, u.LAST_NAME].filter(Boolean).join(" ").trim() || `#${id}`;
+		} catch {
+			// non-fatal — оставляем #id
+		}
+		this._userNameCache.set(id, name);
+		return name;
+	}
+
+	/** Человекочитаемое значение поля для диф-сообщения. */
+	private async _fmtFieldValue(domain: string, field: string, value: any): Promise<string> {
+		if (value === null || value === undefined || value === "") return "—";
+		if (typeof value === "object") return JSON.stringify(value).slice(0, 80);
+		const v = String(value);
+		if (field === "ASSIGNED_BY_ID" || field === "CREATED_BY_ID" || field === "MODIFY_BY_ID") {
+			return this._userDisplayName(domain, v);
+		}
+		if (field === "STATUS_ID" || field === "SOURCE_ID" || field === "STAGE_ID") {
+			const dict = await this._loadStatusNames(domain);
+			const ent = field === "STATUS_ID" ? "STATUS" : field === "SOURCE_ID" ? "SOURCE" : null;
+			if (ent && dict.has(`${ent}:${v}`)) return dict.get(`${ent}:${v}`)!;
+			for (const [k, name] of dict) if (k.endsWith(`:${v}`)) return name;
+			return v;
+		}
+		return v.length > 100 ? v.slice(0, 100) + "…" : v;
 	}
 
 	private async _csPromote(b24ContactId: string): Promise<void> {
