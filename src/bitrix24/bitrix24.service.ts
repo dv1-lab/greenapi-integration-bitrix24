@@ -316,6 +316,36 @@ export class Bitrix24Service extends BaseAdapter<
 		return result || {};
 	}
 
+	/**
+	 * Активирует коннектор на открытой линии: imconnector.activate + data.set.
+	 * Идемпотентно — повторный вызов на уже активной линии безвреден. Adapter
+	 * штатно активирует линию только при настройке через SETTING_CONNECTOR;
+	 * health-check зовёт этот метод для само-восстановления линий, где коннектор
+	 * не активирован (типовой случай — добавили новый номер, активацию забыли).
+	 */
+	async activateConnectorOnLine(
+		portalDomain: string,
+		line: number,
+		connectorId = "social_connector",
+	): Promise<void> {
+		await this.callBitrix24Method(portalDomain, "imconnector.activate", {
+			CONNECTOR: connectorId,
+			LINE: line,
+			ACTIVE: 1,
+		});
+		const appUrl = this.configService.get<string>("APP_URL");
+		await this.callBitrix24Method(portalDomain, "imconnector.connector.data.set", {
+			CONNECTOR: connectorId,
+			LINE: line,
+			DATA: {
+				id: `${connectorId}_line_${line}`,
+				url: `${appUrl}/webhooks/bitrix24`,
+				name: "Social Connector",
+				description: "Universal messenger connector",
+			},
+		});
+	}
+
 	// Простой мьютекс на phone, чтобы два одновременных webhook'а от Green API не
 	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
 	private readonly _ensureLeadLocks = new Map<string, Promise<EnsureLeadResult>>();

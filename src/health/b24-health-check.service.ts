@@ -146,15 +146,36 @@ export class B24HealthCheckService implements OnModuleInit, OnModuleDestroy {
 			}
 			const configured = !!status.CONFIGURED;
 			const connected = !!status.STATUS;
-			const healthy = configured && connected;
+			let healthy = configured && connected;
 			const label = ((inst.settings as any)?.label as string) || `Instance ${inst.idInstance}`;
+
+			// Само-восстановление: коннектор не активирован на линии. Типовой
+			// случай — добавили новый номер, а активацию через SETTING_CONNECTOR
+			// забыли. Пробуем активировать сами и перечитываем статус; алерт
+			// шлём только если heal не помог.
+			if (!healthy) {
+				try {
+					await this.bitrix24.activateConnectorOnLine(portal, line, CONNECTOR_ID);
+					const recheck = await this.bitrix24.getConnectorStatus(portal, line, CONNECTOR_ID);
+					healthy = !!recheck.CONFIGURED && !!recheck.STATUS;
+					if (healthy && !this._alerted.has(lineKey)) {
+						this.logger.info(`health-check: авто-активирован коннектор на линии #${line} (${label})`);
+						await this.alerts.send(
+							`✅ линия B24 #${line} (${label}, portal ${portal}) была не активна — ` +
+							`коннектор авто-активирован, сообщения снова доходят`,
+						);
+					}
+				} catch (e: any) {
+					this.logger.error(`health-check: авто-активация линии #${line} не удалась: ${e?.message || e}`);
+				}
+			}
 
 			if (!healthy && !this._alerted.has(lineKey)) {
 				this._alerted.add(lineKey);
 				await this.alerts.send(
 					`🚨 линия B24 #${line} (${label}, portal ${portal}): CONFIGURED=${configured}, STATUS=${connected}. ` +
-					`Сообщения из ${label} не попадают в B24. ` +
-					`Восстановить: imconnector.activate CONNECTOR=${CONNECTOR_ID} LINE=${line} ACTIVE=1`,
+					`Сообщения из ${label} не попадают в B24, авто-активация не помогла. ` +
+					`Восстановить вручную: imconnector.activate CONNECTOR=${CONNECTOR_ID} LINE=${line} ACTIVE=1`,
 				);
 			} else if (healthy && this._alerted.has(lineKey)) {
 				this._alerted.delete(lineKey);
