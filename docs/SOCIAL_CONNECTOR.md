@@ -7,6 +7,7 @@
 Последнее обновление: 2026-05-20.
 
 Связанные документы:
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — карта сервисов и границы (читать первым).
 - [`GREENAPI_CHANNELS.md`](./GREENAPI_CHANNELS.md) — детально по WhatsApp / MAX / Telegram.
 - [`INSTAGRAM_FLOW.md`](./INSTAGRAM_FLOW.md) — детально по Instagram (i2crm).
 - [`CUSTOMER360.md`](./CUSTOMER360.md) — Customer-360 / KBD-лента.
