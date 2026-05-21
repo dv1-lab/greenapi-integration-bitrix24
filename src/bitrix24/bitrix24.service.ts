@@ -78,6 +78,7 @@ export class Bitrix24Service extends BaseAdapter<
 > {
 	private readonly logger = GreenApiLogger.getInstance(Bitrix24Service.name);
 	private _outgoingCleanupInterval: NodeJS.Timeout | null = null;
+	private _tokenRefreshInterval: NodeJS.Timeout | null = null;
 
 	constructor(
 		protected readonly bitrix24Transformer: Bitrix24Transformer,
@@ -94,6 +95,15 @@ export class Bitrix24Service extends BaseAdapter<
 			60 * 60 * 1000,
 		);
 		setTimeout(() => { void this.cleanupExpiredOutgoingMessages(); }, 5 * 60 * 1000);
+		// Проактивное обновление B24-токена: рефрешим заранее, до истечения.
+		// Без этого токен протухал в БД между ленивыми refresh-on-401, и
+		// read-only потребители (calls-poll синхронизатора звонков берёт токен
+		// из той же User-строки) ловили expired_token.
+		this._tokenRefreshInterval = setInterval(
+			() => { void this._proactiveTokenRefresh(); },
+			15 * 60 * 1000,
+		);
+		setTimeout(() => { void this._proactiveTokenRefresh(); }, 60 * 1000);
 	}
 
 	onModuleDestroy() {
@@ -101,9 +111,13 @@ export class Bitrix24Service extends BaseAdapter<
 			clearInterval(this._outgoingCleanupInterval);
 			this._outgoingCleanupInterval = null;
 		}
+		if (this._tokenRefreshInterval) {
+			clearInterval(this._tokenRefreshInterval);
+			this._tokenRefreshInterval = null;
+		}
 	}
 
-	private async refreshAccessToken(user: User): Promise<string> {
+	private async refreshAccessToken(user: User, minTtlMs = 30_000): Promise<string> {
 		if (!user.refreshToken) {
 			throw new IntegrationError("No refresh token available", "UNAUTHORIZED");
 		}
@@ -117,8 +131,8 @@ export class Bitrix24Service extends BaseAdapter<
 			try {
 				// Re-read user из БД — другой инстанс мог уже обновить токен.
 				const fresh = await this.prisma.findUser(user.portalDomain);
-				if (fresh && fresh.tokenExpiresAt && new Date(fresh.tokenExpiresAt).getTime() > Date.now() + 30_000) {
-					this.logger.info(`Token already fresh for ${user.portalDomain} (TTL>30s), skip refresh`);
+				if (fresh && fresh.tokenExpiresAt && new Date(fresh.tokenExpiresAt).getTime() > Date.now() + minTtlMs) {
+					this.logger.info(`Token fresh for ${user.portalDomain} (TTL>${Math.round(minTtlMs / 1000)}s), skip refresh`);
 					return fresh.accessToken;
 				}
 				const response = await axios.post(`https://oauth.bitrix.info/oauth/token/`, null, {
@@ -152,6 +166,24 @@ export class Bitrix24Service extends BaseAdapter<
 			return await promise;
 		} finally {
 			_refreshLocks.delete(key);
+		}
+	}
+
+	/**
+	 * Проактивное обновление B24-токена: если до истечения < 15 мин — рефрешим
+	 * заранее. Иначе токен протухал в БД между ленивыми refresh-on-401, и
+	 * read-only потребители (calls-poll customer-360 берёт accessToken из той
+	 * же User-строки) ловили expired_token. Запускается по интервалу из
+	 * конструктора.
+	 */
+	private async _proactiveTokenRefresh(): Promise<void> {
+		try {
+			const users = await (this.prisma as any).user.findMany({ take: 1 });
+			const user = users[0];
+			if (!user) return;
+			await this.refreshAccessToken(user, 15 * 60 * 1000);
+		} catch (e: any) {
+			this.logger.warn(`proactive token refresh failed: ${e?.message || e}`);
 		}
 	}
 
