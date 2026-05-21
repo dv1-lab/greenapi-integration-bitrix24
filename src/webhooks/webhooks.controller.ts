@@ -180,6 +180,43 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: перепривязать UF_CRM_PB_CUSTOMER_UUID на лидах/
+	// контактах/сделках B24 с одного customer-UUID на другой. Используется
+	// customer-service при cutover («разъединение клиента по дате»). Auth:
+	// X-Hint-Secret.
+	@Post("internal/repoint-b24-uuid")
+	@HttpCode(HttpStatus.OK)
+	async repointB24Uuid(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			newUuid?: string;
+			leadIds?: number[];
+			contactIds?: number[];
+			dealIds?: number[];
+		};
+		if (!body.newUuid) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "newUuid required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.repointCustomerUuid({
+				newUuid: body.newUuid,
+				leadIds: body.leadIds || [],
+				contactIds: body.contactIds || [],
+				dealIds: body.dealIds || [],
+			});
+			res.json(result);
+		} catch (error: any) {
+			this.logger.warn(`repoint-b24-uuid failed: ${error.message}`);
+			res.status(HttpStatus.OK).json({ ok: false, reason: error.message });
+		}
+	}
+
 	// Internal endpoint: установить PHOTO у B24-контакта/лида (если поле пустое).
 	// Используется avatar_sync воркером wa-tg-bridge: он скачивает аватарку
 	// из мессенджера и шлёт base64 сюда. Auth: X-Hint-Secret.

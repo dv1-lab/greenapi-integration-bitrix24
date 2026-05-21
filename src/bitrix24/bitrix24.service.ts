@@ -957,6 +957,51 @@ export class Bitrix24Service extends BaseAdapter<
 		return { ok: true };
 	}
 
+	/**
+	 * Перепривязка UF_CRM_PB_CUSTOMER_UUID на лидах/контактах/сделках B24
+	 * с одного customer-UUID на другой. Вызывается customer-service при cutover
+	 * («разъединение клиента по дате»): customer-service перевешивает события
+	 * в ClickHouse и присылает сюда b24-id затронутых сущностей. Между
+	 * апдейтами — пауза (B24 rate-limit на массовых операциях).
+	 */
+	async repointCustomerUuid(input: {
+		newUuid: string;
+		leadIds: number[];
+		contactIds: number[];
+		dealIds: number[];
+	}): Promise<{ ok: boolean; updated: number; failed: number }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, updated: 0, failed: 0 };
+		const targets: Array<{ entity: "lead" | "contact" | "deal"; id: number }> = [
+			...input.leadIds.map((id) => ({ entity: "lead" as const, id })),
+			...input.contactIds.map((id) => ({ entity: "contact" as const, id })),
+			...input.dealIds.map((id) => ({ entity: "deal" as const, id })),
+		];
+		let updated = 0;
+		let failed = 0;
+		for (const t of targets) {
+			try {
+				await this.callBitrix24Method(
+					portalDomain,
+					`crm.${t.entity}.update`,
+					{ id: t.id, fields: { UF_CRM_PB_CUSTOMER_UUID: input.newUuid } },
+					undefined, 0, "customer360",
+				);
+				updated++;
+			} catch (e: any) {
+				failed++;
+				this.logger.warn(`repoint ${t.entity} ${t.id} failed: ${e?.message || e}`);
+			}
+			// B24 rate-limit: не быстрее ~0.5 req/sec на массовых операциях.
+			await new Promise((r) => setTimeout(r, 600));
+		}
+		this.logger.info(
+			`repointCustomerUuid → ${input.newUuid}: updated=${updated} failed=${failed} of ${targets.length}`,
+		);
+		return { ok: true, updated, failed };
+	}
+
 	// ===== Снимки CRM-сущностей: диф «было → стало» ======================
 
 	private _statusNamesCache: Map<string, string> | null = null;
