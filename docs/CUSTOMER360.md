@@ -64,7 +64,32 @@ Adapter — это NestJS-сервис на my-server (`/home/dv/greenapi-b24/`,
 
 ### `handleB24CrmEvent(rawEvent, payload)`
 
-Принимает B24 webhook → `crm.{entity}.get` за snapshot → customer-service resolve → event в `customer_events`.
+Принимает B24 webhook (`ONCRM{LEAD,CONTACT,DEAL}{ADD,UPDATE}`) →
+`crm.{entity}.get` за свежий snapshot → customer-service resolve → event
+в `customer_events`.
+
+**Снимок-диф (дедупликация).** B24 шлёт `ONCRM*UPDATE` на любое касание
+сущности — в т.ч. от нашего же cron'а `customer-uuid-sync`. Чтобы не
+заваливать KBD-ленту пустыми «lead обновлён»:
+- свежий snapshot сравнивается с предыдущим (таблица `B24EntitySnapshot`,
+  MySQL adapter'а) через `_diffSnapshots`;
+- сравнение **каноническое** — `_canonical()` рекурсивно сортирует ключи
+  объектов. B24 возвращает phone/email/IM-массивы с непостоянным порядком
+  ключей внутри объекта; без нормализации одинаковые данные ловятся как
+  «изменение поля» и порождают поток ложных событий;
+- волатильные поля исключены: `SNAPSHOT_IGNORE_FIELDS` (DATE_MODIFY,
+  LAST_ACTIVITY_TIME и пр.) + UF_CRM_*-поля с ISO-датой (`_isVolatileUfDate` —
+  авто-поля «последнего касания»);
+- значимых изменений нет → событие в ленту **не шлётся**, обновляется
+  только снимок;
+- есть → в summary строки `Поле: было → стало`. `_fmtFieldValue`:
+  статусы/источники резолвятся в имена (`crm.status.list`), сотрудники —
+  через `user.get`, многозначные поля выводятся списком VALUE (не дампом
+  JSON-массива).
+
+Снимка нет (первое касание сущности) — диф построить не из чего, событие
+шлётся с пометкой `[STATUS=...]`; снимок создаётся, следующее обновление
+уже сравнивается.
 
 ### `addTimelineCommentByPhone(phone, text)`
 
@@ -91,6 +116,22 @@ Proxy sent/delivered/read статусов из Green API в B24 OpenLines (га
 | `outgoingStatusMap` | idMessage GreenAPI → (B24 chat_id, message_id, line, connector). Для проксирования delivery status. | 24h |
 | `operatorHints` | idMessage → (operator name, expires). Передаются bridge'у для outgoing-зеркала. | 5 min |
 | `_ensureLeadLocks` | per-key locks ensureOpenLeadForPhone, чтобы не плодить лиды. | session |
+
+## Детект смены аватарки (wa-tg-bridge)
+
+`AvatarChangeWatcher` в bridge раз в 6 ч обходит активных клиентов, дёргает
+Green API `getAvatar`, **скачивает картинку и сравнивает SHA-256 содержимого**
+с baseline (`clients.pinned_card_avatar_hash`, SQLite bridge).
+
+URL аватарки WhatsApp подписанный/одноразовый — меняется при каждой проверке,
+даже если картинка та же. Сравнение по URL давало ложные «сменил аватарку»
+(один клиент — по 10-18 раз в неделю), засорявшие KBD-ленту. Поэтому baseline
+держится по хешу байтов, а не по URL.
+
+При реальной смене: уведомление в TG-теме клиента, event `avatar_changed` в
+`customer_events` (в `payload.image_url` — новый аватар, KBD-лента рендерит
+его фотографией), timeline-comment в B24. Первый проход после деплоя —
+бэкфилл хешей, без уведомлений.
 
 ## Customer-service interop
 
