@@ -48,10 +48,10 @@ const _refreshLocks: Map<RefreshKey, Promise<string>> = new Map();
 const SNAPSHOT_IGNORE_FIELDS = new Set<string>([
 	"ID", "DATE_MODIFY", "TIMESTAMP_X", "MODIFY_BY_ID",
 	"LAST_ACTIVITY_TIME", "LAST_ACTIVITY_BY", "LAST_COMMUNICATION_TIME",
-	"MOVED_TIME", "MOVED_BY_ID", "DATE_CREATE",
-	// Наше техническое поле: customer-uuid-sync проставляет его сам.
-	// Его установка — не бизнес-событие, в ленту не выносим.
-	"UF_CRM_PB_CUSTOMER_UUID",
+	"MOVED_TIME", "MOVED_BY_ID", "DATE_CREATE", "DATE_CLOSED",
+	// STATUS_SEMANTIC_ID (P/F/S) — внутренний дубль статуса; меняется вместе
+	// со STATUS_ID, отдельной строкой в ленте только шумит.
+	"STATUS_SEMANTIC_ID",
 ]);
 
 // RU-подписи частых полей CRM-сущностей для диф-сообщений «было → стало».
@@ -948,16 +948,7 @@ export class Bitrix24Service extends BaseAdapter<
 		return JSON.stringify(norm(v ?? null));
 	}
 
-	/** UF_CRM_*-поле с ISO-датой — авто-поле «последнего касания», меняется
-	 *  при каждом touch сущности. В диф-ленту его не выносим. */
-	private _isVolatileUfDate(field: string, ...vals: any[]): boolean {
-		if (!field.startsWith("UF_CRM_")) return false;
-		return vals.some(
-			(v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(v),
-		);
-	}
-
-	/** Изменённые поля между двумя снимками (волатильные авто-поля игнорируются). */
+	/** Изменённые поля между двумя снимками (служебные/авто-поля игнорируются). */
 	private _diffSnapshots(
 		prev: Record<string, any>,
 		next: Record<string, any>,
@@ -966,10 +957,14 @@ export class Bitrix24Service extends BaseAdapter<
 		const keys = new Set([...Object.keys(prev || {}), ...Object.keys(next || {})]);
 		for (const k of keys) {
 			if (SNAPSHOT_IGNORE_FIELDS.has(k)) continue;
+			// UF_CRM_* (кастомные поля), UTM-метки и IM (служебная связка лида
+			// с открытыми линиями) — техническая начинка. Их выставляет
+			// автоматика при создании/обогащении лида: это не бизнес-событие,
+			// в ленту «lead обновлён» не выносим.
+			if (k.startsWith("UF_CRM_") || k.startsWith("UTM_") || k === "IM") continue;
 			const a = (prev || {})[k];
 			const b = (next || {})[k];
 			if (this._canonical(a) === this._canonical(b)) continue;
-			if (this._isVolatileUfDate(k, a, b)) continue;
 			out.push({ field: k, old: a, new: b });
 		}
 		return out;
@@ -1037,7 +1032,9 @@ export class Bitrix24Service extends BaseAdapter<
 			for (const [k, name] of dict) if (k.endsWith(`:${v}`)) return name;
 			return v;
 		}
-		return v.length > 100 ? v.slice(0, 100) + "…" : v;
+		// Лимит щедрый — комментарии операторов/BitrixGPT обрезались на 100
+		// символов («…»). Общий потолок summary (4000) остаётся подстраховкой.
+		return v.length > 1000 ? v.slice(0, 1000) + "…" : v;
 	}
 
 	private async _csPromote(b24ContactId: string): Promise<void> {
