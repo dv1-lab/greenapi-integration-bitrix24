@@ -49,6 +49,9 @@ const SNAPSHOT_IGNORE_FIELDS = new Set<string>([
 	"ID", "DATE_MODIFY", "TIMESTAMP_X", "MODIFY_BY_ID",
 	"LAST_ACTIVITY_TIME", "LAST_ACTIVITY_BY", "LAST_COMMUNICATION_TIME",
 	"MOVED_TIME", "MOVED_BY_ID", "DATE_CREATE",
+	// Наше техническое поле: customer-uuid-sync проставляет его сам.
+	// Его установка — не бизнес-событие, в ленту не выносим.
+	"UF_CRM_PB_CUSTOMER_UUID",
 ]);
 
 // RU-подписи частых полей CRM-сущностей для диф-сообщений «было → стало».
@@ -842,7 +845,22 @@ export class Bitrix24Service extends BaseAdapter<
 		const prevSnap = await (this.prisma as any).b24EntitySnapshot
 			.findUnique({ where: snapWhere })
 			.catch(() => null);
-		if (action === "updated" && prevSnap) {
+		if (action === "updated") {
+			if (!prevSnap) {
+				// Снимка ещё нет — диф построить не из чего. Раньше слали пустое
+				// событие с [STATUS=...], но это шум: customer-uuid-sync касается
+				// каждой сущности по разу, и каждое первое касание превращалось
+				// в бессмысленное «обновлён». Молча фиксируем baseline —
+				// следующее обновление уже сравнится по дифу.
+				await (this.prisma as any).b24EntitySnapshot
+					.upsert({
+						where: snapWhere,
+						create: { entityType: entity, entityId, fields: snap },
+						update: { fields: snap },
+					})
+					.catch(() => undefined);
+				return { ok: true, reason: "snapshot baseline created" };
+			}
 			changes = this._diffSnapshots(prevSnap.fields || {}, snap);
 			if (changes.length === 0) {
 				// Ничего значимого не изменилось — обновляем снимок, событие не шлём.
@@ -872,7 +890,7 @@ export class Bitrix24Service extends BaseAdapter<
 			}));
 			summary += "\n" + diffLines.join("\n");
 		} else {
-			// added, либо updated без предыдущего снимка — диф построить не из чего.
+			// action === "added" — диф построить не из чего, показываем статус.
 			if (entity !== "contact" && snap.STATUS_ID) summary += ` [STATUS=${snap.STATUS_ID}]`;
 			if (entity === "deal" && snap.STAGE_ID) summary += ` [STAGE=${snap.STAGE_ID}]`;
 		}
