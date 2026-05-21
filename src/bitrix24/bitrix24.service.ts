@@ -3030,27 +3030,29 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 
-		// Фото в i2crm /target/feedback передаётся полем `url` (публичная ссылка
-		// на картинку — i2crm скачивает её сам), НЕ `photo`: `photo` — это имя
-		// поля только для multipart-загрузки байтов файла. Раньше слали
-		// body.photo=[массив URL] в JSON — i2crm молча игнорировала поле и
-		// отклоняла запрос «нет текста/файла». На каждое фото — отдельный вызов
-		// (по одному `url` за запрос); текст идёт вместе с первым.
-		const photoUrls = files.map(fileUrl).filter((u) => u.length > 0);
-		if (files.length > 0 && photoUrls.length === 0) {
-			this.logger.warn(`i2crm outgoing: files.length=${files.length} но URL не извлечён (link/downloadLink пустые)`);
+		// Фото отправляем в i2crm multipart-загрузкой САМИХ БАЙТОВ файла (поле
+		// `photo`), а не ссылкой. Ссылочный способ (`url`) ненадёжен: i2crm
+		// определяет тип файла по расширению в URL, а B24 отдаёт ссылку вида
+		// `…/im.file.php?FILE_ID=…` без расширения → «файл не поддерживается».
+		// При загрузке байтов мы сами задаём имя (с расширением) и Content-Type.
+		// На каждое фото — отдельный вызов; текст идёт вместе с первым.
+		const photoFiles: any[] = isDirect
+			? files.filter((f) => fileUrl(f).length > 0)
+			: []; // ответ на Instagram-комментарий — только текст
+		if (files.length > 0 && isDirect && photoFiles.length === 0) {
+			this.logger.warn(`i2crm outgoing: files.length=${files.length} но ссылка не извлечена (link/downloadLink пустые)`);
 		}
-		const parts: Array<Record<string, any>> = [];
-		// Фото шлём только в Direct — у ответа на Instagram-комментарий формат
-		// только текстовый.
-		if (isDirect && photoUrls.length > 0) {
-			photoUrls.forEach((u, i) => {
-				const part: Record<string, any> = { url: u };
-				if (i === 0 && text) part.text = text;
-				parts.push(part);
+
+		type SendPart =
+			| { kind: "text"; text: string }
+			| { kind: "photo"; file: any; text?: string };
+		const parts: SendPart[] = [];
+		if (photoFiles.length > 0) {
+			photoFiles.forEach((f, i) => {
+				parts.push({ kind: "photo", file: f, text: i === 0 && text ? text : undefined });
 			});
 		} else if (text) {
-			parts.push({ text });
+			parts.push({ kind: "text", text });
 		}
 		if (parts.length === 0) {
 			return { success: false, message: "nothing to send (no text, no files)" };
@@ -3058,21 +3060,48 @@ export class Bitrix24Service extends BaseAdapter<
 
 		this.logger.info(`i2crm outgoing: POST ${apiBase}/target/feedback`, {
 			domain: baseBody.domain, source: baseBody.source, client: baseBody.client,
-			type: baseBody.type, hasText: !!text, photos: isDirect ? photoUrls.length : 0,
+			type: baseBody.type, hasText: !!text, photos: photoFiles.length,
 		});
 
 		let lastResult: any = null;
 		let externalMessageId: any = null;
 		for (let i = 0; i < parts.length; i++) {
-			const reqBody = { ...baseBody, ...parts[i] };
+			const part = parts[i];
 			try {
-				const resp = await axios.post(`${apiBase}/target/feedback`, reqBody, {
-					params: { key: targetKey },
-					timeout: 15000,
-					// Не выкидываем axios-исключение при 4xx/5xx — i2crm возвращает 200
-					// с error в теле даже для бизнес-ошибок, нужна единая обработка.
-					validateStatus: () => true,
-				});
+				let resp: any;
+				if (part.kind === "photo") {
+					// Скачиваем файл из B24 (ссылка /pub/im.file.php?…&SIGN=… —
+					// публичная, без авторизации) и грузим байты в i2crm.
+					const dl = await axios.get(fileUrl(part.file), {
+						responseType: "arraybuffer",
+						timeout: 25000,
+						maxContentLength: Infinity,
+					});
+					const buffer = Buffer.from(dl.data);
+					const filename = String(part.file?.name || "image.jpg").replace(/[^\w.\-]/g, "_");
+					const mime = String(part.file?.mime || "image/jpeg");
+					const fields: Record<string, string> = {
+						domain: baseBody.domain,
+						source: baseBody.source,
+						client: baseBody.client,
+						type: baseBody.type,
+					};
+					if (part.text) fields.text = part.text;
+					resp = await this._postI2crmFeedbackMultipart(
+						apiBase, String(targetKey), fields, { buffer, filename, mime },
+					);
+				} else {
+					resp = await axios.post(
+						`${apiBase}/target/feedback`,
+						{ ...baseBody, text: part.text },
+						{
+							params: { key: targetKey },
+							timeout: 15000,
+							// i2crm возвращает 200 с error в теле даже для бизнес-ошибок.
+							validateStatus: () => true,
+						},
+					);
+				}
 				const result = resp.data;
 				// i2crm: {error:false,data:{...}} при успехе, {error:"<msg>",...} при ошибке.
 				if (result?.error) {
@@ -3096,6 +3125,52 @@ export class Bitrix24Service extends BaseAdapter<
 			message: "Sent to i2crm",
 			data: { i2crmResponse: lastResult, externalMessageId, externalChatId: clientId },
 		};
+	}
+
+	/**
+	 * POST i2crm /target/feedback в формате multipart/form-data с файлом-фото.
+	 * Тело собираем вручную: i2crm ждёт part `photo` с `Content-Transfer-Encoding:
+	 * base64` (см. их API Blueprint). Возвращает axios-response.
+	 */
+	private async _postI2crmFeedbackMultipart(
+		apiBase: string,
+		targetKey: string,
+		fields: Record<string, string>,
+		photo: { buffer: Buffer; filename: string; mime: string },
+	): Promise<any> {
+		const boundary =
+			"----i2crmBoundary" + Date.now().toString(16) + Math.random().toString(16).slice(2);
+		const CRLF = "\r\n";
+		const chunks: Buffer[] = [];
+		for (const [name, value] of Object.entries(fields)) {
+			chunks.push(
+				Buffer.from(
+					`--${boundary}${CRLF}` +
+						`Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}` +
+						`${value}${CRLF}`,
+				),
+			);
+		}
+		chunks.push(
+			Buffer.from(
+				`--${boundary}${CRLF}` +
+					`Content-Disposition: form-data; name="photo"; filename="${photo.filename}"${CRLF}` +
+					`Content-Type: ${photo.mime}${CRLF}` +
+					`Content-Transfer-Encoding: base64${CRLF}${CRLF}` +
+					photo.buffer.toString("base64") +
+					CRLF,
+			),
+		);
+		chunks.push(Buffer.from(`--${boundary}--${CRLF}`));
+		return axios.post(`${apiBase}/target/feedback`, Buffer.concat(chunks), {
+			params: { key: targetKey },
+			timeout: 30000,
+			headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+			maxBodyLength: Infinity,
+			maxContentLength: Infinity,
+			// i2crm возвращает 200 с error в теле даже для бизнес-ошибок.
+			validateStatus: () => true,
+		});
 	}
 
 	async handleBitrix24Webhook(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
