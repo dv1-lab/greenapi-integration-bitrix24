@@ -3004,26 +3004,13 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, message: "I2CRM_INSTAGRAM_ACCOUNT_ID not configured" };
 		}
 
-		const body: Record<string, any> = {
+		// Базовый body — общий для всех под-сообщений (см. цикл ниже).
+		const baseBody: Record<string, any> = {
 			domain: "instagram",
 			source: String(accountId),
 			client: String(clientId),
 			type: isDirect ? "direct" : "comment",
 		};
-		if (text) body.text = text;
-		if (files.length > 0) {
-			const photoUrls = files.map(fileUrl).filter((u) => u.length > 0);
-			if (photoUrls.length > 0) {
-				// i2crm /target/feedback принимает 'photo' как массив URL'ов
-				// (видео не поддерживаются IG Direct API).
-				body.photo = photoUrls;
-				this.logger.info(`i2crm outgoing: ${photoUrls.length} photo URLs`, {
-					urls: photoUrls.map((u) => u.replace(/SIGN=[^&]+/, "SIGN=<masked>")),
-				});
-			} else {
-				this.logger.warn(`i2crm outgoing: files.length=${files.length} но URL не извлечён (link/downloadLink пустые)`);
-			}
-		}
 		// Для comment: media (post id) и comment (parent comment id) обязательны
 		// после переключения i2crm на «официальный» способ подключения. Берём из
 		// IgCommentContext (записывается при incoming type=comment).
@@ -3033,8 +3020,8 @@ export class Bitrix24Service extends BaseAdapter<
 					where: { clientId: String(clientId) },
 				});
 				if (ctx?.mediaId && ctx?.commentId) {
-					body.media = ctx.mediaId;
-					body.comment = ctx.commentId;
+					baseBody.media = ctx.mediaId;
+					baseBody.comment = ctx.commentId;
 				} else {
 					this.logger.warn(`i2crm comment: no IgCommentContext for client=${clientId} — request will likely fail validation`);
 				}
@@ -3043,40 +3030,72 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 
+		// Фото в i2crm /target/feedback передаётся полем `url` (публичная ссылка
+		// на картинку — i2crm скачивает её сам), НЕ `photo`: `photo` — это имя
+		// поля только для multipart-загрузки байтов файла. Раньше слали
+		// body.photo=[массив URL] в JSON — i2crm молча игнорировала поле и
+		// отклоняла запрос «нет текста/файла». На каждое фото — отдельный вызов
+		// (по одному `url` за запрос); текст идёт вместе с первым.
+		const photoUrls = files.map(fileUrl).filter((u) => u.length > 0);
+		if (files.length > 0 && photoUrls.length === 0) {
+			this.logger.warn(`i2crm outgoing: files.length=${files.length} но URL не извлечён (link/downloadLink пустые)`);
+		}
+		const parts: Array<Record<string, any>> = [];
+		// Фото шлём только в Direct — у ответа на Instagram-комментарий формат
+		// только текстовый.
+		if (isDirect && photoUrls.length > 0) {
+			photoUrls.forEach((u, i) => {
+				const part: Record<string, any> = { url: u };
+				if (i === 0 && text) part.text = text;
+				parts.push(part);
+			});
+		} else if (text) {
+			parts.push({ text });
+		}
+		if (parts.length === 0) {
+			return { success: false, message: "nothing to send (no text, no files)" };
+		}
+
 		this.logger.info(`i2crm outgoing: POST ${apiBase}/target/feedback`, {
-			domain: body.domain, source: body.source, client: body.client, type: body.type,
-			hasText: !!text, files: files.length,
+			domain: baseBody.domain, source: baseBody.source, client: baseBody.client,
+			type: baseBody.type, hasText: !!text, photos: isDirect ? photoUrls.length : 0,
 		});
 
-		try {
-			const resp = await axios.post(`${apiBase}/target/feedback`, body, {
-				params: { key: targetKey },
-				timeout: 15000,
-				// Не выкидываем axios-исключение при 4xx/5xx — i2crm возвращает 200 с error
-				// в теле даже для бизнес-ошибок, нужна единая обработка.
-				validateStatus: () => true,
-			});
-			const result = resp.data;
-			// i2crm возвращает {error: false, data: {...}} при успехе, {error: "<msg>", data: {...}} при ошибке.
-			if (result?.error) {
-				this.logger.error(`i2crm outgoing rejected by i2crm API`, {
-					httpStatus: resp.status,
-					error: result.error,
-					data: result.data,
+		let lastResult: any = null;
+		let externalMessageId: any = null;
+		for (let i = 0; i < parts.length; i++) {
+			const reqBody = { ...baseBody, ...parts[i] };
+			try {
+				const resp = await axios.post(`${apiBase}/target/feedback`, reqBody, {
+					params: { key: targetKey },
+					timeout: 15000,
+					// Не выкидываем axios-исключение при 4xx/5xx — i2crm возвращает 200
+					// с error в теле даже для бизнес-ошибок, нужна единая обработка.
+					validateStatus: () => true,
 				});
-				return { success: false, message: `i2crm: ${typeof result.error === "string" ? result.error : "validation failed"}` };
+				const result = resp.data;
+				// i2crm: {error:false,data:{...}} при успехе, {error:"<msg>",...} при ошибке.
+				if (result?.error) {
+					this.logger.error(`i2crm outgoing rejected by i2crm API (part ${i + 1}/${parts.length})`, {
+						httpStatus: resp.status,
+						error: result.error,
+						data: result.data,
+					});
+					return { success: false, message: `i2crm: ${typeof result.error === "string" ? result.error : "validation failed"}` };
+				}
+				this.logger.info(`i2crm outgoing OK (part ${i + 1}/${parts.length})`, { result });
+				lastResult = result;
+				externalMessageId = result?.data?.id || result?.data?.external_ids?.[0] || externalMessageId;
+			} catch (err: any) {
+				this.logger.error(`i2crm outgoing transport error: ${err.message}`);
+				return { success: false, message: `i2crm transport: ${err.message}` };
 			}
-			this.logger.info(`i2crm outgoing OK`, { result });
-			const externalMessageId = result?.data?.id || result?.data?.external_ids?.[0] || null;
-			return {
-				success: true,
-				message: "Sent to i2crm",
-				data: { i2crmResponse: result, externalMessageId, externalChatId: clientId },
-			};
-		} catch (err: any) {
-			this.logger.error(`i2crm outgoing transport error: ${err.message}`);
-			return { success: false, message: `i2crm transport: ${err.message}` };
 		}
+		return {
+			success: true,
+			message: "Sent to i2crm",
+			data: { i2crmResponse: lastResult, externalMessageId, externalChatId: clientId },
+		};
 	}
 
 	async handleBitrix24Webhook(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
