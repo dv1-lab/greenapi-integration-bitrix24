@@ -913,6 +913,32 @@ export class Bitrix24Service extends BaseAdapter<
 	private _statusNamesCacheAt = 0;
 	private readonly _userNameCache = new Map<string, string>();
 
+	/** Стабильная сериализация: ключи объектов сортируются рекурсивно.
+	 *  B24 возвращает phone/email/мессенджер-массивы с непостоянным порядком
+	 *  ключей внутри объекта ({VALUE,TYPE_ID} vs {TYPE_ID,VALUE}) — без
+	 *  нормализации это ловится как ложное «изменение поля». */
+	private _canonical(v: any): string {
+		const norm = (x: any): any => {
+			if (Array.isArray(x)) return x.map(norm);
+			if (x && typeof x === "object") {
+				const o: Record<string, any> = {};
+				for (const k of Object.keys(x).sort()) o[k] = norm(x[k]);
+				return o;
+			}
+			return x;
+		};
+		return JSON.stringify(norm(v ?? null));
+	}
+
+	/** UF_CRM_*-поле с ISO-датой — авто-поле «последнего касания», меняется
+	 *  при каждом touch сущности. В диф-ленту его не выносим. */
+	private _isVolatileUfDate(field: string, ...vals: any[]): boolean {
+		if (!field.startsWith("UF_CRM_")) return false;
+		return vals.some(
+			(v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(v),
+		);
+	}
+
 	/** Изменённые поля между двумя снимками (волатильные авто-поля игнорируются). */
 	private _diffSnapshots(
 		prev: Record<string, any>,
@@ -924,9 +950,9 @@ export class Bitrix24Service extends BaseAdapter<
 			if (SNAPSHOT_IGNORE_FIELDS.has(k)) continue;
 			const a = (prev || {})[k];
 			const b = (next || {})[k];
-			if (JSON.stringify(a ?? null) !== JSON.stringify(b ?? null)) {
-				out.push({ field: k, old: a, new: b });
-			}
+			if (this._canonical(a) === this._canonical(b)) continue;
+			if (this._isVolatileUfDate(k, a, b)) continue;
+			out.push({ field: k, old: a, new: b });
 		}
 		return out;
 	}
@@ -972,7 +998,16 @@ export class Bitrix24Service extends BaseAdapter<
 	/** Человекочитаемое значение поля для диф-сообщения. */
 	private async _fmtFieldValue(domain: string, field: string, value: any): Promise<string> {
 		if (value === null || value === undefined || value === "") return "—";
-		if (typeof value === "object") return JSON.stringify(value).slice(0, 80);
+		// Многозначные поля B24 (PHONE/EMAIL/WEB/IM) — массив объектов {VALUE,…}.
+		if (Array.isArray(value)) {
+			const vals = value
+				.map((it) => (it && typeof it === "object" ? it.VALUE : it))
+				.filter((x) => x !== undefined && x !== null && x !== "");
+			return vals.length ? vals.map(String).join(", ") : "—";
+		}
+		if (typeof value === "object") {
+			return value.VALUE !== undefined ? String(value.VALUE) : "(объект)";
+		}
 		const v = String(value);
 		if (field === "ASSIGNED_BY_ID" || field === "CREATED_BY_ID" || field === "MODIFY_BY_ID") {
 			return this._userDisplayName(domain, v);
