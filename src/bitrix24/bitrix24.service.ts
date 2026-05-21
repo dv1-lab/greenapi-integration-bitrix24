@@ -3129,8 +3129,11 @@ export class Bitrix24Service extends BaseAdapter<
 
 	/**
 	 * POST i2crm /target/feedback в формате multipart/form-data с файлом-фото.
-	 * Тело собираем вручную: i2crm ждёт part `photo` с `Content-Transfer-Encoding:
-	 * base64` (см. их API Blueprint). Возвращает axios-response.
+	 * Тело собираем вручную. ВАЖНО: part `photo` — СЫРЫЕ БАЙТЫ файла. В API
+	 * Blueprint i2crm показан `Content-Transfer-Encoding: base64`, но их парсер
+	 * base64 не декодирует (проверено 2026-05-21: при base64 отвечает «Файл не
+	 * является изображением»). Шлём обычный бинарный multipart-part.
+	 * Возвращает axios-response.
 	 */
 	private async _postI2crmFeedbackMultipart(
 		apiBase: string,
@@ -3155,13 +3158,11 @@ export class Bitrix24Service extends BaseAdapter<
 			Buffer.from(
 				`--${boundary}${CRLF}` +
 					`Content-Disposition: form-data; name="photo"; filename="${photo.filename}"${CRLF}` +
-					`Content-Type: ${photo.mime}${CRLF}` +
-					`Content-Transfer-Encoding: base64${CRLF}${CRLF}` +
-					photo.buffer.toString("base64") +
-					CRLF,
+					`Content-Type: ${photo.mime}${CRLF}${CRLF}`,
 			),
 		);
-		chunks.push(Buffer.from(`--${boundary}--${CRLF}`));
+		chunks.push(photo.buffer); // сырые байты файла
+		chunks.push(Buffer.from(`${CRLF}--${boundary}--${CRLF}`));
 		return axios.post(`${apiBase}/target/feedback`, Buffer.concat(chunks), {
 			params: { key: targetKey },
 			timeout: 30000,
