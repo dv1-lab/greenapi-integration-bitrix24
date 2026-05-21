@@ -217,6 +217,34 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: положить транскрипт звонка timeline-комментом в B24 —
+	// в лид/сделку/контакт клиента (поиск по UF_CRM_PB_CUSTOMER_UUID).
+	// Используется customer-360 calls-transcribe. Auth: X-Hint-Secret.
+	@Post("internal/transcript-to-b24")
+	@HttpCode(HttpStatus.OK)
+	async transcriptToB24(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { customerUuid?: string; text?: string };
+		const customerUuid = String(body.customerUuid || "").trim();
+		const text = String(body.text || "").trim();
+		if (!customerUuid || !text) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "customerUuid and text required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.addTranscriptToB24(customerUuid, text);
+			res.json(result);
+		} catch (error: any) {
+			this.logger.warn(`transcript-to-b24 failed: ${error.message}`);
+			res.status(HttpStatus.OK).json({ ok: false, reason: error.message });
+		}
+	}
+
 	// Internal endpoint: установить PHOTO у B24-контакта/лида (если поле пустое).
 	// Используется avatar_sync воркером wa-tg-bridge: он скачивает аватарку
 	// из мессенджера и шлёт base64 сюда. Auth: X-Hint-Secret.

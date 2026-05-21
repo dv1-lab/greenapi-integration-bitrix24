@@ -1561,7 +1561,7 @@ export class Bitrix24Service extends BaseAdapter<
 	 */
 	async addTimelineComment(
 		portalDomain: string,
-		entityType: "deal" | "lead",
+		entityType: "deal" | "lead" | "contact",
 		entityId: number,
 		text: string,
 		appKind: "social" | "customer360" = "social",
@@ -1580,6 +1580,58 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`addTimelineComment(${entityType}/${entityId}) failed: ${e.message}`);
 			return null;
 		}
+	}
+
+	/**
+	 * Кладёт транскрипт звонка timeline-комментом во ВСЕ B24-сущности клиента
+	 * (лиды + сделки + контакты), найденные по UF_CRM_PB_CUSTOMER_UUID.
+	 * Вызывается из customer-360 calls-transcribe через internal endpoint
+	 * /webhooks/internal/transcript-to-b24.
+	 */
+	async addTranscriptToB24(
+		customerUuid: string, text: string,
+	): Promise<{ ok: boolean; posted: number; entities: string[]; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, posted: 0, entities: [], reason: "no portal" };
+		const filter = { "=UF_CRM_PB_CUSTOMER_UUID": customerUuid };
+		const targets: { type: "lead" | "deal" | "contact"; id: number }[] = [];
+		try {
+			for (const [method, type] of [
+				["crm.lead.list", "lead"],
+				["crm.deal.list", "deal"],
+				["crm.contact.list", "contact"],
+			] as const) {
+				const rows: any = await this.callBitrix24Method(
+					portalDomain, method, { filter, select: ["ID"] },
+					undefined, 0, "customer360",
+				);
+				if (Array.isArray(rows)) {
+					for (const r of rows) {
+						const id = Number(r.ID);
+						if (id) targets.push({ type, id });
+					}
+				}
+			}
+		} catch (e: any) {
+			return { ok: false, posted: 0, entities: [], reason: e.message };
+		}
+		if (targets.length === 0) {
+			return { ok: false, posted: 0, entities: [], reason: "no b24 entities for uuid" };
+		}
+		let posted = 0;
+		const entities: string[] = [];
+		for (const t of targets) {
+			const cid = await this.addTimelineComment(portalDomain, t.type, t.id, text, "customer360");
+			if (cid) {
+				posted++;
+				entities.push(`${t.type}#${t.id}`);
+			}
+			// B24 rate-limit: пауза между комментами (массовых операций нет,
+			// но звонки идут пачками — бережёмся).
+			await new Promise((res) => setTimeout(res, 400));
+		}
+		return { ok: posted > 0, posted, entities };
 	}
 
 	/**
