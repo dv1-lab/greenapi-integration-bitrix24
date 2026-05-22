@@ -1654,15 +1654,15 @@ export class Bitrix24Service extends BaseAdapter<
 
 	/**
 	 * Начало текущего нерабочего окна — последние наступившие 19:00 МСК
-	 * (19:00 МСК = 16:00 UTC). Используется для дедупа: один автоответ на
-	 * чат за одно нерабочее окно (ночь).
+	 * (= 16:00 UTC). Считаем в чистом UTC: если сейчас UTC-час < 16, то
+	 * ближайшие прошедшие 16:00 UTC были вчера. Используется для дедупа:
+	 * один автоответ на чат за одно нерабочее окно (ночь).
 	 */
 	private offHoursWindowStart(): Date {
 		const now = new Date();
-		const mskHour = (now.getUTCHours() + 3) % 24;
 		const d = new Date(now);
 		d.setUTCHours(16, 0, 0, 0); // 19:00 МСК
-		if (mskHour < 19) d.setUTCDate(d.getUTCDate() - 1);
+		if (now.getUTCHours() < 16) d.setUTCDate(d.getUTCDate() - 1);
 		return d;
 	}
 
