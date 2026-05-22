@@ -3852,6 +3852,91 @@ export class Bitrix24Service extends BaseAdapter<
 		});
 	}
 
+	// Outgoing B24 → Telegram-бот: оператор пишет в чате открытой линии
+	// TG_BOT_LINE_ID → отправляем клиенту в Telegram через @begovoy_bot.
+	// Эхо нет: Telegram Bot API не шлёт webhook о сообщениях самого бота,
+	// поэтому отдельной защиты от self-message (как у Green API) не нужно.
+	async handleTelegramBotOutgoing(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
+		const messages = webhook.data?.MESSAGES;
+		if (!messages || messages.length === 0) {
+			return { success: false, message: "no MESSAGES in webhook" };
+		}
+		const m = messages[0];
+
+		// chat.id у нас = `tgbot_<chatId>` (см. handleTelegramBotIncoming).
+		const rawChatId = String(m.chat?.id || "");
+		const match = rawChatId.match(/^tgbot_(-?\d+)$/);
+		const chatId = match ? match[1] : rawChatId.replace(/[^\d-]/g, "");
+		if (!chatId) {
+			return { success: false, message: `cannot parse chatId from chat.id=${rawChatId}` };
+		}
+
+		const text = m.message?.text || "";
+		const files: any[] = (m.message as any)?.files || [];
+
+		const token = this.configService.get<string>("TG_BOT_TOKEN");
+		if (!token) {
+			return { success: false, message: "TG_BOT_TOKEN not configured" };
+		}
+
+		// Медиа-вложения операторов — Этап 4. Пока релеится только текст.
+		if (files.length > 0) {
+			this.logger.info(`tg-bot outgoing: ${files.length} file(s) — медиа-релей в Этапе 4, chat=${chatId}`);
+		}
+		if (!text) {
+			return { success: false, message: "nothing to send (no text; медиа — Этап 4)" };
+		}
+
+		// Telegram sendMessage лимит 4096 символов — длинный текст шлём частями.
+		const TG_TEXT_LIMIT = 4096;
+		const parts: string[] = [];
+		for (let i = 0; i < text.length; i += TG_TEXT_LIMIT) {
+			parts.push(text.slice(i, i + TG_TEXT_LIMIT));
+		}
+
+		let externalMessageId: any = null;
+		for (const part of parts) {
+			try {
+				const resp: any = await axios.post(
+					`https://api.telegram.org/bot${token}/sendMessage`,
+					{ chat_id: chatId, text: part },
+					{ timeout: 15000, validateStatus: () => true },
+				);
+				if (resp.data?.ok !== true) {
+					const desc = resp.data?.description || `HTTP ${resp.status}`;
+					this.logger.error(`tg-bot outgoing rejected by Telegram: ${desc}`);
+					return { success: false, message: `Telegram: ${desc}` };
+				}
+				externalMessageId = resp.data?.result?.message_id || externalMessageId;
+			} catch (err: any) {
+				this.logger.error(`tg-bot outgoing transport error: ${err.message}`);
+				return { success: false, message: `Telegram transport: ${err.message}` };
+			}
+		}
+		this.logger.info(`tg-bot outgoing OK chat=${chatId} msg=${externalMessageId} parts=${parts.length}`);
+
+		// Журнал исходящего — outgoing-записи update_id не имеют, ставим
+		// синтетический ключ, чтобы не конфликтовать с incoming по @@unique.
+		try {
+			await (this.prisma as any).tgBotEventLog.create({
+				data: {
+					updateId: `out_${Date.now()}_${externalMessageId || "0"}`,
+					chatId, messageId: String(externalMessageId || ""),
+					direction: "out", payload: JSON.stringify({ chat_id: chatId, text }),
+					status: "sent", sentAt: new Date(),
+				},
+			});
+		} catch (e: any) {
+			this.logger.warn(`tg-bot: outgoing TgBotEventLog create failed: ${e.message}`);
+		}
+
+		return {
+			success: true,
+			message: "Sent to Telegram",
+			data: { externalMessageId, externalChatId: chatId },
+		};
+	}
+
 	async handleBitrix24Webhook(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
 		this.logger.info(`Handling Bitrix24 webhook: ${webhook.event}`);
 
@@ -3880,6 +3965,26 @@ export class Bitrix24Service extends BaseAdapter<
 						lineNumber,
 						{
 							idMessage: (result.data as any)?.externalMessageId || `i2crm_${Date.now()}`,
+						} as SendResponse,
+						"social_connector",
+					);
+				}
+				return result;
+			}
+
+			// Branch: Telegram-бот (@begovoy_bot) — подключён через наш коннектор,
+			// а не Green API. Своя открытая линия TG_BOT_LINE_ID.
+			const tgBotLine = Number(this.configService.get<string>("TG_BOT_LINE_ID"));
+			if (tgBotLine && lineNumber === tgBotLine) {
+				this.logger.info(`Routing outbound to Telegram-bot pipeline (line=${lineNumber})`);
+				const result = await this.handleTelegramBotOutgoing(webhook);
+				if (result.success) {
+					await this.sendDeliveryConfirmation(
+						webhook,
+						domain,
+						lineNumber,
+						{
+							idMessage: (result.data as any)?.externalMessageId || `tgbot_${Date.now()}`,
 						} as SendResponse,
 						"social_connector",
 					);
