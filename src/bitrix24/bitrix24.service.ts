@@ -1628,24 +1628,10 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`outgoing-from-mobile timeline failed: ${e.message}`);
 		}
 
-		// Customer-360 event ingest (best-effort, не блокируем)
-		try {
-			await this._eventsIngest({
-				resolveAlias: { type: "phone", value: phone },
-				source: "bridge_wa",
-				eventType: "message_out",
-				channel: "WA",
-				summary: text.slice(0, 300),
-				payload: {
-					idMessage: webhook?.idMessage,
-					mtype,
-					sender_by_mobile: true,
-					chatId: clientChatId,
-				},
-			});
-		} catch (e: any) {
-			this.logger.debug(`outgoing-from-mobile event ingest failed: ${e.message}`);
-		}
+		// Customer-360 event НЕ эмитим: wa-tg-bridge видит каждое исходящее WA
+		// через webhook Green API и сам пишет message_out в customer_events —
+		// с резолвом оператора (operator-hint / TG-автор / «с мобильного»).
+		// Параллельный эмит отсюда давал дубль события + пустого оператора.
 	}
 
 	/**
