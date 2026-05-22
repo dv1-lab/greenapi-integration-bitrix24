@@ -763,6 +763,45 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Customer-360: пишет событие IG-сообщения (message_in/message_out) в
+	 * customer_events. Клиент резолвится по `ig_client` (стабильный числовой
+	 * Instagram user_id); `@username` добавляется вторичным алиасом — для
+	 * человекочитаемого имени в дашборде/KBD-ленте. Best-effort: ошибки
+	 * вложенных вызовов глотаются, исключение наружу не пробрасывается.
+	 */
+	private async _emitIgMessageEvent(opts: {
+		clientId: string;
+		username?: string;
+		direction: "in" | "out";
+		text: string;
+		igChannel: "direct" | "comment";
+		messageId?: string;
+	}): Promise<void> {
+		const fc = await this._csFindOrCreate("ig_client", opts.clientId, "adapter-ig");
+		const body: Record<string, any> = {
+			source: "bridge_ig",
+			eventType: opts.direction === "out" ? "message_out" : "message_in",
+			channel: "IG",
+			summary: (opts.text || "").slice(0, 300) || "(вложение)",
+			payload: {
+				client_id: opts.clientId,
+				username: opts.username || undefined,
+				ig_channel: opts.igChannel,
+				message_id: opts.messageId,
+			},
+		};
+		if (fc?.uuid) {
+			body.customerUuid = fc.uuid;
+			if (opts.username) {
+				await this._csAddAlias(fc.uuid, "ig_username", opts.username);
+			}
+		} else {
+			body.resolveAlias = { type: "ig_client", value: opts.clientId };
+		}
+		await this._eventsIngest(body);
+	}
+
+	/**
 	 * Регистрирует event.bind для всех CRM-событий что мы слушаем
 	 * (lead/contact/deal add+update). Идемпотентно — повторный bind для
 	 * того же (event, handler) возвращает ошибку, мы её глотаем.
@@ -874,9 +913,14 @@ export class Bitrix24Service extends BaseAdapter<
 		// Резолвим customer
 		const phone = this._pickFirstPhone(snap);
 		const email = this._pickFirstEmail(snap);
+		// IG-сущности: UF_CRM_IG_CHAT_ID хранит стабильный client_id. Резолвим
+		// по ig_client — тогда B24 IG-лид садится на того же клиента Customer-360,
+		// что и события IG-сообщений из handleI2crm* (единая личность канала).
+		const igChatId = String(snap.UF_CRM_IG_CHAT_ID || "").trim();
 		let resolveAlias: { type: string; value: string } | null = null;
 		if (phone) resolveAlias = { type: "phone", value: phone };
 		else if (email) resolveAlias = { type: "email", value: email };
+		else if (igChatId) resolveAlias = { type: "ig_client", value: igChatId };
 		else resolveAlias = { type: entity === "lead" ? "b24_lead" : entity === "contact" ? "b24_contact" : "b24_deal", value: String(entityId) };
 
 		// Если UF_CRM_PB_CUSTOMER_UUID уже стоит — используем напрямую
@@ -2314,6 +2358,16 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
 		});
 
+		// Customer-360: входящее IG-сообщение в customer_events (best-effort).
+		void this._emitIgMessageEvent({
+			clientId: String(clientId),
+			username: username || undefined,
+			direction: "in",
+			text: finalText,
+			igChannel: isComment ? "comment" : "direct",
+			messageId: String(messageId),
+		});
+
 		// Сохраняем последний media+comment-id для outgoing /target/feedback type=comment.
 		// После переключения i2crm на «официальный» способ подключения эти поля стали
 		// обязательными (раньше i2crm сопоставлял по client_id сам).
@@ -3516,6 +3570,15 @@ export class Bitrix24Service extends BaseAdapter<
 				return { success: false, message: `i2crm transport: ${err.message}` };
 			}
 		}
+		// Customer-360: исходящее IG-сообщение в customer_events (best-effort).
+		void this._emitIgMessageEvent({
+			clientId: String(clientId),
+			direction: "out",
+			text,
+			igChannel: replyAsDirect ? "direct" : "comment",
+			messageId: externalMessageId ? String(externalMessageId) : undefined,
+		});
+
 		return {
 			success: true,
 			message: "Sent to i2crm",
