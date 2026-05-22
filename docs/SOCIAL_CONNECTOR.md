@@ -140,7 +140,7 @@ adapter `POST /webhooks/i2crm` → `handleI2crmIncoming` → imconnector в ли
 
 ---
 
-## 6. Исходящий поток (B24/менеджер → клиент) — ЧЕТЫРЕ пути
+## 6. Исходящий поток (B24/менеджер → клиент) — ПЯТЬ путей
 
 ### 6.1. Оператор пишет в чате открытой линии B24
 
@@ -153,6 +153,12 @@ adapter определяет инстанс по линии → отправка
    WA/MAX/Telegram → Green API sendMessage
    Instagram       → i2crm /target/feedback (type по линии: 18=direct/22=comment)
 ```
+
+**Пометка `!` (Instagram Comment-линия → Direct).** Если ответ оператора в
+чате Comment-линии (22) начинается с `!`, adapter шлёт его в **Direct**
+комментатору, а не публичным комментарием (`!` вырезается). Позволяет
+отвечать на комментарии в личку с мобильного приложения B24 и из
+Telegram-топика. Подробно — [`INSTAGRAM_FLOW.md`](./INSTAGRAM_FLOW.md) §6а.
 
 ### 6.2. Виджет «написать первым» (Social Connector в карточке)
 
@@ -185,6 +191,16 @@ timeline-комментарий в карточке.
 
 `outgoingMessageStatus` от Green API → `handleOutgoingMessageStatus` →
 `imconnector.send.status.delivery` → B24 рисует галочки sent/delivered/read.
+
+### 6.5. Автоответ в нерабочее время
+
+Входящее сообщение (WhatsApp/Telegram/MAX — `incomingMessageReceived`;
+Instagram Direct — `handleI2crmIncoming`) вне **10:00–19:00 МСК** → клиенту
+автоматически уходит сообщение о режиме работы магазина. Один автоответ на
+чат за один нерабочий период (ночь) — дедуп по таблице `OffHoursReply`
+(начало окна = последние 19:00 МСК). WA/TG/MAX — хук `maybeOffHoursAutoReply`
+в `/webhooks/green-api`; Instagram Direct — хук в `handleI2crmIncoming`.
+Фоновая задача, не блокирует и не валит основной relay.
 
 ---
 
