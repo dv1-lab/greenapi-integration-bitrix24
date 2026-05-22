@@ -445,6 +445,7 @@ export class Bitrix24Service extends BaseAdapter<
 		channelLabel: string = "WhatsApp",
 		chatId?: string,
 		skipLeadCreation: boolean = false,
+		ymClientId?: string,
 	): Promise<EnsureLeadResult> {
 		const lockKey = `${portalDomain}:${phoneE164}:${chatId || ""}`;
 		const existing = this._ensureLeadLocks.get(lockKey);
@@ -558,10 +559,11 @@ export class Bitrix24Service extends BaseAdapter<
 					NAME: senderName,
 					CONTACT_ID: contactId,
 					PHONE: [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }],
-					// Yandex Metrika ClientId: с сайта заполняется через NetForm
-					// (заявка/звонок), у лидов из мессенджеров его нет. B24 требует
-					// поле при смене стадии — ставим "-" чтобы не блокировать оператора.
-					UF_CRM_NF_YM_CLIENT_ID: "-",
+					// Yandex Metrika ClientId: с сайта-формы заполняется через NetForm.
+					// Из WhatsApp прилетает в служебной метке сообщения (PB-WA-CID) и
+					// прокидывается сюда как ymClientId. Если метки нет — ставим "-"
+					// (B24 требует поле при смене стадии, иначе оператор заблокирован).
+					UF_CRM_NF_YM_CLIENT_ID: ymClientId || "-",
 				};
 				if (sourceId) fields.SOURCE_ID = sourceId;
 
@@ -1934,6 +1936,10 @@ export class Bitrix24Service extends BaseAdapter<
 			// chatId в UF контакта после привязки.
 			if (line != null) {
 				const chatIdForUf = (instanceProvider === "max" || instanceProvider === "telegram") ? message.phone : undefined;
+				// Я.Метрика ClientID из служебной метки «код обращения: ym-<id>»,
+				// которую сайт подставляет в текст WhatsApp-сообщения (PB-WA-CID).
+				const ymMatch = String(message.message || "").match(/\bym-(\d{6,25})\b/);
+				const ymClientId = ymMatch ? ymMatch[1] : undefined;
 				if (phoneE164 || chatIdForUf) {
 					await this.ensureOpenLeadForPhone(
 						instance.user.portalDomain,
@@ -1942,6 +1948,8 @@ export class Bitrix24Service extends BaseAdapter<
 						line,
 						channelLabel,
 						chatIdForUf,
+						false,
+						ymClientId,
 					);
 				}
 			}
