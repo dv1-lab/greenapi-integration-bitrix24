@@ -7,7 +7,7 @@ WhatsApp, MAX, Telegram. Документ — источник истины по
 Общая документация по сервису — [`SOCIAL_CONNECTOR.md`](./SOCIAL_CONNECTOR.md).
 Instagram — отдельный канал (i2crm, не Green API) — [`INSTAGRAM_FLOW.md`](./INSTAGRAM_FLOW.md).
 
-Последнее обновление: 2026-05-20.
+Последнее обновление: 2026-05-22.
 
 ---
 
@@ -184,8 +184,32 @@ B24 делает это только при настройке через SETTIN
 
 ---
 
+## 8a. Входящие медиа — прокси через social.9wb.ru
+
+B24 (`imconnector.send.messages` с `files[]`) скачивает файл по ссылке сам,
+со своих серверов. Тут разница по каналам:
+
+- **WhatsApp**: `downloadUrl` ведёт на публичное хранилище
+  `sw-media-<shard>.storage.yandexcloud.net` — B24 скачивает без проблем.
+- **Telegram / MAX**: `downloadUrl` ведёт на эндпоинт Green API
+  `<shard>.api.green-api.com/download/...`. **B24 со своих серверов скачать
+  его НЕ может** — висит ~20 c и отвечает `SUCCESS:false, ERRORS:["Переданы
+  не все необходимые данные"]`. Файл сам по себе валиден (curl извне даёт
+  200/jpeg) — проблема именно в фетче со стороны B24.
+
+**Решение (2026-05-22):** adapter в `bitrix24.service.ts` при сборке `files[]`
+для входящего сообщения проверяет URL — если это `*.api.green-api.com/...`,
+скачивает файл сам, кладёт в `MediaCacheService` (in-memory, TTL 30 мин) и
+отдаёт B24 ссылку `https://social.9wb.ru/media/<id>.<ext>` (`MediaController`,
+`GET /media/:file`). social.9wb.ru B24 тянет без проблем. WhatsApp-URL
+(yandexcloud) проксирование не трогает — идёт напрямую.
+
+---
+
 ## 9. Грабли (сводка)
 
+- **Входящие фото/файлы Telegram/MAX** B24 не может скачать с
+  `api.green-api.com` напрямую — идут через медиа-прокси (см. §8a).
 - **Префикс chat-user'а** (`wa_`/`sc_`) для входящих и исходящих обязан
   совпадать — иначе дубль лида.
 - **Telegram `@c.us` silent-fail** — для `sc_` chatId передаётся без `@c.us`.
@@ -205,6 +229,7 @@ B24 делает это только при настройке через SETTIN
 | `src/webhooks/webhooks.controller.ts` | роутинг webhook-типов Green API |
 | `src/bitrix24/bitrix24.service.ts` | приём/отправка, `handleOutgoingFromDevice`, `handleOutgoingFromMobile`, `handleOutgoingMessageStatus` |
 | `src/bitrix24/bitrix24.transformer.ts` | webhook ↔ сообщение, формирование chatId |
+| `src/bitrix24/media-cache.service.ts` + `media.controller.ts` | медиа-прокси входящих Telegram/MAX-файлов → B24 (§8a) |
 | `src/widget/widget.controller.ts` | виджет «написать первым», `mirrorToBitrix` |
 | wa-tg-bridge `bridge.py` | приём webhook'ов, TG-зеркало, форвард |
 | wa-tg-bridge `greenapi.py` | Green API клиент, настройки инстансов |
