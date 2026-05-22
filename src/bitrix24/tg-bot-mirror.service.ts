@@ -164,10 +164,13 @@ export class TgBotMirrorService {
 		}
 	}
 
-	// Зеркалит входящее сообщение клиента в его топик.
+	// Зеркалит входящее сообщение клиента в его топик. Медиа передаётся
+	// проксированным URL (social.9wb.ru/media/…) — бот-зеркало скачивает
+	// файл оттуда сам.
 	async mirrorIncoming(input: {
 		chatId: string; clientName: string; username: string;
 		text: string; hasMedia: boolean;
+		mediaUrl?: string; mediaName?: string; mediaIsImage?: boolean;
 	}): Promise<void> {
 		if (!this.enabled) return;
 		const { chatId, username, hasMedia } = input;
@@ -180,6 +183,26 @@ export class TgBotMirrorService {
 				void this.postClientCard(topicId, chatId, displayName, username);
 			}
 			const header = `👤 ${this.escapeHtml(displayName)}`;
+
+			// Медиа — отдельным sendPhoto/sendDocument с подписью.
+			if (input.mediaUrl) {
+				const caption = `${header}${input.text ? "\n\n" + this.escapeHtml(input.text) : ""}`.slice(0, 1024);
+				const method = input.mediaIsImage ? "sendPhoto" : "sendDocument";
+				const field = input.mediaIsImage ? "photo" : "document";
+				try {
+					await this.botApi(method, {
+						chat_id: this.groupId,
+						message_thread_id: topicId,
+						[field]: input.mediaUrl,
+						caption,
+						parse_mode: "HTML",
+					});
+					return;
+				} catch (e: any) {
+					this.logger.debug(`tg-bot-mirror: media post failed (${e.message}), fallback to text`);
+				}
+			}
+
 			const body = input.text
 				? this.escapeHtml(input.text)
 				: (hasMedia ? "<i>[вложение]</i>" : "");

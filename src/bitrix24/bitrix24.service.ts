@@ -2270,6 +2270,91 @@ export class Bitrix24Service extends BaseAdapter<
 		return "";
 	}
 
+	// Достаёт медиа-вложение из Telegram-сообщения. Telegram кладёт файл в
+	// одно из полей по типу; берём первое подходящее. Стикеры намеренно не
+	// поддерживаем (.tgs/webm B24 не покажет) — они уйдут как "[вложение]".
+	private extractTelegramMedia(msg: any): { fileId: string; filename: string; mime: string } | null {
+		if (Array.isArray(msg?.photo) && msg.photo.length > 0) {
+			const p = msg.photo[msg.photo.length - 1]; // последний size — наибольший
+			return { fileId: p.file_id, filename: "photo.jpg", mime: "image/jpeg" };
+		}
+		if (msg?.document) {
+			return {
+				fileId: msg.document.file_id,
+				filename: msg.document.file_name || "document",
+				mime: msg.document.mime_type || "application/octet-stream",
+			};
+		}
+		if (msg?.video) {
+			return {
+				fileId: msg.video.file_id,
+				filename: msg.video.file_name || "video.mp4",
+				mime: msg.video.mime_type || "video/mp4",
+			};
+		}
+		if (msg?.voice) {
+			return { fileId: msg.voice.file_id, filename: "voice.ogg", mime: msg.voice.mime_type || "audio/ogg" };
+		}
+		if (msg?.audio) {
+			return {
+				fileId: msg.audio.file_id,
+				filename: msg.audio.file_name || "audio.mp3",
+				mime: msg.audio.mime_type || "audio/mpeg",
+			};
+		}
+		if (msg?.video_note) {
+			return { fileId: msg.video_note.file_id, filename: "video_note.mp4", mime: "video/mp4" };
+		}
+		return null;
+	}
+
+	// Скачивает файл Telegram по file_id: getFile → file_path → бинарь.
+	// Telegram Bot API скачивает файлы только до 20 МБ — больше вернёт ошибку,
+	// тогда отдаём null (сообщение уйдёт без вложения).
+	private async fetchTelegramFile(
+		token: string, fileId: string,
+	): Promise<{ buffer: Buffer; filePath: string } | null> {
+		const info: any = await axios.get(`https://api.telegram.org/bot${token}/getFile`, {
+			params: { file_id: fileId },
+			timeout: 15000,
+			validateStatus: () => true,
+		});
+		if (info.data?.ok !== true || !info.data?.result?.file_path) {
+			this.logger.warn(`tg-bot: getFile failed: ${info.data?.description || info.status}`);
+			return null;
+		}
+		const filePath = String(info.data.result.file_path);
+		const dl = await axios.get(
+			`https://api.telegram.org/file/bot${token}/${filePath}`,
+			{ responseType: "arraybuffer", timeout: 30000, maxContentLength: Infinity },
+		);
+		return { buffer: Buffer.from(dl.data), filePath };
+	}
+
+	// Грузит файл в Telegram-чат: картинки — sendPhoto (с превью), остальное —
+	// sendDocument (оригинал без перекодирования). multipart через глобальные
+	// FormData/Blob (Node 20).
+	private async sendTelegramMedia(
+		token: string, chatId: string, buffer: Buffer, filename: string, caption?: string,
+	): Promise<{ ok: boolean; messageId?: number; error?: string }> {
+		const isImage = /\.(jpe?g|png|gif|webp)$/i.test(filename);
+		const method = isImage ? "sendPhoto" : "sendDocument";
+		const field = isImage ? "photo" : "document";
+		const form = new FormData();
+		form.append("chat_id", chatId);
+		form.append(field, new Blob([buffer]), filename);
+		if (caption) form.append("caption", caption.slice(0, 1024));
+		const resp: any = await axios.post(
+			`https://api.telegram.org/bot${token}/${method}`,
+			form,
+			{ timeout: 60000, maxBodyLength: Infinity, validateStatus: () => true },
+		);
+		if (resp.data?.ok !== true) {
+			return { ok: false, error: resp.data?.description || `HTTP ${resp.status}` };
+		}
+		return { ok: true, messageId: resp.data?.result?.message_id };
+	}
+
 	// ── Telegram Bot (@begovoy_bot) — клиентский канал ───────────────────────
 	// Бот подключён напрямую через Telegram Bot API (не Green API, не i2crm).
 	// Входящий Update → отдельная открытая линия B24 через imconnector.send.messages.
@@ -2346,8 +2431,31 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`tg-bot: ensureLead failed (non-fatal): ${e.message}`);
 		}
 
-		if (hasMedia && !text) {
-			this.logger.info(`tg-bot: media-only message chat=${chatId} msg=${messageId} — медиа-релей в Этапе 4`);
+		// Медиа: скачиваем файл из Telegram и проксируем через social.9wb.ru.
+		// B24 не может тянуть api.telegram.org/file напрямую — там в URL токен
+		// бота (как и для Telegram/MAX-шардов Green API, см. MediaCacheService).
+		let mediaFile: { url: string; name: string; isImage: boolean } | null = null;
+		const media = this.extractTelegramMedia(msg);
+		if (media) {
+			const token = this.configService.get<string>("TG_BOT_TOKEN");
+			if (token) {
+				try {
+					const fetched = await this.fetchTelegramFile(token, media.fileId);
+					if (fetched) {
+						const id = this.mediaCache.store(fetched.buffer, media.mime);
+						const ext = media.filename.match(/\.([a-z0-9]+)$/i)?.[1]
+							|| fetched.filePath.match(/\.([a-z0-9]+)$/i)?.[1] || "bin";
+						const appUrl = (this.configService.get<string>("APP_URL") || "").replace(/\/+$/, "");
+						mediaFile = {
+							url: `${appUrl}/media/${id}.${ext}`,
+							name: media.filename,
+							isImage: /^image\//.test(media.mime),
+						};
+					}
+				} catch (e: any) {
+					this.logger.warn(`tg-bot: media fetch failed chat=${chatId}: ${e.message}`);
+				}
+			}
 		}
 
 		const userKey = `tgbot_${chatId}`;
@@ -2367,6 +2475,9 @@ export class Bitrix24Service extends BaseAdapter<
 			chat: { id: userKey, name: clientName },
 			extra: { crm: "Y" },
 		};
+		if (mediaFile) {
+			messagePayload.message.files = [{ url: mediaFile.url, name: mediaFile.name }];
+		}
 
 		try {
 			await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
@@ -2388,8 +2499,10 @@ export class Bitrix24Service extends BaseAdapter<
 		} catch { /* non-fatal — журнал не критичен для доставки */ }
 
 		// Зеркало в TG-супергруппу «TG begovoy_bot» — не блокирует доставку.
-		this.tgBotMirror.mirrorIncoming({ chatId, clientName, username, text, hasMedia })
-			.catch((e) => this.logger.warn(`tg-bot: mirror incoming failed (non-fatal): ${e.message}`));
+		this.tgBotMirror.mirrorIncoming({
+			chatId, clientName, username, text, hasMedia,
+			mediaUrl: mediaFile?.url, mediaName: mediaFile?.name, mediaIsImage: mediaFile?.isImage,
+		}).catch((e) => this.logger.warn(`tg-bot: mirror incoming failed (non-fatal): ${e.message}`));
 
 		return { success: true };
 	}
@@ -3884,41 +3997,66 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, message: "TG_BOT_TOKEN not configured" };
 		}
 
-		// Медиа-вложения операторов — Этап 4. Пока релеится только текст.
-		if (files.length > 0) {
-			this.logger.info(`tg-bot outgoing: ${files.length} file(s) — медиа-релей в Этапе 4, chat=${chatId}`);
-		}
-		if (!text) {
-			return { success: false, message: "nothing to send (no text; медиа — Этап 4)" };
+		// B24 отдаёт файл двумя ссылками: link (auth-only) и downloadLink
+		// (публичный ?FILE_ID=…&SIGN=…). Скачиваем downloadLink и грузим в Telegram.
+		const fileUrl = (f: any) => String(f?.downloadLink || f?.link || f?.url || "").trim();
+		const sendableFiles = files.filter((f) => fileUrl(f).length > 0);
+
+		if (sendableFiles.length === 0 && !text) {
+			return { success: false, message: "nothing to send (no text, no files)" };
 		}
 
-		// Telegram sendMessage лимит 4096 символов — длинный текст шлём частями.
-		const TG_TEXT_LIMIT = 4096;
-		const parts: string[] = [];
-		for (let i = 0; i < text.length; i += TG_TEXT_LIMIT) {
-			parts.push(text.slice(i, i + TG_TEXT_LIMIT));
-		}
-
+		// Короткий текст (≤1024) с файлом уходит подписью к первому файлу;
+		// длинный или без файлов — отдельным сообщением (текст не теряется).
+		const captionWithFile = sendableFiles.length > 0 && !!text && text.length <= 1024;
 		let externalMessageId: any = null;
-		for (const part of parts) {
+
+		for (let i = 0; i < sendableFiles.length; i++) {
+			const f = sendableFiles[i];
 			try {
-				const resp: any = await axios.post(
-					`https://api.telegram.org/bot${token}/sendMessage`,
-					{ chat_id: chatId, text: part },
-					{ timeout: 15000, validateStatus: () => true },
-				);
-				if (resp.data?.ok !== true) {
-					const desc = resp.data?.description || `HTTP ${resp.status}`;
-					this.logger.error(`tg-bot outgoing rejected by Telegram: ${desc}`);
-					return { success: false, message: `Telegram: ${desc}` };
+				const dl = await axios.get(fileUrl(f), {
+					responseType: "arraybuffer", timeout: 30000, maxContentLength: Infinity,
+				});
+				const buffer = Buffer.from(dl.data);
+				const filename = String(f?.name || "file").replace(/[^\w.\-]/g, "_");
+				const caption = i === 0 && captionWithFile ? text : undefined;
+				const r = await this.sendTelegramMedia(token, chatId, buffer, filename, caption);
+				if (!r.ok) {
+					this.logger.error(`tg-bot outgoing media rejected: ${r.error}`);
+					return { success: false, message: `Telegram: ${r.error}` };
 				}
-				externalMessageId = resp.data?.result?.message_id || externalMessageId;
+				externalMessageId = r.messageId || externalMessageId;
 			} catch (err: any) {
-				this.logger.error(`tg-bot outgoing transport error: ${err.message}`);
-				return { success: false, message: `Telegram transport: ${err.message}` };
+				this.logger.error(`tg-bot outgoing media error: ${err.message}`);
+				return { success: false, message: `Telegram media transport: ${err.message}` };
 			}
 		}
-		this.logger.info(`tg-bot outgoing OK chat=${chatId} msg=${externalMessageId} parts=${parts.length}`);
+
+		// Текст: отдельным сообщением, если он не ушёл подписью к файлу.
+		// Лимит Telegram sendMessage 4096 символов — длинный текст шлём частями.
+		if (text && !captionWithFile) {
+			const TG_TEXT_LIMIT = 4096;
+			for (let i = 0; i < text.length; i += TG_TEXT_LIMIT) {
+				const part = text.slice(i, i + TG_TEXT_LIMIT);
+				try {
+					const resp: any = await axios.post(
+						`https://api.telegram.org/bot${token}/sendMessage`,
+						{ chat_id: chatId, text: part },
+						{ timeout: 15000, validateStatus: () => true },
+					);
+					if (resp.data?.ok !== true) {
+						const desc = resp.data?.description || `HTTP ${resp.status}`;
+						this.logger.error(`tg-bot outgoing rejected by Telegram: ${desc}`);
+						return { success: false, message: `Telegram: ${desc}` };
+					}
+					externalMessageId = resp.data?.result?.message_id || externalMessageId;
+				} catch (err: any) {
+					this.logger.error(`tg-bot outgoing transport error: ${err.message}`);
+					return { success: false, message: `Telegram transport: ${err.message}` };
+				}
+			}
+		}
+		this.logger.info(`tg-bot outgoing OK chat=${chatId} msg=${externalMessageId} files=${sendableFiles.length}`);
 
 		// Журнал исходящего — outgoing-записи update_id не имеют, ставим
 		// синтетический ключ, чтобы не конфликтовать с incoming по @@unique.
