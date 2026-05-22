@@ -776,19 +776,37 @@ export class Bitrix24Service extends BaseAdapter<
 		text: string;
 		igChannel: "direct" | "comment";
 		messageId?: string;
+		mediaUrl?: string;
+		mediaName?: string;
 	}): Promise<void> {
 		const fc = await this._csFindOrCreate("ig_client", opts.clientId, "adapter-ig");
+		const payload: Record<string, any> = {
+			client_id: opts.clientId,
+			username: opts.username || undefined,
+			ig_channel: opts.igChannel,
+			message_id: opts.messageId,
+		};
+		// Медиа-вложение: скачиваем у себя (ссылка i2crm живёт недолго) и
+		// кладём наш URL в payload — лента Customer-360 покажет фото/видео
+		// инлайн. Не вышло скачать — остаётся внешняя ссылка.
+		if (opts.mediaUrl) {
+			const stored = await this._storeI2crmMedia(
+				opts.mediaUrl, opts.messageId || "", opts.mediaName || "",
+			);
+			const fileUrl = stored?.localUrl || opts.mediaUrl;
+			payload.file_url = fileUrl;
+			payload.file_name = opts.mediaName || "";
+			if (stored?.mime) {
+				payload.mime_type = stored.mime;
+				if (stored.mime.startsWith("image/")) payload.image_url = fileUrl;
+			}
+		}
 		const body: Record<string, any> = {
 			source: "bridge_ig",
 			eventType: opts.direction === "out" ? "message_out" : "message_in",
 			channel: "IG",
 			summary: (opts.text || "").slice(0, 300) || "(вложение)",
-			payload: {
-				client_id: opts.clientId,
-				username: opts.username || undefined,
-				ig_channel: opts.igChannel,
-				message_id: opts.messageId,
-			},
+			payload,
 		};
 		if (fc?.uuid) {
 			body.customerUuid = fc.uuid;
@@ -799,6 +817,49 @@ export class Bitrix24Service extends BaseAdapter<
 			body.resolveAlias = { type: "ig_client", value: opts.clientId };
 		}
 		await this._eventsIngest(body);
+	}
+
+	// Расширение медиа-файла: из имени, иначе по MIME, иначе .bin.
+	private _igMediaExt(fileName: string, mime: string): string {
+		const m = fileName.match(/\.([a-z0-9]{1,5})$/i);
+		if (m) return "." + m[1].toLowerCase();
+		const map: Record<string, string> = {
+			"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+			"image/webp": ".webp", "video/mp4": ".mp4", "video/quicktime": ".mov",
+			"audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/mp4": ".m4a",
+			"application/pdf": ".pdf",
+		};
+		return map[mime.split(";")[0].trim().toLowerCase()] || ".bin";
+	}
+
+	/**
+	 * Скачивает медиа Instagram (i2crm) в локальное медиа-хранилище.
+	 * Каталог/URL — из env IG_MEDIA_DIR / IG_MEDIA_PUBLIC_URL (по умолчанию
+	 * каталог раздаётся на wa.9wb.ru/media). Идемпотентно по ig_<messageId>.
+	 */
+	private async _storeI2crmMedia(
+		url: string, messageId: string, fileName: string,
+	): Promise<{ localUrl: string; mime: string } | null> {
+		const dir = (process.env.IG_MEDIA_DIR || "").replace(/\/+$/, "");
+		const pub = (process.env.IG_MEDIA_PUBLIC_URL || "").replace(/\/+$/, "");
+		if (!dir || !pub || !messageId) return null;
+		try {
+			const resp = await axios.get(url, {
+				responseType: "arraybuffer", timeout: 30000,
+				maxContentLength: Infinity,
+			});
+			const buf = Buffer.from(resp.data);
+			if (buf.length === 0) return null;
+			const mime = String(resp.headers["content-type"] || "")
+				.split(";")[0].trim().toLowerCase();
+			const fname = `ig_${messageId}${this._igMediaExt(fileName, mime)}`;
+			const fs = await import("node:fs/promises");
+			await fs.writeFile(`${dir}/${fname}`, buf);
+			return { localUrl: `${pub}/${fname}`, mime };
+		} catch (e: any) {
+			this.logger.warn(`i2crm: store media failed: ${e?.message || e}`);
+			return null;
+		}
 	}
 
 	/**
@@ -2519,6 +2580,11 @@ export class Bitrix24Service extends BaseAdapter<
 			text: finalText,
 			igChannel: isComment ? "comment" : "direct",
 			messageId: String(messageId),
+			mediaUrl:
+				type !== "text"
+					? payload?.media_url || payload?.media?.url || undefined
+					: undefined,
+			mediaName: payload?.media?.file_name || undefined,
 		});
 
 		// Сохраняем последний media+comment-id для outgoing /target/feedback type=comment.
