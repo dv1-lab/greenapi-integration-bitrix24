@@ -3208,8 +3208,22 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, message: `cannot parse client_id from chat.id=${rawChatId}` };
 		}
 
-		const text = m.message?.text || "";
+		let text = m.message?.text || "";
 		const files: any[] = (m.message as any)?.files || [];
+
+		// «др …» в начале ответа в чате Instagram-комментария → отправляем
+		// ответ комментатору в ЛИЧКУ (Direct), а не публичным комментарием.
+		// Позволяет отвечать на комментарии в Директ прямо из мобильного
+		// приложения Б24 (вкладка-виджет СК в мобильном недоступна).
+		let replyAsDirect = isDirect;
+		if (isComment) {
+			const marker = text.match(/^\s*др[:\s]+/i);
+			if (marker) {
+				text = text.slice(marker[0].length);
+				replyAsDirect = true;
+				this.logger.info(`i2crm: ответ в чате комментария с пометкой «др» → отправляем в Директ (client=${clientId})`);
+			}
+		}
 
 		// B24 webhook кладёт каждый file с двумя полями: link (короткий ~auth-only)
 		// и downloadLink (public ?FILE_ID=...&SIGN=... — открывается без cookie).
@@ -3225,7 +3239,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// только спустя минуту по серой плашке «не доставлено» в B24. Шлём
 		// alerts заранее системным сообщением в B24-чат открытой линии.
 		const IG_DIRECT_TEXT_LIMIT = 1000;
-		if (isDirect && text && text.length > IG_DIRECT_TEXT_LIMIT) {
+		if (replyAsDirect && text && text.length > IG_DIRECT_TEXT_LIMIT) {
 			const chatId = (m as any)?.im?.chat_id;
 			const alertText =
 				`❌ Не отправлено: Instagram Direct ограничен ${IG_DIRECT_TEXT_LIMIT} символами. ` +
@@ -3265,12 +3279,13 @@ export class Bitrix24Service extends BaseAdapter<
 			domain: "instagram",
 			source: String(accountId),
 			client: String(clientId),
-			type: isDirect ? "direct" : "comment",
+			type: replyAsDirect ? "direct" : "comment",
 		};
-		// Для comment: media (post id) и comment (parent comment id) обязательны
-		// после переключения i2crm на «официальный» способ подключения. Берём из
-		// IgCommentContext (записывается при incoming type=comment).
-		if (isComment) {
+		// Для публичного comment-ответа: media (post id) и comment (parent
+		// comment id) обязательны после перехода i2crm на «официальный» способ.
+		// Берём из IgCommentContext. Для ответа с пометкой «др» (в Директ) эти
+		// поля не нужны — это обычное Direct-сообщение комментатору.
+		if (isComment && !replyAsDirect) {
 			try {
 				const ctx = await (this.prisma as any).igCommentContext.findUnique({
 					where: { clientId: String(clientId) },
@@ -3292,10 +3307,10 @@ export class Bitrix24Service extends BaseAdapter<
 		// `…/im.file.php?FILE_ID=…` без расширения → «файл не поддерживается».
 		// При загрузке байтов мы сами задаём имя (с расширением) и Content-Type.
 		// На каждое фото — отдельный вызов; текст идёт вместе с первым.
-		const photoFiles: any[] = isDirect
+		const photoFiles: any[] = replyAsDirect
 			? files.filter((f) => fileUrl(f).length > 0)
-			: []; // ответ на Instagram-комментарий — только текст
-		if (files.length > 0 && isDirect && photoFiles.length === 0) {
+			: []; // публичный ответ на Instagram-комментарий — только текст
+		if (files.length > 0 && replyAsDirect && photoFiles.length === 0) {
 			this.logger.warn(`i2crm outgoing: files.length=${files.length} но ссылка не извлечена (link/downloadLink пустые)`);
 		}
 
