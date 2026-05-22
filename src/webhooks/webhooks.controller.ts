@@ -147,7 +147,7 @@ export class WebhooksController {
 			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
 			return;
 		}
-		const body = (req.body || {}) as { phone?: string; igClientId?: string };
+		const body = (req.body || {}) as { phone?: string; igClientId?: string; tgChatId?: string; maxChatId?: string };
 		try {
 			const result = await this.bitrix24Service.getContactName(body);
 			res.json(result);

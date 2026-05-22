@@ -3885,12 +3885,20 @@ export class Bitrix24Service extends BaseAdapter<
 	// новое имя через max 10 минут (а если был direct refresh — мгновенно).
 	private contactNameCache = new Map<string, { name: string | null; expires: number; entityId?: number | null; link?: string | null; igUsername?: string | null }>();
 
-	async getContactName(input: { phone?: string; igClientId?: string }): Promise<{ name: string | null; source: string | null; entityId: number | null; link: string | null; igUsername?: string | null }> {
+	async getContactName(input: { phone?: string; igClientId?: string; tgChatId?: string; maxChatId?: string }): Promise<{ name: string | null; source: string | null; entityId: number | null; link: string | null; igUsername?: string | null }> {
 		const phone = (input.phone || "").trim();
 		const igClientId = (input.igClientId || "").trim();
+		const tgChatId = (input.tgChatId || "").trim();
+		const maxChatId = (input.maxChatId || "").trim();
 		const empty = { name: null, source: null, entityId: null, link: null, igUsername: null };
-		if (!phone && !igClientId) return empty;
-		const key = phone ? `phone:${phone}` : `ig:${igClientId}`;
+		if (!phone && !igClientId && !tgChatId && !maxChatId) return empty;
+		const key = phone
+			? `phone:${phone}`
+			: igClientId
+				? `ig:${igClientId}`
+				: tgChatId
+					? `tg:${tgChatId}`
+					: `max:${maxChatId}`;
 		const cached: any = this.contactNameCache.get(key);
 		if (cached && cached.expires > Date.now()) {
 			return {
@@ -3977,6 +3985,33 @@ export class Bitrix24Service extends BaseAdapter<
 								if (u) { igUsername = u; break; }
 							}
 						}
+					}
+				}
+			}
+			// Telegram/MAX: client id не телефон — ищем по UF_CRM_TG/MAX_CHAT_ID.
+			if (!name && (tgChatId || maxChatId)) {
+				const chatIdUf = maxChatId ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+				const chatIdValue = maxChatId || tgChatId;
+				const cList: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+					filter: { [chatIdUf]: chatIdValue },
+					select: ["ID", "NAME", "LAST_NAME"],
+				});
+				if (Array.isArray(cList) && cList.length > 0) {
+					name = buildName(cList[0]);
+					source = "contact";
+					entityId = parseInt(cList[0].ID, 10);
+					link = `https://${portalDomain}/crm/contact/details/${entityId}/`;
+				}
+				if (!name) {
+					const lList: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+						filter: { [chatIdUf]: chatIdValue },
+						select: ["ID", "NAME", "LAST_NAME"],
+					});
+					if (Array.isArray(lList) && lList.length > 0) {
+						name = buildName(lList[0]);
+						source = "lead";
+						entityId = parseInt(lList[0].ID, 10);
+						link = `https://${portalDomain}/crm/lead/details/${entityId}/`;
 					}
 				}
 			}
