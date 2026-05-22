@@ -2408,12 +2408,16 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const portalDomain = user.portalDomain;
 
-		// Лид/контакт. Телефона у Telegram-бот-клиента нет — матч по chatId
-		// через UF_CRM_TG_CHAT_ID (channelLabel="Telegram" уже поддержан в
-		// ensureOpenLeadForPhone). Так новый диалог садится на существующего
-		// клиента — оператор видит прошлую переписку в карточке.
+		// Резолвим контакт клиента по UF_CRM_TG_CHAT_ID (channelLabel="Telegram").
+		// skipLeadCreation=true — лид создаёт сама открытая линия B24, свой лид
+		// не плодим. Контакт привяжем к лиду сессии ниже (backfillTgBotContactLink):
+		// B24 матчит открытые линии по телефону, а у Telegram-бота его нет.
+		let contactId: number | undefined;
 		try {
-			await this.ensureOpenLeadForPhone(portalDomain, "", clientName, lineId, "Telegram", chatId);
+			const leadResult = await this.ensureOpenLeadForPhone(
+				portalDomain, "", clientName, lineId, "Telegram", chatId, true,
+			);
+			contactId = leadResult?.contactId;
 		} catch (e: any) {
 			this.logger.warn(`tg-bot: ensureLead failed (non-fatal): ${e.message}`);
 		}
@@ -2485,6 +2489,13 @@ export class Bitrix24Service extends BaseAdapter<
 			});
 		} catch { /* non-fatal — журнал не критичен для доставки */ }
 
+		// Привязка контакта к лиду сессии — B24 матчит открытые линии по
+		// телефону, у Telegram-бота его нет, поэтому связываем сами. Фоном.
+		if (contactId) {
+			this.backfillTgBotContactLink(portalDomain, chatId, contactId)
+				.catch((e) => this.logger.warn(`tg-bot: backfill link failed (non-fatal): ${e.message}`));
+		}
+
 		// Зеркало в TG-супергруппу «TG begovoy_bot» — не блокирует доставку.
 		this.tgBotMirror.mirrorIncoming({
 			chatId, clientName, username, text, hasMedia,
@@ -2492,6 +2503,61 @@ export class Bitrix24Service extends BaseAdapter<
 		}).catch((e) => this.logger.warn(`tg-bot: mirror incoming failed (non-fatal): ${e.message}`));
 
 		return { success: true };
+	}
+
+	// После imconnector.send.messages B24 асинхронно создаёт сессию открытой
+	// линии и лид. Открытые линии B24 матчат клиента с CRM по телефону — у
+	// Telegram-бота его нет, поэтому B24 заводит лид без контакта. Этот метод
+	// находит лид сессии по USER_CODE и привязывает уже существующий контакт
+	// клиента (резолвнут ранее по UF_CRM_TG_CHAT_ID) — тогда оператор видит
+	// карточку клиента и всю историю. Идёт с retry: сессия создаётся с лагом.
+	private async backfillTgBotContactLink(
+		portalDomain: string, chatId: string, contactId: number,
+	): Promise<void> {
+		const userCode = `tgbot_${chatId}`;
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		for (let attempt = 1; attempt <= 6; attempt++) {
+			await sleep(attempt === 1 ? 1500 : 2000);
+			try {
+				const activities: any = await this.callBitrix24Method(portalDomain, "crm.activity.list", {
+					filter: { PROVIDER_ID: "IMOPENLINES_SESSION" },
+					select: ["ID", "OWNER_ID", "OWNER_TYPE_ID", "PROVIDER_PARAMS"],
+					order: { ID: "DESC" },
+				});
+				const list = Array.isArray(activities) ? activities : [];
+				const act = list.find((a: any) => {
+					const code = a?.PROVIDER_PARAMS?.USER_CODE;
+					return typeof code === "string" && code.includes(userCode);
+				});
+				if (!act) {
+					this.logger.debug(`tg-bot: backfill attempt ${attempt}/6 — no session activity for ${userCode}`);
+					continue;
+				}
+				const ownerType = parseInt(act.OWNER_TYPE_ID, 10);
+				const ownerId = parseInt(act.OWNER_ID, 10);
+				if (ownerType !== 1) {
+					// Сессия села на сделку/контакт — отдельная привязка не нужна.
+					return;
+				}
+				const lead: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: ownerId });
+				const fields: Record<string, any> = {};
+				if (!lead?.CONTACT_ID) fields.CONTACT_ID = contactId;
+				if (!lead?.UF_CRM_TG_CHAT_ID) fields.UF_CRM_TG_CHAT_ID = chatId;
+				// B24 требует Yandex Metrika ClientId при смене стадии — у TG-лида
+				// его нет, ставим "-", иначе оператор заблокирован на смене стадии.
+				if (!lead?.UF_CRM_NF_YM_CLIENT_ID) fields.UF_CRM_NF_YM_CLIENT_ID = "-";
+				if (Object.keys(fields).length > 0) {
+					await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+						id: ownerId, fields,
+					});
+					this.logger.info(`tg-bot: backfill lead ${ownerId} → contact ${contactId} (${Object.keys(fields).join(",")})`);
+				}
+				return;
+			} catch (e: any) {
+				this.logger.warn(`tg-bot: backfill attempt ${attempt} failed: ${e.message}`);
+			}
+		}
+		this.logger.warn(`tg-bot: backfill — session activity not found for ${userCode} after 6 attempts`);
 	}
 
 	// Incoming Instagram-сообщение от i2crm Public API.
