@@ -13,6 +13,7 @@ import {
 } from "@green-api/greenapi-integration";
 import { Bitrix24Transformer } from "./bitrix24.transformer";
 import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
+import { TgBotMirrorService } from "./tg-bot-mirror.service";
 import { MediaCacheService } from "./media-cache.service";
 import { PrismaService } from "../prisma/prisma.service";
 import {
@@ -96,6 +97,7 @@ export class Bitrix24Service extends BaseAdapter<
 		protected readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
+		private readonly tgBotMirror: TgBotMirrorService,
 		private readonly mediaCache: MediaCacheService,
 	) {
 		super(bitrix24Transformer, prisma);
@@ -2385,7 +2387,10 @@ export class Bitrix24Service extends BaseAdapter<
 			});
 		} catch { /* non-fatal — журнал не критичен для доставки */ }
 
-		// Зеркало в TG-супергруппу «TG begovoy_bot» — Этап 3.
+		// Зеркало в TG-супергруппу «TG begovoy_bot» — не блокирует доставку.
+		this.tgBotMirror.mirrorIncoming({ chatId, clientName, username, text, hasMedia })
+			.catch((e) => this.logger.warn(`tg-bot: mirror incoming failed (non-fatal): ${e.message}`));
+
 		return { success: true };
 	}
 
@@ -3929,6 +3934,10 @@ export class Bitrix24Service extends BaseAdapter<
 		} catch (e: any) {
 			this.logger.warn(`tg-bot: outgoing TgBotEventLog create failed: ${e.message}`);
 		}
+
+		// Зеркало ответа оператора в топик клиента — не блокирует.
+		this.tgBotMirror.mirrorOutgoing({ chatId, text })
+			.catch((e) => this.logger.warn(`tg-bot: mirror outgoing failed (non-fatal): ${e.message}`));
 
 		return {
 			success: true,
