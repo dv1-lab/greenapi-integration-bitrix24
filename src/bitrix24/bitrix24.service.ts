@@ -2180,6 +2180,33 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	/** Контекст-строка для B24 из i2crm `quoted_message`: на что отвечает клиент.
+	 *  В Instagram Direct сообщение бывает (а) холодным — клиент просто написал,
+	 *  тогда quoted_message=null и контекста нет; (б) ответом на сторис или на
+	 *  более раннее сообщение — тогда i2crm кладёт исходник в quoted_message.
+	 *  i2crm может прислать его строкой или объектом — обрабатываем оба варианта
+	 *  без жёстких допущений о структуре; полный payload журналируется в
+	 *  I2crmEventLog, по нему можно уточнить формат при появлении живого примера. */
+	private formatI2crmQuoted(quoted: any): string {
+		if (!quoted) return "";
+		if (typeof quoted === "string") {
+			const s = quoted.trim();
+			return s ? `↩️ В ответ на: ${s}` : "";
+		}
+		if (typeof quoted === "object") {
+			const qText = String(quoted.text || quoted.caption || "").trim();
+			const qUrl = String(
+				quoted.url || quoted.media_url || quoted.src || quoted.story_url || "",
+			).trim();
+			const qType = String(quoted.type || "").trim();
+			const isStory = /story|stories/i.test(qType) || /story|stories/i.test(qUrl);
+			const label = isStory ? "сторис" : "сообщение";
+			const parts = [qText, qUrl].filter(Boolean);
+			return `↩️ В ответ на ${label}${parts.length ? ": " + parts.join(" ") : ""}`;
+		}
+		return "";
+	}
+
 	// Incoming Instagram-сообщение от i2crm Public API.
 	// Линии 18 (Direct) и 22 (Comment) уже зарегистрированы за CONNECTOR=i2crm
 	// в B24 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Отправляем через imconnector.send.messages
@@ -2285,9 +2312,14 @@ export class Bitrix24Service extends BaseAdapter<
 		const isComment = channel === "instcom";
 		// src — основной URL поста в i2crm payload (для instcom). post_url/media_url — fallback.
 		const igPostUrl = isComment ? (payload?.src || payload?.post_url || payload?.media_url || "") : "";
+		// Для Direct: на что отвечает клиент (ответ на сторис / на сообщение).
+		// quoted_message=null у холодного сообщения — тогда контекста нет, это норма.
+		const quotedNote = !isComment ? this.formatI2crmQuoted(payload?.quoted_message) : "";
 		const finalText = isComment
 			? `[Instagram комментарий${igPostUrl ? " к посту " + igPostUrl : ""}]\n${text}`
-			: text;
+			: quotedNote
+				? `${quotedNote}\n${text}`
+				: text;
 
 		const userKey = `i2crm_ig_${clientId}`;
 		const ts = datetime ? Math.floor(new Date(datetime).getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -2307,12 +2339,12 @@ export class Bitrix24Service extends BaseAdapter<
 				id: userKey,
 				name: clientName,
 				// B24 рендерит chat.url как «Ссылка на исходный пост: <url>» в чате
-				// открытой линии. Для IG-comment — URL поста (igPostUrl), для IG-direct —
-				// URL профиля клиента. Раньше для обоих был профиль — для коммента это
-				// было неправильно (теряли контекст какой пост обсуждается).
-				url: isComment && igPostUrl
-					? igPostUrl
-					: username ? `https://instagram.com/${username}` : undefined,
+				// открытой линии. Это корректно только для IG-comment — есть реальный
+				// пост, который клиент комментирует. Для IG-direct исходного поста нет,
+				// поэтому chat.url НЕ ставим: иначе B24 показывал «Ссылка на исходный
+				// пост: <профиль клиента>», выдавая профиль за пост и сбивая оператора.
+				// Кликабельный профиль клиента остаётся в user.url и в UF_CRM_INSTAGRAM.
+				url: isComment && igPostUrl ? igPostUrl : undefined,
 			},
 			extra: { crm: "Y" },
 		};
