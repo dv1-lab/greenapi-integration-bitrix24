@@ -13,6 +13,7 @@ import {
 } from "@green-api/greenapi-integration";
 import { Bitrix24Transformer } from "./bitrix24.transformer";
 import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
+import { MediaCacheService } from "./media-cache.service";
 import { PrismaService } from "../prisma/prisma.service";
 import {
 	Bitrix24MessagePayload,
@@ -95,6 +96,7 @@ export class Bitrix24Service extends BaseAdapter<
 		protected readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
+		private readonly mediaCache: MediaCacheService,
 	) {
 		super(bitrix24Transformer, prisma);
 		// Cleanup expired OutgoingMessage записей раз в час. Делаем через
@@ -1985,10 +1987,38 @@ export class Bitrix24Service extends BaseAdapter<
 			};
 
 			if (message.attachments && message.attachments.length > 0) {
-				messagePayload.message.files = message.attachments.map(attachment => ({
-					url: attachment.url,
-					name: attachment.fileName || "attachment",
-				}));
+				const appUrl = (this.configService.get<string>("APP_URL") || "").replace(/\/+$/, "");
+				const files: { url: string; name: string }[] = [];
+				for (const attachment of message.attachments) {
+					let url = attachment.url;
+					const name = attachment.fileName || "attachment";
+					// B24 не может скачать медиа-URL Telegram/MAX-шардов Green API
+					// (<shard>.api.green-api.com/download/...) — висит ~20 c и
+					// отвечает «Переданы не все необходимые данные». Скачиваем файл
+					// сами и отдаём B24 ссылку через social.9wb.ru (его B24 тянет).
+					if (url && /\.api\.green-api\.com\//i.test(url) && appUrl) {
+						try {
+							const resp = await axios.get(url, {
+								responseType: "arraybuffer",
+								timeout: 25000,
+								maxContentLength: 50 * 1024 * 1024,
+							});
+							const ct = String(
+								resp.headers["content-type"] || attachment.type || "application/octet-stream",
+							);
+							const mediaId = this.mediaCache.store(Buffer.from(resp.data), ct);
+							const ext = (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || "bin").toLowerCase();
+							url = `${appUrl}/media/${mediaId}.${ext}`;
+							this.logger.info(`Медиа Green API проксировано для B24: ${url}`);
+						} catch (e: any) {
+							this.logger.warn(
+								`Не удалось скачать медиа Green API (${attachment.url}): ${e.message} — отдаём B24 исходный URL`,
+							);
+						}
+					}
+					files.push({ url, name });
+				}
+				messagePayload.message.files = files;
 
 				this.logger.info(`Adding ${message.attachments.length} attachment(s) to Bitrix24 message`, {
 					files: messagePayload.message.files,
