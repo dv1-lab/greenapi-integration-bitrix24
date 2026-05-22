@@ -3211,17 +3211,17 @@ export class Bitrix24Service extends BaseAdapter<
 		let text = m.message?.text || "";
 		const files: any[] = (m.message as any)?.files || [];
 
-		// «др …» в начале ответа в чате Instagram-комментария → отправляем
+		// «!» в начале ответа в чате Instagram-комментария → отправляем
 		// ответ комментатору в ЛИЧКУ (Direct), а не публичным комментарием.
 		// Позволяет отвечать на комментарии в Директ прямо из мобильного
 		// приложения Б24 (вкладка-виджет СК в мобильном недоступна).
 		let replyAsDirect = isDirect;
 		if (isComment) {
-			const marker = text.match(/^\s*др[:\s]+/i);
+			const marker = text.match(/^\s*!\s*/);
 			if (marker) {
 				text = text.slice(marker[0].length);
 				replyAsDirect = true;
-				this.logger.info(`i2crm: ответ в чате комментария с пометкой «др» → отправляем в Директ (client=${clientId})`);
+				this.logger.info(`i2crm: ответ в чате комментария с пометкой «!» → отправляем в Директ (client=${clientId})`);
 			}
 		}
 
