@@ -7,9 +7,10 @@
 [`GREENAPI_CHANNELS.md`](./GREENAPI_CHANNELS.md),
 [`INSTAGRAM_FLOW.md`](./INSTAGRAM_FLOW.md),
 [`CUSTOMER360.md`](./CUSTOMER360.md),
-[`TASK_TRACKER.md`](./TASK_TRACKER.md).
+[`TASK_TRACKER.md`](./TASK_TRACKER.md),
+[`TELEGRAM_BOT_FLOW.md`](./TELEGRAM_BOT_FLOW.md).
 
-Последнее обновление: 2026-05-20.
+Последнее обновление: 2026-05-23.
 
 ---
 
@@ -90,6 +91,8 @@ customer-service и task-tracker — соседние самостоятельн
 - виджет «написать первым» в карточке клиента;
 - ответ на Instagram-комментарий в Direct по пометке `!` в начале сообщения
   (работает из мобильного B24 и из Telegram-топика — см. `INSTAGRAM_FLOW.md` §6а);
+- Telegram-бот `@begovoy_bot` подключён напрямую через Telegram Bot API
+  (не Green API, не i2crm) — линия 8, своё зеркало; см. `TELEGRAM_BOT_FLOW.md`;
 - автоответ клиенту в нерабочее время (вне 10:00–19:00 МСК) на всех каналах;
 - события CRM B24 (изменение лида/сделки) → в Customer-360;
 - мониторинг и само-восстановление открытых линий.
@@ -149,6 +152,7 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
 | Тип группы | Сколько | Что в ней | Кто ведёт |
 |---|---|---|---|
 | **Зеркала каналов** (Max 3354, TG 3354, WA-группы, IG-группы) | по группе на инстанс | живая переписка с клиентами, топик на чат | bridge (`1begovoyconnectbot`), роль «TG-зеркало» |
+| **«TG begovoy_bot»** (зеркало Telegram-бота) | одна | переписка `@begovoy_bot`, топик на клиента | **adapter** (`TgBotMirrorService`), бот `1begovoyconnectbot` |
 | **«Клиенты 1Б»** (Customer-360 / KBD) | одна | топик на клиента: карточка + лента всех событий по нему | bridge (`1begovoyconnectbot`), роль «KBD-лента» |
 | **«Тех. поддержка»** (трекер задач) | одна | внутренние техзадачи компании, топик на задачу | **сервис task-tracker** (`@tasktrackerdv_bot`) — отдельный бот |
 
@@ -167,6 +171,9 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
   отправка (`sendMessage`) — из adapter'а. По инстансу на номер.
 - **i2crm** — шлюз к Instagram. Вебхуки идут **прямо в adapter**
   (`/webhooks/i2crm`), отправка — `POST /target/feedback`.
+- **Telegram Bot API** — клиентский бот `@begovoy_bot` подключён напрямую:
+  вебхуки идут **прямо в adapter** (`/webhooks/telegram-bot`), отправка — через
+  `api.telegram.org`. Не через Green API. См. `TELEGRAM_BOT_FLOW.md`.
 
 ---
 

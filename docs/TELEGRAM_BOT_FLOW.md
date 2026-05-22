@@ -35,10 +35,15 @@ Telegram Bot API → webhook POST /webhooks/telegram-bot
 handleTelegramBotIncoming (bitrix24.service.ts)
    ├─ журнал в TgBotEventLog (status=pending → sent)
    ├─ медиа: getFile → скачать → MediaCacheService → ссылка social.9wb.ru/media/…
-   ├─ ensureOpenLeadForPhone(channelLabel="Telegram") — матч по UF_CRM_TG_CHAT_ID
+   ├─ ensureOpenLeadForPhone("Telegram", skipLeadCreation) — резолв контакта по UF_CRM_TG_CHAT_ID
    ├─ imconnector.send.messages в линию 8 (chat.id = tgbot_<chatId>)
+   ├─ backfillTgBotContactLink — привязка лида сессии к контакту клиента
    └─ зеркало TgBotMirrorService → топик клиента в супергруппе
 ```
+
+B24 матчит открытые линии с CRM по телефону — у Telegram-бота его нет,
+поэтому `backfillTgBotContactLink` после старта сессии сам находит лид по
+`USER_CODE` и проставляет `CONTACT_ID` (контакт резолвится по `UF_CRM_TG_CHAT_ID`).
 
 B24 не может скачивать `api.telegram.org/file/...` (в URL токен бота) —
 поэтому медиа проксируется через `social.9wb.ru/media/…` (MediaCacheService,
@@ -82,9 +87,8 @@ curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 
 - **`/nnn` в супергруппе** не обрабатывается — нужна доработка wa-tg-bridge
   (он слушает TG-группы и пишет timeline-comment в лид).
-- **backfill UF_CRM_TG_CHAT_ID** на лидах новых клиентов: `ensureOpenLeadForPhone`
-  пишет UF только на найденный контакт; для нового лида UF не проставляется
-  (влияет на резолв в KBD-карточке). Аналог `backfillIgUfFields` не сделан.
 - **welcome-текст линии 8** содержит «отправьте "+"» — артефакт старого
-  AI-flow, стоит обновить в настройках линии B24.
+  AI-flow (бот раньше был AI-чат-ботом), стоит обновить в настройках линии B24.
 - Стикеры Telegram не релеятся (.tgs/webm) — уходят как «[вложение]».
+- Совсем новый клиент (контакта в B24 ещё нет) ведётся как лид без контакта —
+  это штатно для открытых линий; контакт появится при конвертации лида.
