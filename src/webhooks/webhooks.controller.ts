@@ -253,6 +253,35 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: резолвит лид/контакт B24 по идентификаторам клиента
+	// Customer-360 (uuid / tgChatId / maxChatId / phone). Используется
+	// KBD-карточкой wa-tg-bridge для кликабельных ссылок. Auth: X-Hint-Secret.
+	@Post("internal/b24-entities")
+	@HttpCode(HttpStatus.OK)
+	async b24Entities(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			uuid?: string; phone?: string; tgChatId?: string; maxChatId?: string;
+		};
+		try {
+			const result = await this.bitrix24Service.resolveB24Entities({
+				uuid: body.uuid,
+				phone: body.phone,
+				tgChatId: body.tgChatId,
+				maxChatId: body.maxChatId,
+			});
+			res.json(result);
+		} catch (error: any) {
+			this.logger.warn(`b24-entities failed: ${error.message}`);
+			res.status(HttpStatus.OK).json({ leadId: null, contactId: null });
+		}
+	}
+
 	// Internal endpoint: установить PHOTO у B24-контакта/лида (если поле пустое).
 	// Используется avatar_sync воркером wa-tg-bridge: он скачивает аватарку
 	// из мессенджера и шлёт base64 сюда. Auth: X-Hint-Secret.

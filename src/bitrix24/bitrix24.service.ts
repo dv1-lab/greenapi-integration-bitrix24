@@ -1648,6 +1648,76 @@ export class Bitrix24Service extends BaseAdapter<
 		return { ok: posted > 0, posted, entities };
 	}
 
+	/**
+	 * Резолвит лид/контакт B24 «на лету» по идентификаторам клиента
+	 * Customer-360. Используется KBD-карточкой wa-tg-bridge: aliases
+	 * b24_lead/b24_contact часто отсутствуют (особенно у TG-клиентов),
+	 * поэтому ищем сущности напрямую в B24.
+	 * Возвращает первый найденный лид и первый найденный контакт.
+	 */
+	async resolveB24Entities(input: {
+		uuid?: string; phone?: string; tgChatId?: string; maxChatId?: string;
+	}): Promise<{ leadId: number | null; contactId: number | null }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { leadId: null, contactId: null };
+
+		const { uuid, phone, tgChatId, maxChatId } = input;
+
+		// Фильтры в порядке приоритета: uuid → tgChatId → maxChatId.
+		const filters: Record<string, string>[] = [];
+		if (uuid) filters.push({ "=UF_CRM_PB_CUSTOMER_UUID": uuid });
+		if (tgChatId) filters.push({ "UF_CRM_TG_CHAT_ID": tgChatId });
+		if (maxChatId) filters.push({ "UF_CRM_MAX_CHAT_ID": maxChatId });
+
+		const findByList = async (
+			method: "crm.lead.list" | "crm.contact.list",
+		): Promise<number | null> => {
+			for (const filter of filters) {
+				try {
+					const rows: any = await this.callBitrix24Method(
+						portalDomain, method,
+						{ filter, select: ["ID"], order: { ID: "DESC" } },
+						undefined, 0, "customer360",
+					);
+					if (Array.isArray(rows) && rows.length > 0) {
+						const id = Number(rows[0].ID);
+						if (id) return id;
+					}
+				} catch (e: any) {
+					this.logger.warn(`resolveB24Entities ${method} failed: ${e.message}`);
+				}
+			}
+			return null;
+		};
+
+		const findByPhone = async (
+			entityType: "LEAD" | "CONTACT",
+		): Promise<number | null> => {
+			if (!phone) return null;
+			try {
+				const result: any = await this.callBitrix24Method(
+					portalDomain, "crm.duplicate.findbycomm",
+					{ entity_type: entityType, type: "PHONE", values: [phone] },
+					undefined, 0, "customer360",
+				);
+				const id = Number(result?.[entityType]?.[0]);
+				if (id) return id;
+			} catch (e: any) {
+				this.logger.warn(`resolveB24Entities findbycomm ${entityType} failed: ${e.message}`);
+			}
+			return null;
+		};
+
+		let leadId = await findByList("crm.lead.list");
+		if (leadId === null) leadId = await findByPhone("LEAD");
+
+		let contactId = await findByList("crm.contact.list");
+		if (contactId === null) contactId = await findByPhone("CONTACT");
+
+		return { leadId, contactId };
+	}
+
 	// ===== Автоответ в нерабочее время (10:00–19:00 МСК) ===============
 
 	/** true — сейчас нерабочее время (вне 10:00–19:00 по Москве). */
