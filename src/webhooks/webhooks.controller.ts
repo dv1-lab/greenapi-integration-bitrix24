@@ -120,6 +120,34 @@ export class WebhooksController {
 		}
 	}
 
+	// Telegram Bot (@begovoy_bot) — webhook от Telegram Bot API. Бот подключён
+	// напрямую (не Green API, не i2crm). Update → handleTelegramBotIncoming →
+	// открытая линия B24. Защита: secret_token, который мы задаём при setWebhook,
+	// Telegram присылает его в заголовке X-Telegram-Bot-Api-Secret-Token.
+	@Post("telegram-bot")
+	@HttpCode(HttpStatus.OK)
+	async handleTelegramBotWebhook(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.TG_BOT_WEBHOOK_SECRET || "";
+		const given = String(req.headers["x-telegram-bot-api-secret-token"] || "");
+		if (expected && given !== expected) {
+			this.logger.warn("[telegram-bot webhook] rejected: bad secret token");
+			// 200, чтобы Telegram не ретраил мусорный запрос.
+			res.status(HttpStatus.OK).json({ ok: true });
+			return;
+		}
+		// Сразу 200 — Telegram ждёт быстрый ответ, иначе ретраит и копит очередь.
+		res.status(HttpStatus.OK).json({ ok: true });
+		const update = req.body || {};
+		try {
+			const result = await this.bitrix24Service.handleTelegramBotIncoming(update);
+			if (!result.success) {
+				this.logger.warn(`[telegram-bot webhook] skipped: ${result.reason}`);
+			}
+		} catch (error: any) {
+			this.logger.error("[telegram-bot webhook] handler error", error);
+		}
+	}
+
 	@Post("bitrix24")
 	@UseGuards(Bitrix24WebhookGuard)
 	async handleBitrix24ConnectorWebhook(@Body() body: Bitrix24WebhookDto, @Res() res: Response): Promise<void> {

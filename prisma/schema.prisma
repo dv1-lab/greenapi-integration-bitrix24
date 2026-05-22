@@ -195,3 +195,28 @@ model OffHoursReply {
   lastRepliedAt DateTime
   createdAt     DateTime @default(now())
 }
+
+// Журнал сообщений Telegram-бота (@begovoy_bot) — клиентский канал,
+// подключённый напрямую через Telegram Bot API (не Green API, не i2crm).
+// Симметрично I2crmEventLog: каждый incoming-update и outgoing-сообщение
+// журналируется здесь — это и «история» переписки, и страховка для replay,
+// если B24 временно недоступен (status='pending').
+// updateId уникален в пределах бота — дедуп ретраев Telegram (upsert по нему).
+// outgoing-записи updateId не имеют — туда кладём синтетический "out_<ts>_<msgId>".
+model TgBotEventLog {
+  id         BigInt   @id @default(autoincrement())
+  updateId   String   @db.VarChar(48)   // telegram update_id (in) / out_<ts>_<id> (out)
+  chatId     String   @db.VarChar(40)   // telegram chat id клиента
+  messageId  String?  @db.VarChar(40)   // telegram message_id
+  direction  String   @db.VarChar(8)    // in / out
+  payload    String   @db.Text          // полный JSON update / outgoing
+  status     String   @default("pending") @db.VarChar(16)  // pending / sent / failed
+  attempts   Int      @default(0)
+  lastError  String?  @db.Text
+  receivedAt DateTime @default(now())
+  sentAt     DateTime?
+
+  @@unique([updateId])
+  @@index([status, receivedAt])
+  @@index([chatId])
+}

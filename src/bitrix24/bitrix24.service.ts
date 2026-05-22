@@ -2207,6 +2207,127 @@ export class Bitrix24Service extends BaseAdapter<
 		return "";
 	}
 
+	// ── Telegram Bot (@begovoy_bot) — клиентский канал ───────────────────────
+	// Бот подключён напрямую через Telegram Bot API (не Green API, не i2crm).
+	// Входящий Update → отдельная открытая линия B24 через imconnector.send.messages.
+	// Журнал TgBotEventLog — это и «история» переписки, и страховка replay при
+	// недоступности B24. Медиа (фото/видео/файлы) — Этап 4, пока релеится текст.
+	// См. docs/TELEGRAM_BOT_FLOW.md.
+	async handleTelegramBotIncoming(update: any): Promise<{ success: boolean; reason?: string }> {
+		const updateId = update?.update_id;
+		if (updateId === undefined || updateId === null) {
+			return { success: false, reason: "no update_id" };
+		}
+
+		// Клиентский Direct — это обычное message в личке. edited_message,
+		// my_chat_member, callback_query и пр. игнорируем (success=true, чтобы
+		// Telegram не ретраил).
+		const msg = update?.message;
+		if (!msg) return { success: true, reason: "ignored: not a message update" };
+		if (msg.chat?.type !== "private") return { success: true, reason: "ignored: non-private chat" };
+		if (msg.from?.is_bot) return { success: true, reason: "ignored: bot sender" };
+
+		const chatId = String(msg.chat?.id ?? msg.from?.id ?? "");
+		const messageId = msg.message_id;
+		if (!chatId || messageId === undefined) {
+			return { success: false, reason: "missing chatId or message_id" };
+		}
+
+		const first = String(msg.from?.first_name || "").trim();
+		const last = String(msg.from?.last_name || "").trim();
+		const username = String(msg.from?.username || "").trim();
+		const clientName = [first, last].filter(Boolean).join(" ")
+			|| (username ? `@${username}` : `TG_${chatId}`);
+
+		const text = String(msg.text || msg.caption || "");
+		const hasMedia = !!(msg.photo || msg.document || msg.video || msg.voice
+			|| msg.audio || msg.video_note || msg.sticker);
+
+		// Журнал ДО доставки в B24 — если B24 недоступен, запись остаётся
+		// pending и доставляется позже через /webhooks/internal/tg-bot-replay.
+		// updateId уникален в пределах бота — upsert защищает от ретраев Telegram.
+		try {
+			await (this.prisma as any).tgBotEventLog.upsert({
+				where: { updateId: String(updateId) },
+				create: {
+					updateId: String(updateId), chatId, messageId: String(messageId),
+					direction: "in", payload: JSON.stringify(update), status: "pending",
+				},
+				update: { payload: JSON.stringify(update) },
+			});
+		} catch (e: any) {
+			this.logger.warn(`tg-bot: TgBotEventLog upsert failed (non-fatal): ${e.message}`);
+		}
+
+		const lineId = Number(this.configService.get<string>("TG_BOT_LINE_ID"));
+		if (!lineId || !Number.isFinite(lineId)) {
+			this.logger.error(`tg-bot: TG_BOT_LINE_ID not configured in .env`);
+			return { success: false, reason: "TG_BOT_LINE_ID not configured" };
+		}
+
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const user = users[0];
+		if (!user) {
+			this.logger.error(`tg-bot: no Bitrix24 user in DB to dispatch incoming`);
+			return { success: false, reason: "no-user" };
+		}
+		const portalDomain = user.portalDomain;
+
+		// Лид/контакт. Телефона у Telegram-бот-клиента нет — матч по chatId
+		// через UF_CRM_TG_CHAT_ID (channelLabel="Telegram" уже поддержан в
+		// ensureOpenLeadForPhone). Так новый диалог садится на существующего
+		// клиента — оператор видит прошлую переписку в карточке.
+		try {
+			await this.ensureOpenLeadForPhone(portalDomain, "", clientName, lineId, "Telegram", chatId);
+		} catch (e: any) {
+			this.logger.warn(`tg-bot: ensureLead failed (non-fatal): ${e.message}`);
+		}
+
+		if (hasMedia && !text) {
+			this.logger.info(`tg-bot: media-only message chat=${chatId} msg=${messageId} — медиа-релей в Этапе 4`);
+		}
+
+		const userKey = `tgbot_${chatId}`;
+		const ts = msg.date ? Number(msg.date) : Math.floor(Date.now() / 1000);
+
+		const messagePayload: any = {
+			user: {
+				id: userKey,
+				name: clientName,
+				url: username ? `https://t.me/${username}` : undefined,
+			},
+			message: {
+				id: String(messageId),
+				date: ts,
+				text: text || (hasMedia ? "[вложение]" : "[сообщение]"),
+			},
+			chat: { id: userKey, name: clientName },
+			extra: { crm: "Y" },
+		};
+
+		try {
+			await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+				CONNECTOR: "social_connector",
+				LINE: lineId,
+				MESSAGES: [messagePayload],
+			});
+			this.logger.info(`tg-bot: sent to B24 line=${lineId} chat=${chatId} msg=${messageId}`);
+		} catch (err: any) {
+			this.logger.error(`tg-bot: imconnector.send.messages failed: ${err.message}`);
+			return { success: false, reason: err.message };
+		}
+
+		try {
+			await (this.prisma as any).tgBotEventLog.update({
+				where: { updateId: String(updateId) },
+				data: { status: "sent", sentAt: new Date() },
+			});
+		} catch { /* non-fatal — журнал не критичен для доставки */ }
+
+		// Зеркало в TG-супергруппу «TG begovoy_bot» — Этап 3.
+		return { success: true };
+	}
+
 	// Incoming Instagram-сообщение от i2crm Public API.
 	// Линии 18 (Direct) и 22 (Comment) уже зарегистрированы за CONNECTOR=i2crm
 	// в B24 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Отправляем через imconnector.send.messages
