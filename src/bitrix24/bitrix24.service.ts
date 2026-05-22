@@ -25,6 +25,7 @@ import {
 import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { mask } from "../common/mask";
+import * as emoji from "node-emoji";
 
 export interface EnsureLeadResult {
 	contactId?: number;
@@ -3989,7 +3990,10 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, message: `cannot parse chatId from chat.id=${rawChatId}` };
 		}
 
-		const text = m.message?.text || "";
+		// B24 хранит эмодзи шорткодами (:trophy:, :muscle:) — конвертируем в
+		// Unicode, иначе клиент в Telegram увидит сырой ":trophy:". Неизвестные
+		// шорткоды emojify оставляет как есть.
+		const text = emoji.emojify(m.message?.text || "");
 		const files: any[] = (m.message as any)?.files || [];
 
 		const token = this.configService.get<string>("TG_BOT_TOKEN");
