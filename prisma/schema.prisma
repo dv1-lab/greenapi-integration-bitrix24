@@ -184,3 +184,14 @@ model B24EntitySnapshot {
 
   @@unique([entityType, entityId])
 }
+
+// Дедуп автоответа «нерабочее время»: один автоответ на чат за одно
+// нерабочее окно (ночь). chatKey: "<idInstance>:<chatId>" для Green API
+// (WA/TG/MAX), "ig:<clientId>" для Instagram Direct. lastRepliedAt
+// сравнивается с началом текущего нерабочего окна (см. claimOffHoursReply).
+model OffHoursReply {
+  id            BigInt   @id @default(autoincrement())
+  chatKey       String   @unique
+  lastRepliedAt DateTime
+  createdAt     DateTime @default(now())
+}

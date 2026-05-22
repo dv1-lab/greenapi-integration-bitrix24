@@ -72,6 +72,14 @@ export class WebhooksController {
 			return;
 		}
 
+		// Автоответ «нерабочее время» на входящие WA/TG/MAX — фоном,
+		// не блокирует и не влияет на основной relay в B24.
+		if (webhook.typeWebhook === "incomingMessageReceived") {
+			this.bitrix24Service.maybeOffHoursAutoReply(webhook).catch((error: any) =>
+				this.logger.warn(`off-hours auto-reply failed: ${error.message}`),
+			);
+		}
+
 		try {
 			await this.bitrix24Service.handleGreenApiWebhook(webhook, [
 				"incomingMessageReceived",

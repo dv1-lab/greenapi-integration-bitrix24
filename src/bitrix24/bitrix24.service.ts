@@ -9,7 +9,7 @@ import {
 	NotFoundError,
 	Settings,
 	StateInstanceWebhook,
-	GreenApiLogger, SendResponse, generateRandomToken,
+	GreenApiLogger, SendResponse, generateRandomToken, GreenApiWebhook,
 } from "@green-api/greenapi-integration";
 import { Bitrix24Transformer } from "./bitrix24.transformer";
 import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
@@ -30,6 +30,16 @@ export interface EnsureLeadResult {
 	contactLastName?: string;
 	createdLeadId?: number;
 }
+
+// Автоответ на входящие в нерабочее время. Магазин работает ежедневно
+// 10:00–19:00 МСК; вне этого окна клиент получает это сообщение один раз
+// за нерабочий период (см. maybeOffHoursAutoReply).
+const OFF_HOURS_REPLY_TEXT =
+	"Здравствуйте! Спасибо, что написали в «Первый Беговой» 🙌\n\n" +
+	"Сейчас нерабочее время — мы на связи ежедневно с 10:00 до 19:00 по Москве.\n\n" +
+	"Ваше сообщение получено, менеджер обязательно ответит вам в рабочие часы. " +
+	"Вы можете прямо сейчас задать здесь все интересующие вопросы — мы ответим " +
+	"на них, как только начнётся рабочий день.";
 
 // TTL для записи OutgoingMessage: Green API после доставки не шлёт более
 // чем 24 часа.
@@ -1634,6 +1644,110 @@ export class Bitrix24Service extends BaseAdapter<
 		return { ok: posted > 0, posted, entities };
 	}
 
+	// ===== Автоответ в нерабочее время (10:00–19:00 МСК) ===============
+
+	/** true — сейчас нерабочее время (вне 10:00–19:00 по Москве). */
+	private isOffHoursMsk(): boolean {
+		const mskHour = (new Date().getUTCHours() + 3) % 24;
+		return mskHour < 10 || mskHour >= 19;
+	}
+
+	/**
+	 * Начало текущего нерабочего окна — последние наступившие 19:00 МСК
+	 * (19:00 МСК = 16:00 UTC). Используется для дедупа: один автоответ на
+	 * чат за одно нерабочее окно (ночь).
+	 */
+	private offHoursWindowStart(): Date {
+		const now = new Date();
+		const mskHour = (now.getUTCHours() + 3) % 24;
+		const d = new Date(now);
+		d.setUTCHours(16, 0, 0, 0); // 19:00 МСК
+		if (mskHour < 19) d.setUTCDate(d.getUTCDate() - 1);
+		return d;
+	}
+
+	/**
+	 * Дедуп автоответа: true (и помечает чат) — если в текущем нерабочем
+	 * окне этому чату ещё не отвечали. false — уже отвечали либо ошибка БД
+	 * (при ошибке не шлём, чтобы не спамить).
+	 */
+	private async claimOffHoursReply(chatKey: string): Promise<boolean> {
+		try {
+			const windowStart = this.offHoursWindowStart();
+			const existing = await (this.prisma as any).offHoursReply.findUnique({
+				where: { chatKey },
+			});
+			if (existing && existing.lastRepliedAt >= windowStart) {
+				return false;
+			}
+			await (this.prisma as any).offHoursReply.upsert({
+				where: { chatKey },
+				create: { chatKey, lastRepliedAt: new Date() },
+				update: { lastRepliedAt: new Date() },
+			});
+			return true;
+		} catch (e: any) {
+			this.logger.warn(`off-hours dedup failed for ${chatKey}: ${e.message}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Автоответ «нерабочее время» на входящее WA/TG/MAX-сообщение.
+	 * Вызывается фоном из webhooks.controller — НЕ блокирует основной relay
+	 * и не валит его при ошибке.
+	 */
+	async maybeOffHoursAutoReply(webhook: GreenApiWebhook): Promise<void> {
+		if (webhook.typeWebhook !== "incomingMessageReceived") return;
+		if (!this.isOffHoursMsk()) return;
+		const chatId = String((webhook as any).senderData?.chatId || "");
+		const idInstance = (webhook as any).instanceData?.idInstance;
+		if (!chatId || !idInstance) return;
+		// Группы и каналы не трогаем — автоответ только в личные диалоги.
+		if (chatId.endsWith("@g.us") || chatId.startsWith("-")) return;
+
+		const chatKey = `${idInstance}:${chatId}`;
+		if (!(await this.claimOffHoursReply(chatKey))) return;
+
+		try {
+			const instance = await this.prisma.getInstanceByIdWithUser(idInstance);
+			if (!instance) return;
+			const apiUrl = greenApiUrlForInstance(String(idInstance));
+			await axios.post(
+				`${apiUrl}/waInstance${idInstance}/sendMessage/${instance.apiTokenInstance}`,
+				{ chatId, message: OFF_HOURS_REPLY_TEXT },
+				{ timeout: 15000 },
+			);
+			this.logger.info(`off-hours auto-reply sent → ${chatKey}`);
+		} catch (e: any) {
+			this.logger.warn(`off-hours auto-reply send failed for ${chatKey}: ${e.message}`);
+		}
+	}
+
+	/** Автоответ «нерабочее время» в Instagram Direct через i2crm. */
+	private async sendOffHoursReplyIg(clientId: string): Promise<void> {
+		const apiBase = this.configService.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
+		const targetKey = this.configService.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
+		const accountId = this.configService.get<string>("I2CRM_INSTAGRAM_ACCOUNT_ID");
+		if (!targetKey || !accountId) return;
+		try {
+			await axios.post(
+				`${apiBase}/target/feedback`,
+				{
+					domain: "instagram",
+					source: String(accountId),
+					client: String(clientId),
+					type: "direct",
+					text: OFF_HOURS_REPLY_TEXT,
+				},
+				{ params: { key: targetKey }, timeout: 15000, validateStatus: () => true },
+			);
+			this.logger.info(`off-hours auto-reply sent → ig:${clientId}`);
+		} catch (e: any) {
+			this.logger.warn(`off-hours IG auto-reply failed for ${clientId}: ${e.message}`);
+		}
+	}
+
 	/**
 	 * Backfill свежесозданного лида от imconnector.send.messages (widget /send).
 	 * B24 создаёт лид асинхронно после первой messages — без CONTACT_ID и с
@@ -1915,6 +2029,14 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		if (channel !== "instdir" && channel !== "instcom") {
 			return { success: false, reason: `unsupported channel: ${channel}` };
+		}
+
+		// Автоответ «нерабочее время» — только Instagram Direct (не комментарии),
+		// фоном, не блокирует доставку входящего в B24.
+		if (channel === "instdir" && this.isOffHoursMsk()) {
+			void this.claimOffHoursReply(`ig:${clientId}`)
+				.then((claimed) => (claimed ? this.sendOffHoursReplyIg(String(clientId)) : undefined))
+				.catch(() => undefined);
 		}
 
 		// Профилактика: сохраняем payload в журнал ДО попытки доставки в B24.
