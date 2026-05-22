@@ -1430,6 +1430,31 @@ export class Bitrix24Service extends BaseAdapter<
 				this.logger.info(
 					`outgoing-from-device: mirrored to line ${inst.bitrixLine} (${provider}, chat ${clientChatId})`,
 				);
+				// B24 создаёт лид из imconnector-сообщения, но «с мобильного»-
+				// зеркало раньше не тегировало его — лид оставался без
+				// UF_CRM_TG/MAX_CHAT_ID: невидимый карточке Customer-360 и не
+				// связываемый с последующими сообщениями. Догоняем backfill'ом
+				// (как виджет «написать первым»). Фоном, не блокируем webhook.
+				const chatIdUf = provider === "max" ? "UF_CRM_MAX_CHAT_ID" : "UF_CRM_TG_CHAT_ID";
+				void (async () => {
+					try {
+						const existing: any = await this.callBitrix24Method(
+							portalDomain, "crm.lead.list",
+							{ filter: { [chatIdUf]: clientChatId }, select: ["ID"] },
+						);
+						if (Array.isArray(existing) && existing.length > 0) return; // лид уже тегирован
+						await this.backfillSendLead(portalDomain, {
+							lineId: Number(inst.bitrixLine),
+							userKey,
+							chatId: clientChatId,
+							phoneE164: null,
+							channelLabel: provider === "max" ? "MAX" : "Telegram",
+							displayNameInMirror: displayName,
+						});
+					} catch (e: any) {
+						this.logger.warn(`outgoing-from-device backfill failed: ${e?.message || e}`);
+					}
+				})();
 			}
 		} catch (e: any) {
 			this.logger.warn(`outgoing-from-device mirror failed: ${e?.message || e}`);
@@ -1839,7 +1864,7 @@ export class Bitrix24Service extends BaseAdapter<
 			userKey: string;  // sc_<chatId> / wa_<phone> — приходит в TITLE как user.name fallback
 			chatId: string;   // для UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID
 			phoneE164: string | null;
-			contactId: number;
+			contactId?: number;  // опционально: у клиента «с мобильного» контакта ещё нет
 			contactName?: string;
 			contactLastName?: string;
 			channelLabel: string;
@@ -1887,7 +1912,7 @@ export class Bitrix24Service extends BaseAdapter<
 				});
 				if (!target) continue;
 				const updateFields: Record<string, any> = {};
-				if (!target.CONTACT_ID || Number(target.CONTACT_ID) === 0) {
+				if (contactId && (!target.CONTACT_ID || Number(target.CONTACT_ID) === 0)) {
 					updateFields.CONTACT_ID = contactId;
 				}
 				if (chatIdUf && !target[chatIdUf]) {
