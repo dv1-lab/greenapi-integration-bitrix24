@@ -1652,6 +1652,26 @@ export class Bitrix24Service extends BaseAdapter<
 		// через webhook Green API и сам пишет message_out в customer_events —
 		// с резолвом оператора (operator-hint / TG-автор / «с мобильного»).
 		// Параллельный эмит отсюда давал дубль события + пустого оператора.
+
+		// Operator-hint для зеркала: Green API не знает, кто физически писал
+		// с мобильного. Берём оператора-исполнителя открытой B24-сессии этого
+		// клиента и шлём bridge'у hint с source="mobile" — он заменит безликое
+		// «↗ отправлено с мобильного» на «🧑‍💼 ФИО (с моб.)». Best-effort.
+		const idMessage = String(webhook?.idMessage || "");
+		if (idMessage) {
+			void (async () => {
+				try {
+					const users = await (this.prisma as any).user.findMany({ take: 1 });
+					const portalDomain = users[0]?.portalDomain;
+					if (!portalDomain) return;
+					const opId = await this.resolveActiveOperatorByPhone(portalDomain, phone);
+					if (!opId) return;
+					await this.sendOperatorHintToBridge(portalDomain, opId, idMessage, "mobile");
+				} catch (e: any) {
+					this.logger.debug(`outgoing-from-mobile hint resolve failed: ${e.message}`);
+				}
+			})();
+		}
 	}
 
 	/**
@@ -4720,16 +4740,56 @@ export class Bitrix24Service extends BaseAdapter<
 
 	private async sendOperatorHintToBridge(
 		domain: string, b24UserId: string, idMessage: string,
+		source: "B24" | "mobile" = "B24",
 	): Promise<void> {
 		const bridgeUrl = this.configService.get<string>("BRIDGE_HINT_URL");
 		if (!bridgeUrl) return; // фича отключена если переменная не задана
 		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
 		const name = await this.getOperatorName(domain, b24UserId);
 		if (!name) return;
-		await axios.post(bridgeUrl, { idMessage, operatorName: name }, {
+		await axios.post(bridgeUrl, { idMessage, operatorName: name, source }, {
 			timeout: 3000,
 			headers: secret ? { "X-Hint-Secret": secret } : undefined,
 		});
-		this.logger.debug(`operator-hint sent to bridge: ${idMessage} → ${name}`);
+		this.logger.debug(`operator-hint sent to bridge: ${idMessage} → ${name} [${source}]`);
+	}
+
+	/** Находит оператора, который «взял» открытую B24-сессию клиента (по phone).
+	 *  Используется для outgoing-from-mobile: Green API не передаёт автора
+	 *  ручного сообщения с мобильного клиента — берём его из текущей сессии. */
+	private async resolveActiveOperatorByPhone(
+		domain: string, phone: string,
+	): Promise<string | null> {
+		try {
+			const dup: any = await this.callBitrix24Method(domain, "crm.duplicate.findbycomm", {
+				type: "PHONE", values: [phone], entity_type: "CONTACT",
+			});
+			const contactId = Number(dup?.CONTACT?.[0]);
+			if (!contactId) return null;
+			// Открытые сессии открытой линии на этом контакте, сортируем по
+			// последней. PROVIDER_PARAMS.USER_CODE имеет вид
+			// `<connector>|<line>|<chat>|<operator_id>` — если оператор взял.
+			const acts: any = await this.callBitrix24Method(domain, "crm.activity.list", {
+				filter: {
+					PROVIDER_ID: "IMOPENLINES_SESSION",
+					OWNER_TYPE_ID: 3, OWNER_ID: contactId, // CONTACT
+					COMPLETED: "N",
+				},
+				select: ["ID", "RESPONSIBLE_ID", "PROVIDER_PARAMS"],
+				order: { ID: "DESC" },
+			});
+			const list = Array.isArray(acts) ? acts : [];
+			for (const a of list) {
+				const code = String(a?.PROVIDER_PARAMS?.USER_CODE || "");
+				const parts = code.split("|");
+				const opIdFromCode = parts.length >= 4 ? parts[parts.length - 1] : "";
+				const operatorId = /^\d+$/.test(opIdFromCode) ? opIdFromCode : String(a?.RESPONSIBLE_ID || "");
+				if (operatorId && operatorId !== "0") return operatorId;
+			}
+			return null;
+		} catch (e: any) {
+			this.logger.debug(`resolveActiveOperatorByPhone failed: ${e.message}`);
+			return null;
+		}
 	}
 }
