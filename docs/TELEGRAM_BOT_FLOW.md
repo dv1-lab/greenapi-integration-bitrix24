@@ -36,8 +36,9 @@ handleTelegramBotIncoming (bitrix24.service.ts)
    ├─ журнал в TgBotEventLog (status=pending → sent)
    ├─ медиа: getFile → скачать → MediaCacheService → ссылка social.9wb.ru/media/…
    ├─ ensureOpenLeadForPhone("Telegram", skipLeadCreation) — резолв контакта по UF_CRM_TG_CHAT_ID
+   ├─ парсинг `ym-<id>` из текста — Я.Метрика ClientId (сайт подставляет «код обращения»)
    ├─ imconnector.send.messages в линию 8 (chat.id = tgbot_<chatId>)
-   ├─ backfillTgBotContactLink — привязка лида сессии к контакту клиента
+   ├─ backfillTgBotContactLink — привязка контакта + UF_CRM_NF_YM_CLIENT_ID
    └─ зеркало TgBotMirrorService → топик клиента в супергруппе
 ```
 
