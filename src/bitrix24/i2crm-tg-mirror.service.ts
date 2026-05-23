@@ -153,7 +153,12 @@ export class I2crmTgMirrorService {
 				? `\nInstagram: <a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>`
 				: "";
 			const accountName = String(payload?.account_name || "").trim();
-			const accountLine = accountName ? `\nЛиния: @${this.escapeHtml(accountName)}` : "";
+			// «@1begovoy.ru» без HTML-обёртки Telegram автолинкует как свой
+			// username (несуществующий) — оборачиваем в ссылку на Instagram-
+			// бизнес-аккаунт, как сделано для @клиента в шапке.
+			const accountLine = accountName
+				? `\nЛиния: <a href="https://instagram.com/${this.escapeHtml(accountName)}/">@${this.escapeHtml(accountName)}</a>`
+				: "";
 			const caption =
 				`📋 Карточка клиента (${channelLabel.replace(/^[^\s]+\s+/, "")})\n` +
 				`Имя: ${this.escapeHtml(clientName)}` +
