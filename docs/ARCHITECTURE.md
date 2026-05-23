@@ -10,7 +10,8 @@
 [`TASK_TRACKER.md`](./TASK_TRACKER.md),
 [`TELEGRAM_BOT_FLOW.md`](./TELEGRAM_BOT_FLOW.md).
 
-Последнее обновление: 2026-05-23.
+Последнее обновление: 2026-05-23 (вечер: tg-bot multi-instance + поддержка
++ IG A2 + reply + обратный путь зеркало→бот).
 
 ---
 
@@ -91,8 +92,14 @@ customer-service и task-tracker — соседние самостоятельн
 - виджет «написать первым» в карточке клиента;
 - ответ на Instagram-комментарий в Direct по пометке `!` в начале сообщения
   (работает из мобильного B24 и из Telegram-топика — см. `INSTAGRAM_FLOW.md` §6а);
-- Telegram-бот `@begovoy_bot` подключён напрямую через Telegram Bot API
-  (не Green API, не i2crm) — линия 8, своё зеркало; см. `TELEGRAM_BOT_FLOW.md`;
+- Telegram-боты (`@begovoy_bot` + `@begovoy1support_bot` и т.п.) подключены
+  напрямую через Telegram Bot API (не Green API, не i2crm) — multi-instance:
+  каждому свой токен / линия B24 / TG-супергруппа зеркала / userKey-префикс.
+  Конфиги через `getTgBotConfig(name)`. См. `TELEGRAM_BOT_FLOW.md`;
+- **Обратный путь зеркало → бот → клиент**: оператор отвечает в топике
+  клиента в супергруппе TG-зеркала наших ботов; wa-tg-bridge ловит, шлёт
+  на `/webhooks/internal/tg-bot-reply` adapter'а; adapter по `(groupId,
+  topicId)` находит `chatId` и шлёт через нужный бот-инстанс;
 - метка сайта 1begovoy.ru («— код обращения: ym-<id>» или «— с сайта 1begovoy.ru
   (ID <id>)») парсится из текста и пишется в `UF_CRM_NF_YM_CLIENT_ID` лида —
   работает на WhatsApp/Telegram/MAX (через Green API) и на Telegram-боте;
@@ -157,6 +164,7 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
 |---|---|---|---|
 | **Зеркала каналов** (Max 3354, TG 3354, WA-группы, IG-группы) | по группе на инстанс | живая переписка с клиентами, топик на чат | bridge (`1begovoyconnectbot`), роль «TG-зеркало» |
 | **«TG begovoy_bot»** (зеркало Telegram-бота) | одна | переписка `@begovoy_bot`, топик на клиента | **adapter** (`TgBotMirrorService`), бот `1begovoyconnectbot` |
+| **«1Б Поддержка»** (зеркало бота поддержки) | одна | переписка `@begovoy1support_bot`, топик на клиента | **adapter** (`TgBotMirrorService`, инстанс support), бот `1begovoyconnectbot` |
 | **«Клиенты 1Б»** (Customer-360 / KBD) | одна | топик на клиента: карточка + лента всех событий по нему | bridge (`1begovoyconnectbot`), роль «KBD-лента» |
 | **«Тех. поддержка»** (трекер задач) | одна | внутренние техзадачи компании, топик на задачу | **сервис task-tracker** (`@tasktrackerdv_bot`) — отдельный бот |
 
@@ -175,9 +183,12 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
   отправка (`sendMessage`) — из adapter'а. По инстансу на номер.
 - **i2crm** — шлюз к Instagram. Вебхуки идут **прямо в adapter**
   (`/webhooks/i2crm`), отправка — `POST /target/feedback`.
-- **Telegram Bot API** — клиентский бот `@begovoy_bot` подключён напрямую:
-  вебхуки идут **прямо в adapter** (`/webhooks/telegram-bot`), отправка — через
-  `api.telegram.org`. Не через Green API. См. `TELEGRAM_BOT_FLOW.md`.
+- **Telegram Bot API** — клиентские боты `@begovoy_bot` (линия 8) и
+  `@begovoy1support_bot` (линия 206, техподдержка) подключены напрямую:
+  вебхуки идут **прямо в adapter** (`/webhooks/telegram-bot/:name`), отправка —
+  через `api.telegram.org` соответствующего инстанса. Не через Green API.
+  Multi-instance: новый бот = новый блок env (`TG_BOT_<NAME>_*`) + новая
+  open-line + активация коннектора. См. `TELEGRAM_BOT_FLOW.md`.
 
 ---
 

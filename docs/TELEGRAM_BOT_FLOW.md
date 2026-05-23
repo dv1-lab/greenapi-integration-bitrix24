@@ -1,28 +1,49 @@
-# Telegram-бот (@begovoy_bot) — техническая документация
+# Telegram-боты — техническая документация (multi-instance)
 
-Клиентский Telegram-бот **@begovoy_bot** («ПЕРВЫЙ БЕГОВОЙ бот by 1BEGOVOY.RU»,
-id 1873464778) подключён к Bitrix24 **через Social Connector**, а не штатным
-Telegram-коннектором B24. Сделано по образцу Instagram/i2crm: своя линия,
-журнал сообщений, зеркало в TG-супергруппу.
+Клиентские Telegram-боты подключены к Bitrix24 **через Social Connector**,
+а не штатным Telegram-коннектором B24. Сделано по образцу Instagram/i2crm:
+своя линия, журнал сообщений, зеркало в TG-супергруппу. Каждый бот —
+отдельный инстанс со своим набором env.
 
-История: до 2026-05-23 бот работал как AI-чат-бот (автоответы клиентам).
-По решению владельца переведён на живых операторов B24 — AI убран, отвечают
-операторы в открытой линии.
+История: до 2026-05-23 `@begovoy_bot` работал как AI-чат-бот (автоответы).
+По решению владельца AI убран — отвечают живые операторы.
 
-## Каналы и идентификаторы
+## Инстансы
 
-| Что | Значение |
-|---|---|
-| Бот | `@begovoy_bot`, id 1873464778 |
-| Открытая линия B24 | **8** «Telegram begovoy_bot - 1Begovoy.ru канал» |
-| Коннектор | `social_connector` (активирован на линии 8 рядом со штатным) |
-| Webhook бота | `https://social.9wb.ru/webhooks/telegram-bot` |
-| Зеркало | TG-супергруппа «TG begovoy_bot» `-1003988471578` |
-| Бот зеркала | `@begovoyconnect_bot` (тот же, что для WA/Instagram) |
+| `name` | Бот | Линия B24 | CRM-источник | Зеркало (группа) | userKey-префикс |
+|---|---|---|---|---|---|
+| `begovoy` | `@begovoy_bot` (1873464778) | **8** «Telegram begovoy_bot» | `8\|TELEGRAM` «telegram-begovoy_bot-direct» | `-1003988471578` «TG begovoy_bot» | `tgbot_` |
+| `support` | `@begovoy1support_bot` (8684300904) | **206** «Telegram support_bot — Техподдержка» | `206\|SOCIAL_CONNECTOR` «Telegram — 1Б Поддержка» | `-1003772436222` «1Б Поддержка» | `tgsupport_` |
+
+Бот зеркала один общий — `@begovoyconnect_bot` (тот же, что для WA/Instagram).
 
 `.env` (на сервере, `/home/dv/greenapi-b24/.env`):
-`TG_BOT_TOKEN`, `TG_BOT_LINE_ID=8`, `TG_BOT_WEBHOOK_SECRET`,
-`TG_BOT_MIRROR_GROUP_ID=-1003988471578`.
+```
+# begovoy
+TG_BOT_TOKEN, TG_BOT_LINE_ID=8, TG_BOT_WEBHOOK_SECRET,
+TG_BOT_MIRROR_GROUP_ID=-1003988471578
+# support
+TG_BOT_SUPPORT_TOKEN, TG_BOT_SUPPORT_LINE_ID=206, TG_BOT_SUPPORT_WEBHOOK_SECRET,
+TG_BOT_SUPPORT_MIRROR_GROUP_ID=-1003772436222
+```
+
+## Multi-instance: как добавить нового бота
+
+1. Создать бота в @BotFather, получить токен.
+2. Создать открытую линию в B24 (`imopenlines.config.add`).
+3. Активировать коннектор `social_connector` на линии
+   (`imconnector.activate` + `imconnector.connector.data.set`).
+4. Добавить `TG_BOT_<NAME>_*` env-переменные.
+5. Добавить ветку в `getTgBotConfig(name)` в `bitrix24.service.ts`.
+6. setWebhook на `https://social.9wb.ru/webhooks/telegram-bot/<name>`.
+7. Добавить chat_id зеркало-группы в `TG_BOT_MIRROR_GROUPS` env wa-tg-bridge.
+
+## Webhook endpoints
+
+- `POST /webhooks/telegram-bot/:name` — Telegram → adapter (per-instance).
+- `POST /webhooks/telegram-bot` — legacy → инстанс begovoy.
+- `POST /webhooks/internal/tg-bot-reply` — обратный путь от bridge к клиенту
+  (см. ниже).
 
 ## Входящий поток (клиент → B24)
 
@@ -74,6 +95,28 @@ handleTelegramBotOutgoing
 Каждое сообщение (in/out) пишется в таблицу `TgBotEventLog` — это и история
 переписки, и страховка: при недоступности B24 запись остаётся `status=pending`
 (replay-механизм можно добавить по образцу i2crm-replay).
+
+## Обратный путь: зеркало → бот → клиент
+
+Оператор отвечает клиенту НЕ через чат открытой линии B24, а напрямую
+в супергруппе TG-зеркала (в топике клиента). Поток:
+
+```
+Оператор пишет в топик клиента (группа -1003988471578 или -1003772436222)
+        ▼
+wa-tg-bridge (_is_tg_bot_mirror_group + _forward_to_tg_bot)
+        ▼
+POST /webhooks/internal/tg-bot-reply (X-Hint-Secret)
+        {groupId, topicId, text, operatorName}
+        ▼
+adapter:
+   ├─ getTgBotByGroupId(groupId) → name
+   ├─ TgBotMirrorService.findChatIdByTopic(groupId, topicId) → chatId
+   └─ sendFromTgBot(name, chatId, text) → api.telegram.org/bot<token>/sendMessage
+```
+
+env wa-tg-bridge: `TG_BOT_MIRROR_GROUPS=-1003988471578,-1003772436222`,
+`ADAPTER_TG_BOT_REPLY_URL=https://social.9wb.ru/webhooks/internal/tg-bot-reply`.
 
 ## Откат на штатный коннектор B24
 
