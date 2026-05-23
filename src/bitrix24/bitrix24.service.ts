@@ -508,6 +508,16 @@ export class Bitrix24Service extends BaseAdapter<
 								fields: { [chatIdUf]: chatId },
 							});
 							this.logger.info(`ensureLead: saved ${chatIdUf}=${chatId} on contact ${contactId}`);
+							// Контакт «новый» для этого канала — собираем под него всю
+							// прошлую историю. Ретроактивно привязываем все «свободные»
+							// лиды (CONTACT_ID пуст) с тем же chatId. backfillIgUfFields /
+							// backfillTgBotContactLink пишут chatId на каждый лид сессии,
+							// так что искать есть по чему. Best-effort, не блокирует.
+							void this.linkOrphanLeadsToContact(
+								portalDomain, contactId, chatIdUf, String(chatId),
+							).catch((e: any) =>
+								this.logger.warn(`ensureLead: orphan-link failed (non-fatal): ${e.message}`),
+							);
 						}
 					}
 				} catch (e: any) {
@@ -606,6 +616,50 @@ export class Bitrix24Service extends BaseAdapter<
 			return await task;
 		} finally {
 			this._ensureLeadLocks.delete(lockKey);
+		}
+	}
+
+	/** Ретроактивная привязка «свободных» лидов клиента к появившемуся контакту.
+	 *  Сценарий: клиент несколько раз писал нам в IG/TG/MAX до того, как мы
+	 *  завели контакт; лиды создавались с UF_CRM_*_CHAT_ID, но с пустым
+	 *  CONTACT_ID. Когда контакт наконец появляется (этот метод вызывается из
+	 *  ensureOpenLeadForPhone в момент записи chatId на контакт), собираем под
+	 *  него всю прошлую историю — все лиды с тем же chatId и пустым CONTACT_ID.
+	 *  Только для каналов с устойчивым chatId: Instagram, Telegram, MAX.
+	 *  Для WhatsApp/phone не делаем — номер может перейти к другому человеку. */
+	private async linkOrphanLeadsToContact(
+		portalDomain: string,
+		contactId: number,
+		chatIdUf: string,
+		chatIdValue: string,
+	): Promise<void> {
+		const allowed = new Set(["UF_CRM_IG_CHAT_ID", "UF_CRM_TG_CHAT_ID", "UF_CRM_MAX_CHAT_ID"]);
+		if (!allowed.has(chatIdUf)) return;
+		const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+			filter: { [chatIdUf]: chatIdValue },
+			select: ["ID", "CONTACT_ID"],
+		});
+		const list = Array.isArray(leads) ? leads : [];
+		// «Свободный» = CONTACT_ID пуст / 0 / null. B24 фильтр по пустому полю
+		// ненадёжен — фильтруем в коде после.
+		const orphans = list.filter((l: any) => {
+			const cid = l?.CONTACT_ID;
+			return !cid || cid === "0" || cid === 0;
+		});
+		if (orphans.length === 0) return;
+		this.logger.info(`orphan-link: contact ${contactId} → ${orphans.length} lead(s) by ${chatIdUf}=${chatIdValue}`);
+		for (const lead of orphans) {
+			const leadId = parseInt(lead.ID, 10);
+			if (!leadId) continue;
+			try {
+				await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+					id: leadId,
+					fields: { CONTACT_ID: contactId },
+				});
+				this.logger.info(`orphan-link: lead ${leadId} → contact ${contactId}`);
+			} catch (e: any) {
+				this.logger.warn(`orphan-link: lead ${leadId} update failed: ${e.message}`);
+			}
 		}
 	}
 
