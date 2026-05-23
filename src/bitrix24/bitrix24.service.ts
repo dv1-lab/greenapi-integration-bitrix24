@@ -2408,6 +2408,12 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const portalDomain = user.portalDomain;
 
+		// Я.Метрика ClientId из метки «код обращения: ym-<id>» в тексте —
+		// сайт подставляет её при «Спросить о товаре в Telegram». Тот же
+		// формат, что для WhatsApp (PB-WA-CID).
+		const ymMatch = text.match(/\bym-(\d{6,25})\b/);
+		const ymClientId = ymMatch ? ymMatch[1] : undefined;
+
 		// Резолвим контакт клиента по UF_CRM_TG_CHAT_ID (channelLabel="Telegram").
 		// skipLeadCreation=true — лид создаёт сама открытая линия B24, свой лид
 		// не плодим. Контакт привяжем к лиду сессии ниже (backfillTgBotContactLink):
@@ -2415,7 +2421,7 @@ export class Bitrix24Service extends BaseAdapter<
 		let contactId: number | undefined;
 		try {
 			const leadResult = await this.ensureOpenLeadForPhone(
-				portalDomain, "", clientName, lineId, "Telegram", chatId, true,
+				portalDomain, "", clientName, lineId, "Telegram", chatId, true, ymClientId,
 			);
 			contactId = leadResult?.contactId;
 		} catch (e: any) {
@@ -2491,10 +2497,10 @@ export class Bitrix24Service extends BaseAdapter<
 
 		// Привязка контакта к лиду сессии — B24 матчит открытые линии по
 		// телефону, у Telegram-бота его нет, поэтому связываем сами. Фоном.
-		if (contactId) {
-			this.backfillTgBotContactLink(portalDomain, chatId, contactId)
-				.catch((e) => this.logger.warn(`tg-bot: backfill link failed (non-fatal): ${e.message}`));
-		}
+		// ymClientId передаём всегда: если контакт не нашёлся, метку всё равно
+		// надо записать на лид сессии.
+		this.backfillTgBotContactLink(portalDomain, chatId, contactId, ymClientId)
+			.catch((e) => this.logger.warn(`tg-bot: backfill link failed (non-fatal): ${e.message}`));
 
 		// Зеркало в TG-супергруппу «TG begovoy_bot» — не блокирует доставку.
 		this.tgBotMirror.mirrorIncoming({
@@ -2512,7 +2518,7 @@ export class Bitrix24Service extends BaseAdapter<
 	// клиента (резолвнут ранее по UF_CRM_TG_CHAT_ID) — тогда оператор видит
 	// карточку клиента и всю историю. Идёт с retry: сессия создаётся с лагом.
 	private async backfillTgBotContactLink(
-		portalDomain: string, chatId: string, contactId: number,
+		portalDomain: string, chatId: string, contactId: number | undefined, ymClientId?: string,
 	): Promise<void> {
 		const userCode = `tgbot_${chatId}`;
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -2541,11 +2547,16 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 				const lead: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: ownerId });
 				const fields: Record<string, any> = {};
-				if (!lead?.CONTACT_ID) fields.CONTACT_ID = contactId;
+				if (contactId && !lead?.CONTACT_ID) fields.CONTACT_ID = contactId;
 				if (!lead?.UF_CRM_TG_CHAT_ID) fields.UF_CRM_TG_CHAT_ID = chatId;
-				// B24 требует Yandex Metrika ClientId при смене стадии — у TG-лида
-				// его нет, ставим "-", иначе оператор заблокирован на смене стадии.
-				if (!lead?.UF_CRM_NF_YM_CLIENT_ID) fields.UF_CRM_NF_YM_CLIENT_ID = "-";
+				// Я.Метрика ClientId: реальное значение из метки `ym-<id>` в тексте
+				// (сайт подставляет при «Спросить о товаре в Telegram»). Если не
+				// пришло — ставим "-", иначе B24 блокирует оператора на смене стадии.
+				// Перезаписываем заглушку "-", если позже пришёл настоящий id.
+				const currentYm = String(lead?.UF_CRM_NF_YM_CLIENT_ID || "");
+				if (!currentYm || (currentYm === "-" && ymClientId)) {
+					fields.UF_CRM_NF_YM_CLIENT_ID = ymClientId || "-";
+				}
 				if (Object.keys(fields).length > 0) {
 					await this.callBitrix24Method(portalDomain, "crm.lead.update", {
 						id: ownerId, fields,
