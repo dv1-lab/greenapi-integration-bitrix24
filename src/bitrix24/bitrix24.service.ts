@@ -2748,13 +2748,17 @@ export class Bitrix24Service extends BaseAdapter<
 			extra: { crm: "Y" },
 		};
 
-		// Аттачи (если type=image/video/audio/file)
-		if (type !== "text" && (payload?.media_url || payload?.media)) {
-			const mediaUrl = payload.media_url || payload.media?.url;
+		// Аттачи (если type=image/video/audio/file). i2crm кладёт ссылку на
+		// файл в одно из полей в зависимости от типа: `src` (для Instagram-
+		// instdir, в т.ч. картинка поста-источника когда клиент нажал
+		// «отправить сообщение» с поста — Instagram прикрепляет фото поста
+		// первым сообщением); `media_url` / `media.url` (legacy / другие типы).
+		if (type !== "text") {
+			const mediaUrl = payload?.src || payload?.media_url || payload?.media?.url;
 			if (mediaUrl) {
 				messagePayload.message.files = [
 					{
-						url: mediaUrl,
+						url: String(mediaUrl),
 						name: payload.media?.file_name || `${type}.bin`,
 					},
 				];
