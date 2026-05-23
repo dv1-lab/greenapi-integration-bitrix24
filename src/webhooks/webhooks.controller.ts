@@ -120,17 +120,35 @@ export class WebhooksController {
 		}
 	}
 
-	// Telegram Bot (@begovoy_bot) — webhook от Telegram Bot API. Бот подключён
-	// напрямую (не Green API, не i2crm). Update → handleTelegramBotIncoming →
-	// открытая линия B24. Защита: secret_token, который мы задаём при setWebhook,
-	// Telegram присылает его в заголовке X-Telegram-Bot-Api-Secret-Token.
+	// Telegram Bot webhook от Telegram Bot API. Поддерживаются несколько
+	// бот-инстансов: путь /webhooks/telegram-bot/:name определяет инстанс.
+	// Legacy /webhooks/telegram-bot (без имени) — это @begovoy_bot, для
+	// обратной совместимости со старым setWebhook.
+	// Защита: secret_token, который мы задаём при setWebhook для каждого бота,
+	// Telegram шлёт его в заголовке X-Telegram-Bot-Api-Secret-Token.
+	@Post("telegram-bot/:name")
+	@HttpCode(HttpStatus.OK)
+	async handleTelegramBotByName(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const name = String((req.params as any)?.name || "begovoy");
+		await this._tgBotWebhook(req, res, name);
+	}
+
 	@Post("telegram-bot")
 	@HttpCode(HttpStatus.OK)
 	async handleTelegramBotWebhook(@Req() req: Request, @Res() res: Response): Promise<void> {
-		const expected = process.env.TG_BOT_WEBHOOK_SECRET || "";
+		await this._tgBotWebhook(req, res, "begovoy");
+	}
+
+	private async _tgBotWebhook(req: Request, res: Response, name: string): Promise<void> {
+		// Secret-token у каждого бота свой: TG_BOT_<NAME>_WEBHOOK_SECRET
+		// (для begovoy fallback на legacy TG_BOT_WEBHOOK_SECRET).
+		const envKey = name === "begovoy"
+			? "TG_BOT_WEBHOOK_SECRET"
+			: `TG_BOT_${name.toUpperCase()}_WEBHOOK_SECRET`;
+		const expected = process.env[envKey] || (name === "begovoy" ? "" : process.env.TG_BOT_WEBHOOK_SECRET || "");
 		const given = String(req.headers["x-telegram-bot-api-secret-token"] || "");
 		if (expected && given !== expected) {
-			this.logger.warn("[telegram-bot webhook] rejected: bad secret token");
+			this.logger.warn(`[telegram-bot:${name}] rejected: bad secret token`);
 			// 200, чтобы Telegram не ретраил мусорный запрос.
 			res.status(HttpStatus.OK).json({ ok: true });
 			return;
@@ -139,12 +157,12 @@ export class WebhooksController {
 		res.status(HttpStatus.OK).json({ ok: true });
 		const update = req.body || {};
 		try {
-			const result = await this.bitrix24Service.handleTelegramBotIncoming(update);
+			const result = await this.bitrix24Service.handleTelegramBotIncoming(update, name);
 			if (!result.success) {
-				this.logger.warn(`[telegram-bot webhook] skipped: ${result.reason}`);
+				this.logger.warn(`[telegram-bot:${name}] skipped: ${result.reason}`);
 			}
 		} catch (error: any) {
-			this.logger.error("[telegram-bot webhook] handler error", error);
+			this.logger.error(`[telegram-bot:${name}] handler error`, error);
 		}
 	}
 

@@ -5,20 +5,22 @@ import * as fs from "fs";
 import * as path from "path";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
 
-// Зеркало сообщений Telegram-бота (@begovoy_bot) в TG-супергруппу «TG
-// begovoy_bot» — каждый клиент в отдельный топик. Симметрично i2crm-tg-mirror,
-// но проще: один канал, одна группа. Бот зеркала — @begovoyconnect_bot
-// (TG_MIRROR_BOT_TOKEN), тот же, что зеркалит WhatsApp и Instagram.
+// Зеркало сообщений Telegram-ботов (@begovoy_bot, @begovoy1support_bot, …) в
+// TG-супергруппы — каждый клиент в отдельный топик. Один сервис обслуживает
+// несколько бот-инстансов: каждый со своей группой зеркала. State хранит
+// (groupId,chatId)→topicId и (groupId,chatId)→cardsPosted в одном JSON-файле,
+// чтобы топики разных инстансов не пересекались. Бот зеркала один общий —
+// @begovoyconnect_bot (TG_MIRROR_BOT_TOKEN).
 interface MirrorState {
-	topics: Record<string, number>;      // chatId → topic_id
-	cardsPosted: Record<string, true>;   // chatId → карточка клиента уже постилась
+	topics: Record<string, number>;      // "<groupId>:<chatId>" → topic_id
+	cardsPosted: Record<string, true>;   // "<groupId>:<chatId>" → карточка постилась
 }
 
 @Injectable()
 export class TgBotMirrorService {
 	private readonly logger = GreenApiLogger.getInstance(TgBotMirrorService.name);
 	private readonly botToken: string | undefined;
-	private readonly groupId: string | undefined;
+	private readonly defaultGroupId: string | undefined;
 	private readonly mapPath: string;
 	private state: MirrorState = { topics: {}, cardsPosted: {} };
 	private mapLoaded = false;
@@ -26,13 +28,19 @@ export class TgBotMirrorService {
 
 	constructor(private readonly configService: ConfigService) {
 		this.botToken = this.configService.get<string>("TG_MIRROR_BOT_TOKEN");
-		this.groupId = this.configService.get<string>("TG_BOT_MIRROR_GROUP_ID");
+		// Default group — для legacy @begovoy_bot, чтобы вызовы без override
+		// продолжали работать как раньше.
+		this.defaultGroupId = this.configService.get<string>("TG_BOT_MIRROR_GROUP_ID");
 		this.mapPath = this.configService.get<string>("TG_BOT_MIRROR_TOPIC_MAP")
 			|| "/app/data/tg-bot-topics.json";
 	}
 
 	get enabled(): boolean {
-		return !!(this.botToken && this.groupId);
+		return !!this.botToken;
+	}
+
+	private key(groupId: string, chatId: string): string {
+		return `${groupId}:${chatId}`;
 	}
 
 	private async loadMap(): Promise<void> {
@@ -41,10 +49,35 @@ export class TgBotMirrorService {
 			if (fs.existsSync(this.mapPath)) {
 				const raw = fs.readFileSync(this.mapPath, "utf-8");
 				const parsed = JSON.parse(raw || "{}");
-				this.state = {
-					topics: parsed.topics || {},
-					cardsPosted: parsed.cardsPosted || {},
-				};
+				const topics = parsed.topics || {};
+				const cardsPosted = parsed.cardsPosted || {};
+				// Миграция: ключи без `:` — legacy формат (chatId без groupId),
+				// они относятся к default-группе (@begovoy_bot). Дописываем
+				// префикс defaultGroupId, чтобы перейти на новый composite-формат.
+				let migrated = 0;
+				const migratedTopics: Record<string, number> = {};
+				for (const [k, v] of Object.entries(topics)) {
+					if (k.includes(":")) {
+						migratedTopics[k] = v as number;
+					} else if (this.defaultGroupId) {
+						migratedTopics[this.key(this.defaultGroupId, k)] = v as number;
+						migrated++;
+					}
+				}
+				const migratedCards: Record<string, true> = {};
+				for (const [k, v] of Object.entries(cardsPosted)) {
+					if (k.includes(":")) {
+						migratedCards[k] = v as true;
+					} else if (this.defaultGroupId) {
+						migratedCards[this.key(this.defaultGroupId, k)] = v as true;
+						migrated++;
+					}
+				}
+				this.state = { topics: migratedTopics, cardsPosted: migratedCards };
+				if (migrated > 0) {
+					this.logger.info(`tg-bot-mirror: migrated ${migrated} legacy keys to composite format`);
+					// Сохранение мигрированной карты — асинхронно после mapLoaded=true.
+				}
 			} else {
 				const dir = path.dirname(this.mapPath);
 				if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -87,20 +120,21 @@ export class TgBotMirrorService {
 	}
 
 	private async findOrCreateTopic(
-		chatId: string, name: string,
+		groupId: string, chatId: string, name: string,
 	): Promise<{ topicId: number; created: boolean }> {
 		await this.loadMap();
-		if (this.state.topics[chatId]) {
-			return { topicId: this.state.topics[chatId], created: false };
+		const k = this.key(groupId, chatId);
+		if (this.state.topics[k]) {
+			return { topicId: this.state.topics[k], created: false };
 		}
 		const result = await this.botApi("createForumTopic", {
-			chat_id: this.groupId,
+			chat_id: groupId,
 			name: name.slice(0, 128),
 		});
 		const topicId = result.message_thread_id;
-		this.state.topics[chatId] = topicId;
+		this.state.topics[k] = topicId;
 		await this.persistMap();
-		this.logger.info(`tg-bot-mirror: created topic ${topicId} for client ${chatId} (${name})`);
+		this.logger.info(`tg-bot-mirror: created topic ${topicId} in group ${groupId} for client ${chatId} (${name})`);
 		return { topicId, created: true };
 	}
 
@@ -127,11 +161,12 @@ export class TgBotMirrorService {
 		return null;
 	}
 
-	// Постит карточку клиента в топик (идемпотентно по chatId) + закрепляет.
+	// Постит карточку клиента в топик (идемпотентно по (groupId,chatId)) + закрепляет.
 	private async postClientCard(
-		topicId: number, chatId: string, clientName: string, username: string,
+		groupId: string, topicId: number, chatId: string, clientName: string, username: string,
 	): Promise<void> {
-		if (this.state.cardsPosted[chatId]) return;
+		const ck = this.key(groupId, chatId);
+		if (this.state.cardsPosted[ck]) return;
 		const profileLink = username
 			? `\nTelegram: <a href="https://t.me/${this.escapeHtml(username)}">@${this.escapeHtml(username)}</a>`
 			: "";
@@ -139,7 +174,7 @@ export class TgBotMirrorService {
 			+ `Имя: ${this.escapeHtml(clientName)}` + profileLink;
 		try {
 			const res = await this.botApi("sendMessage", {
-				chat_id: this.groupId,
+				chat_id: groupId,
 				message_thread_id: topicId,
 				text,
 				parse_mode: "HTML",
@@ -149,7 +184,7 @@ export class TgBotMirrorService {
 			if (res?.message_id) {
 				try {
 					await this.botApi("pinChatMessage", {
-						chat_id: this.groupId,
+						chat_id: groupId,
 						message_id: res.message_id,
 						disable_notification: true,
 					});
@@ -157,7 +192,7 @@ export class TgBotMirrorService {
 					this.logger.debug(`tg-bot-mirror: pin failed: ${e.message}`);
 				}
 			}
-			this.state.cardsPosted[chatId] = true;
+			this.state.cardsPosted[ck] = true;
 			await this.persistMap();
 		} catch (e: any) {
 			this.logger.warn(`tg-bot-mirror: postClientCard failed: ${e.message}`);
@@ -166,21 +201,28 @@ export class TgBotMirrorService {
 
 	// Зеркалит входящее сообщение клиента в его топик. Медиа передаётся
 	// проксированным URL (social.9wb.ru/media/…) — бот-зеркало скачивает
-	// файл оттуда сам.
+	// файл оттуда сам. mirrorGroupId — override группы для multi-bot:
+	// для @begovoy_bot пусто (default из env), для @begovoy1support_bot
+	// — отдельная группа «1Б Поддержка».
 	async mirrorIncoming(input: {
 		chatId: string; clientName: string; username: string;
 		text: string; hasMedia: boolean;
 		mediaUrl?: string; mediaName?: string; mediaIsImage?: boolean;
+		mirrorGroupId?: string;
 	}): Promise<void> {
 		if (!this.enabled) return;
+		const groupId = input.mirrorGroupId || this.defaultGroupId;
+		if (!groupId) return;
 		const { chatId, username, hasMedia } = input;
 		if (!chatId) return;
 		try {
 			const b24Name = await this.resolveB24Name(chatId);
 			const displayName = b24Name || input.clientName;
-			const { topicId, created } = await this.findOrCreateTopic(chatId, `TG · ${displayName}`);
+			const { topicId, created } = await this.findOrCreateTopic(
+				groupId, chatId, `TG · ${displayName}`,
+			);
 			if (created) {
-				void this.postClientCard(topicId, chatId, displayName, username);
+				void this.postClientCard(groupId, topicId, chatId, displayName, username);
 			}
 			const header = `👤 ${this.escapeHtml(displayName)}`;
 
@@ -191,7 +233,7 @@ export class TgBotMirrorService {
 				const field = input.mediaIsImage ? "photo" : "document";
 				try {
 					await this.botApi(method, {
-						chat_id: this.groupId,
+						chat_id: groupId,
 						message_thread_id: topicId,
 						[field]: input.mediaUrl,
 						caption,
@@ -210,14 +252,14 @@ export class TgBotMirrorService {
 			let text = `${header}\n\n${body}`;
 			if (text.length > TEXT_MAX) text = text.slice(0, TEXT_MAX - 1) + "…";
 			await this.botApi("sendMessage", {
-				chat_id: this.groupId,
+				chat_id: groupId,
 				message_thread_id: topicId,
 				text,
 				parse_mode: "HTML",
 				disable_web_page_preview: true,
 			});
 		} catch (e: any) {
-			this.logger.error(`tg-bot-mirror: mirrorIncoming failed for ${chatId}: ${e.message}`);
+			this.logger.error(`tg-bot-mirror: mirrorIncoming failed for ${chatId} in group ${groupId}: ${e.message}`);
 		}
 	}
 
@@ -226,14 +268,17 @@ export class TgBotMirrorService {
 	// нет, зеркало пропускаем (не критично, появится с первым входящим).
 	async mirrorOutgoing(input: {
 		chatId: string; text: string; operatorName?: string;
+		mirrorGroupId?: string;
 	}): Promise<void> {
 		if (!this.enabled) return;
+		const groupId = input.mirrorGroupId || this.defaultGroupId;
+		if (!groupId) return;
 		const { chatId } = input;
 		if (!chatId) return;
 		await this.loadMap();
-		const topicId = this.state.topics[chatId];
+		const topicId = this.state.topics[this.key(groupId, chatId)];
 		if (!topicId) {
-			this.logger.debug(`tg-bot-mirror: no topic for ${chatId}, skip outgoing mirror`);
+			this.logger.debug(`tg-bot-mirror: no topic for ${chatId} in group ${groupId}, skip outgoing mirror`);
 			return;
 		}
 		try {
@@ -242,14 +287,14 @@ export class TgBotMirrorService {
 			let text = `🧑‍💼 ${who} (B24)\n\n${this.escapeHtml(input.text)}`;
 			if (text.length > TEXT_MAX) text = text.slice(0, TEXT_MAX - 1) + "…";
 			await this.botApi("sendMessage", {
-				chat_id: this.groupId,
+				chat_id: groupId,
 				message_thread_id: topicId,
 				text,
 				parse_mode: "HTML",
 				disable_web_page_preview: true,
 			});
 		} catch (e: any) {
-			this.logger.error(`tg-bot-mirror: mirrorOutgoing failed for ${chatId}: ${e.message}`);
+			this.logger.error(`tg-bot-mirror: mirrorOutgoing failed for ${chatId} in group ${groupId}: ${e.message}`);
 		}
 	}
 }

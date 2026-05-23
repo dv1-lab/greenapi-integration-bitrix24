@@ -2462,7 +2462,58 @@ export class Bitrix24Service extends BaseAdapter<
 	// Журнал TgBotEventLog — это и «история» переписки, и страховка replay при
 	// недоступности B24. Медиа (фото/видео/файлы) — Этап 4, пока релеится текст.
 	// См. docs/TELEGRAM_BOT_FLOW.md.
-	async handleTelegramBotIncoming(update: any): Promise<{ success: boolean; reason?: string }> {
+
+	/** Конфиг одного Telegram-бот-инстанса. Несколько ботов → несколько
+	 *  конфигов: каждый со своим токеном, линией B24, секретом webhook,
+	 *  группой зеркала и user-code префиксом (чтобы B24 не путал клиентов
+	 *  между линиями). Префикс legacy «tgbot_» закреплён за begovoy_bot —
+	 *  не меняем, иначе разорвутся существующие сессии в B24. */
+	private getTgBotConfig(name: string): {
+		name: string;
+		token: string;
+		lineId: number;
+		webhookSecret: string;
+		mirrorGroupId: string;
+		userKeyPrefix: string;
+	} | null {
+		const g = (k: string) => this.configService.get<string>(k) || "";
+		if (name === "begovoy") {
+			return {
+				name: "begovoy",
+				token: g("TG_BOT_TOKEN"),
+				lineId: Number(g("TG_BOT_LINE_ID")) || 0,
+				webhookSecret: g("TG_BOT_WEBHOOK_SECRET"),
+				mirrorGroupId: g("TG_BOT_MIRROR_GROUP_ID"),
+				userKeyPrefix: "tgbot_",
+			};
+		}
+		if (name === "support") {
+			return {
+				name: "support",
+				token: g("TG_BOT_SUPPORT_TOKEN"),
+				lineId: Number(g("TG_BOT_SUPPORT_LINE_ID")) || 0,
+				webhookSecret: g("TG_BOT_SUPPORT_WEBHOOK_SECRET"),
+				mirrorGroupId: g("TG_BOT_SUPPORT_MIRROR_GROUP_ID"),
+				userKeyPrefix: "tgsupport_",
+			};
+		}
+		return null;
+	}
+
+	/** Определить инстанс Telegram-бота по lineNumber из B24 outgoing webhook.
+	 *  Используется handleBitrix24Webhook для роутинга ответа оператора в нужный
+	 *  бот (begovoy / support / …). */
+	private getTgBotConfigByLine(lineNumber: number): ReturnType<typeof this.getTgBotConfig> {
+		for (const name of ["begovoy", "support"]) {
+			const cfg = this.getTgBotConfig(name);
+			if (cfg && cfg.lineId === lineNumber) return cfg;
+		}
+		return null;
+	}
+
+	async handleTelegramBotIncoming(update: any, botName: string = "begovoy"): Promise<{ success: boolean; reason?: string }> {
+		const cfg = this.getTgBotConfig(botName);
+		if (!cfg) return { success: false, reason: `unknown bot: ${botName}` };
 		const updateId = update?.update_id;
 		if (updateId === undefined || updateId === null) {
 			return { success: false, reason: "no update_id" };
@@ -2508,10 +2559,10 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`tg-bot: TgBotEventLog upsert failed (non-fatal): ${e.message}`);
 		}
 
-		const lineId = Number(this.configService.get<string>("TG_BOT_LINE_ID"));
+		const lineId = cfg.lineId;
 		if (!lineId || !Number.isFinite(lineId)) {
-			this.logger.error(`tg-bot: TG_BOT_LINE_ID not configured in .env`);
-			return { success: false, reason: "TG_BOT_LINE_ID not configured" };
+			this.logger.error(`tg-bot[${cfg.name}]: lineId not configured`);
+			return { success: false, reason: `tg-bot[${cfg.name}] lineId not configured` };
 		}
 
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
@@ -2546,7 +2597,7 @@ export class Bitrix24Service extends BaseAdapter<
 		let mediaFile: { url: string; name: string; isImage: boolean } | null = null;
 		const media = this.extractTelegramMedia(msg);
 		if (media) {
-			const token = this.configService.get<string>("TG_BOT_TOKEN");
+			const token = cfg.token;
 			if (token) {
 				try {
 					const fetched = await this.fetchTelegramFile(token, media.fileId);
@@ -2567,7 +2618,7 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 
-		const userKey = `tgbot_${chatId}`;
+		const userKey = `${cfg.userKeyPrefix}${chatId}`;
 		const ts = msg.date ? Number(msg.date) : Math.floor(Date.now() / 1000);
 
 		const messagePayload: any = {
@@ -2611,14 +2662,15 @@ export class Bitrix24Service extends BaseAdapter<
 		// телефону, у Telegram-бота его нет, поэтому связываем сами. Фоном.
 		// ymClientId передаём всегда: если контакт не нашёлся, метку всё равно
 		// надо записать на лид сессии.
-		this.backfillTgBotContactLink(portalDomain, chatId, contactId, ymClientId)
-			.catch((e) => this.logger.warn(`tg-bot: backfill link failed (non-fatal): ${e.message}`));
+		this.backfillTgBotContactLink(portalDomain, chatId, contactId, ymClientId, cfg.userKeyPrefix)
+			.catch((e) => this.logger.warn(`tg-bot[${cfg.name}]: backfill link failed (non-fatal): ${e.message}`));
 
-		// Зеркало в TG-супергруппу «TG begovoy_bot» — не блокирует доставку.
+		// Зеркало в TG-супергруппу инстанса — отдельно для каждого бота.
 		this.tgBotMirror.mirrorIncoming({
 			chatId, clientName, username, text, hasMedia,
 			mediaUrl: mediaFile?.url, mediaName: mediaFile?.name, mediaIsImage: mediaFile?.isImage,
-		}).catch((e) => this.logger.warn(`tg-bot: mirror incoming failed (non-fatal): ${e.message}`));
+			mirrorGroupId: cfg.mirrorGroupId || undefined,
+		}).catch((e) => this.logger.warn(`tg-bot[${cfg.name}]: mirror incoming failed (non-fatal): ${e.message}`));
 
 		return { success: true };
 	}
@@ -2630,9 +2682,10 @@ export class Bitrix24Service extends BaseAdapter<
 	// клиента (резолвнут ранее по UF_CRM_TG_CHAT_ID) — тогда оператор видит
 	// карточку клиента и всю историю. Идёт с retry: сессия создаётся с лагом.
 	private async backfillTgBotContactLink(
-		portalDomain: string, chatId: string, contactId: number | undefined, ymClientId?: string,
+		portalDomain: string, chatId: string, contactId: number | undefined,
+		ymClientId?: string, userKeyPrefix: string = "tgbot_",
 	): Promise<void> {
-		const userCode = `tgbot_${chatId}`;
+		const userCode = `${userKeyPrefix}${chatId}`;
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 		for (let attempt = 1; attempt <= 6; attempt++) {
 			await sleep(attempt === 1 ? 1500 : 2000);
@@ -4222,7 +4275,7 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	// Outgoing B24 → Telegram-бот: оператор пишет в чате открытой линии
-	// TG_BOT_LINE_ID → отправляем клиенту в Telegram через @begovoy_bot.
+	// инстанса (begovoy / support / …) → отправляем клиенту через нужный бот.
 	// Эхо нет: Telegram Bot API не шлёт webhook о сообщениях самого бота,
 	// поэтому отдельной защиты от self-message (как у Green API) не нужно.
 	async handleTelegramBotOutgoing(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
@@ -4232,12 +4285,25 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const m = messages[0];
 
-		// chat.id у нас = `tgbot_<chatId>` (см. handleTelegramBotIncoming).
+		// chat.id формат: <prefix><chatId>. Префикс определяет инстанс бота:
+		// tgbot_ → begovoy, tgsupport_ → support.
 		const rawChatId = String(m.chat?.id || "");
-		const match = rawChatId.match(/^tgbot_(-?\d+)$/);
-		const chatId = match ? match[1] : rawChatId.replace(/[^\d-]/g, "");
+		const matched = rawChatId.match(/^(tgbot|tgsupport)_(-?\d+)$/);
+		const prefix = matched ? matched[1] + "_" : "";
+		const chatId = matched ? matched[2] : rawChatId.replace(/[^\d-]/g, "");
 		if (!chatId) {
 			return { success: false, message: `cannot parse chatId from chat.id=${rawChatId}` };
+		}
+
+		// Определяем инстанс: сначала по lineNumber (надёжнее), fallback по префиксу.
+		const lineNumber = webhook.data?.LINE ? parseInt(webhook.data.LINE) : 0;
+		const cfgByLine = this.getTgBotConfigByLine(lineNumber);
+		const cfgByPrefix = prefix === "tgsupport_"
+			? this.getTgBotConfig("support")
+			: this.getTgBotConfig("begovoy");
+		const cfg = cfgByLine || cfgByPrefix;
+		if (!cfg) {
+			return { success: false, message: `tg-bot: cannot resolve config (line=${lineNumber}, prefix=${prefix})` };
 		}
 
 		// B24 хранит эмодзи шорткодами (:trophy:, :muscle:) — конвертируем в
@@ -4246,9 +4312,9 @@ export class Bitrix24Service extends BaseAdapter<
 		const text = emoji.emojify(m.message?.text || "");
 		const files: any[] = (m.message as any)?.files || [];
 
-		const token = this.configService.get<string>("TG_BOT_TOKEN");
+		const token = cfg.token;
 		if (!token) {
-			return { success: false, message: "TG_BOT_TOKEN not configured" };
+			return { success: false, message: `tg-bot[${cfg.name}]: token not configured` };
 		}
 
 		// B24 отдаёт файл двумя ссылками: link (auth-only) и downloadLink
@@ -4327,9 +4393,11 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`tg-bot: outgoing TgBotEventLog create failed: ${e.message}`);
 		}
 
-		// Зеркало ответа оператора в топик клиента — не блокирует.
-		this.tgBotMirror.mirrorOutgoing({ chatId, text })
-			.catch((e) => this.logger.warn(`tg-bot: mirror outgoing failed (non-fatal): ${e.message}`));
+		// Зеркало ответа оператора в топик клиента — в группу инстанса.
+		this.tgBotMirror.mirrorOutgoing({
+			chatId, text,
+			mirrorGroupId: cfg.mirrorGroupId || undefined,
+		}).catch((e) => this.logger.warn(`tg-bot[${cfg.name}]: mirror outgoing failed (non-fatal): ${e.message}`));
 
 		return {
 			success: true,
@@ -4373,11 +4441,12 @@ export class Bitrix24Service extends BaseAdapter<
 				return result;
 			}
 
-			// Branch: Telegram-бот (@begovoy_bot) — подключён через наш коннектор,
-			// а не Green API. Своя открытая линия TG_BOT_LINE_ID.
-			const tgBotLine = Number(this.configService.get<string>("TG_BOT_LINE_ID"));
-			if (tgBotLine && lineNumber === tgBotLine) {
-				this.logger.info(`Routing outbound to Telegram-bot pipeline (line=${lineNumber})`);
+			// Branch: Telegram-бот (любой инстанс — @begovoy_bot или @begovoy1support_bot)
+			// подключён через наш коннектор, а не Green API. Линии берём из конфигов
+			// бот-инстансов; если совпала любая — роутим в общий handleTelegramBotOutgoing.
+			const tgCfg = this.getTgBotConfigByLine(lineNumber);
+			if (tgCfg) {
+				this.logger.info(`Routing outbound to Telegram-bot pipeline (line=${lineNumber}, bot=${tgCfg.name})`);
 				const result = await this.handleTelegramBotOutgoing(webhook);
 				if (result.success) {
 					await this.sendDeliveryConfirmation(
