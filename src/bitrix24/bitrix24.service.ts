@@ -2794,7 +2794,15 @@ export class Bitrix24Service extends BaseAdapter<
 				? `${quotedNote}\n${text}`
 				: text;
 
-		const userKey = `i2crm_ig_${clientId}`;
+		// A2: для instcom используем mediaId в составе chat/user.id — каждый
+		// пост получает свою сессию и свой лид B24. Для instdir один user.id
+		// на клиента (Direct один на клиента). Все лиды клиента (под разными
+		// постами) подвязываются к одному контакту через UF_CRM_IG_CHAT_ID и
+		// orphan-link / backfillIgUfFields.
+		const mediaIdForKey = isComment ? String(payload?.media_id || "") : "";
+		const userKey = isComment && mediaIdForKey
+			? `i2crm_ig_${clientId}_c${mediaIdForKey}`
+			: `i2crm_ig_${clientId}`;
 		const ts = datetime ? Math.floor(new Date(datetime).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
 		const messagePayload: any = {
@@ -2885,16 +2893,23 @@ export class Bitrix24Service extends BaseAdapter<
 		// Сохраняем последний media+comment-id для outgoing /target/feedback type=comment.
 		// После переключения i2crm на «официальный» способ подключения эти поля стали
 		// обязательными (раньше i2crm сопоставлял по client_id сам).
+		// A2: контекст хранится по (clientId, mediaId) — у клиента под разными
+		// постами разные media_id, контексты не перезатираются. Outgoing берёт
+		// нужный по mediaId из chat.id (см. handleI2crmOutgoing).
 		if (isComment && payload?.media_id && payload?.comment_id) {
 			(this.prisma as any).igCommentContext.upsert({
-				where: { clientId: String(clientId) },
+				where: {
+					clientId_mediaId: {
+						clientId: String(clientId),
+						mediaId: String(payload.media_id),
+					},
+				},
 				create: {
 					clientId: String(clientId),
 					mediaId: String(payload.media_id),
 					commentId: String(payload.comment_id),
 				},
 				update: {
-					mediaId: String(payload.media_id),
 					commentId: String(payload.comment_id),
 				},
 			}).catch((e: any) => {
@@ -2911,7 +2926,8 @@ export class Bitrix24Service extends BaseAdapter<
 		// Передаём session/chat для карточки клиента в TG-mirror.
 		// URL поста (src в payload) приходит для комментариев — пишем в стандартный
 		// мультифилд LINK с типом LINK0 («активная ссылка на пост источника лида»).
-		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, igPostUrl, i2crmContactId).catch((e) => {
+		const igMediaSuffix = isComment && mediaIdForKey ? `_c${mediaIdForKey}` : "";
+		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, igPostUrl, i2crmContactId, igMediaSuffix).catch((e) => {
 			this.logger.warn(`i2crm: backfill UF failed (non-fatal): ${e.message}`);
 		});
 
@@ -3021,8 +3037,12 @@ export class Bitrix24Service extends BaseAdapter<
 		sessionInfo: { sessionId?: string; chatId?: string } = {},
 		postUrl: string = "",
 		passedContactId?: number,
+		mediaSuffix: string = "",
 	): Promise<void> {
-		const userCode = `i2crm_ig_${clientId}`;
+		// A2: для instcom userCode включает media (i2crm_ig_<c>_c<media>),
+		// чтобы попасть в активность именно этой пост-сессии, а не любой
+		// другой сессии того же клиента.
+		const userCode = `i2crm_ig_${clientId}${mediaSuffix}`;
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 		for (let attempt = 1; attempt <= 6; attempt++) {
@@ -3902,12 +3922,19 @@ export class Bitrix24Service extends BaseAdapter<
 			return { success: false, message: `line ${lineNumber} не Instagram (not 18/22)` };
 		}
 
-		// chat.id у нас = `i2crm_ig_<client_id>` (см. handleI2crmIncoming).
-		// Если же пришёл outgoing от ручного теста без incoming — chat.id может быть
-		// сырым числом. Поддерживаем оба формата.
+		// chat.id у нас:
+		//   instdir:  i2crm_ig_<client_id>
+		//   instcom:  i2crm_ig_<client_id>_c<media_id>  (A2: пост на сессию)
+		// Старые сессии без media_id-суффикса поддерживаем для обратной совместимости.
 		const rawChatId = String(m.chat?.id || "");
-		const match = rawChatId.match(/^i2crm_ig_(\d+)$/);
-		const clientId = match ? match[1] : rawChatId.replace(/\D/g, "");
+		const matchWithMedia = rawChatId.match(/^i2crm_ig_(\d+)_c(\d+)$/);
+		const matchClientOnly = rawChatId.match(/^i2crm_ig_(\d+)$/);
+		const clientId = matchWithMedia
+			? matchWithMedia[1]
+			: matchClientOnly
+				? matchClientOnly[1]
+				: rawChatId.replace(/\D/g, "");
+		const mediaIdFromChat = matchWithMedia ? matchWithMedia[2] : "";
 		if (!clientId) {
 			return { success: false, message: `cannot parse client_id from chat.id=${rawChatId}` };
 		}
@@ -3991,14 +4018,33 @@ export class Bitrix24Service extends BaseAdapter<
 		// поля не нужны — это обычное Direct-сообщение комментатору.
 		if (isComment && !replyAsDirect) {
 			try {
-				const ctx = await (this.prisma as any).igCommentContext.findUnique({
-					where: { clientId: String(clientId) },
-				});
+				// A2: ищем контекст конкретного поста (mediaId из chat.id). Если
+				// chat.id старый (без media-суффикса) — fallback на самый свежий
+				// контекст этого клиента (legacy-поведение «последний коммент»).
+				let ctx: any = null;
+				if (mediaIdFromChat) {
+					ctx = await (this.prisma as any).igCommentContext.findUnique({
+						where: {
+							clientId_mediaId: {
+								clientId: String(clientId),
+								mediaId: mediaIdFromChat,
+							},
+						},
+					});
+				}
+				if (!ctx) {
+					const rows = await (this.prisma as any).igCommentContext.findMany({
+						where: { clientId: String(clientId) },
+						orderBy: { updatedAt: "desc" },
+						take: 1,
+					});
+					ctx = rows[0] || null;
+				}
 				if (ctx?.mediaId && ctx?.commentId) {
 					baseBody.media = ctx.mediaId;
 					baseBody.comment = ctx.commentId;
 				} else {
-					this.logger.warn(`i2crm comment: no IgCommentContext for client=${clientId} — request will likely fail validation`);
+					this.logger.warn(`i2crm comment: no IgCommentContext for client=${clientId} media=${mediaIdFromChat || "—"} — request will likely fail validation`);
 				}
 			} catch (e: any) {
 				this.logger.warn(`i2crm comment: load IgCommentContext failed: ${e.message}`);

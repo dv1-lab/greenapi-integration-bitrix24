@@ -131,12 +131,18 @@ model EntityPhonePref {
 // после переключения i2crm на «официальный» способ подключения media и comment
 // поля стали обязательными — i2crm больше не сопоставляет ответ по client_id сам.
 // При incoming type=comment записываем upsert, при outgoing подтягиваем.
+// Контекст IG-комментария для outgoing /target/feedback type=comment.
+// A2: ключ составной (clientId, mediaId) — у клиента под разными постами
+// разные media_id, контексты не перезаписывают друг друга. Outgoing берёт
+// нужный context по mediaId, извлечённому из chat.id (i2crm_ig_<c>_c<media>).
 model IgCommentContext {
-  clientId  String   @id @db.VarChar(40)
+  clientId  String   @db.VarChar(40)
   mediaId   String   @db.VarChar(64)
   commentId String   @db.VarChar(64)
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
+
+  @@id([clientId, mediaId])
 }
 
 // Профилактика: журнал всех incoming-webhook'ов от i2crm Public API.
