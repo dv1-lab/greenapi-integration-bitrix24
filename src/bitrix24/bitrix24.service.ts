@@ -2147,10 +2147,9 @@ export class Bitrix24Service extends BaseAdapter<
 			// chatId в UF контакта после привязки.
 			if (line != null) {
 				const chatIdForUf = (instanceProvider === "max" || instanceProvider === "telegram") ? message.phone : undefined;
-				// Я.Метрика ClientID из служебной метки «код обращения: ym-<id>»,
-				// которую сайт подставляет в текст WhatsApp-сообщения (PB-WA-CID).
-				const ymMatch = String(message.message || "").match(/\bym-(\d{6,25})\b/);
-				const ymClientId = ymMatch ? ymMatch[1] : undefined;
+				// Я.Метрика ClientId из служебной метки сайта 1begovoy.ru —
+				// два формата (ym-<id> или «с сайта … (ID <id>)»), см. extractYmClientId.
+				const ymClientId = this.extractYmClientId(message.message);
 				if (phoneE164 || chatIdForUf) {
 					await this.ensureOpenLeadForPhone(
 						instance.user.portalDomain,
@@ -2275,6 +2274,18 @@ export class Bitrix24Service extends BaseAdapter<
 			return `↩️ В ответ на ${label}${parts.length ? ": " + parts.join(" ") : ""}`;
 		}
 		return "";
+	}
+
+	// Я.Метрика ClientId из метки, которую сайт 1begovoy.ru подставляет в
+	// pre-fill текста при «Спросить о товаре в WhatsApp/Telegram». Сайт за
+	// время существовал в двух форматах — поддерживаем оба:
+	//   1) «— код обращения: ym-<id>» (старая разметка);
+	//   2) «— с сайта 1begovoy.ru (ID <id>)» (новая разметка).
+	private extractYmClientId(text: string | undefined | null): string | undefined {
+		const s = String(text || "");
+		const m = s.match(/\bym-(\d{6,25})\b/)
+			|| s.match(/с\s+сайта\s+1begovoy\.ru\s*\(ID\s*(\d{6,25})\)/i);
+		return m ? m[1] : undefined;
 	}
 
 	// Достаёт медиа-вложение из Telegram-сообщения. Telegram кладёт файл в
@@ -2428,11 +2439,9 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const portalDomain = user.portalDomain;
 
-		// Я.Метрика ClientId из метки «код обращения: ym-<id>» в тексте —
-		// сайт подставляет её при «Спросить о товаре в Telegram». Тот же
-		// формат, что для WhatsApp (PB-WA-CID).
-		const ymMatch = text.match(/\bym-(\d{6,25})\b/);
-		const ymClientId = ymMatch ? ymMatch[1] : undefined;
+		// Я.Метрика ClientId из служебной метки сайта 1begovoy.ru (см. extractYmClientId
+		// — поддерживаются оба формата: ym-<id> и «с сайта … (ID <id>)»).
+		const ymClientId = this.extractYmClientId(text);
 
 		// Резолвим контакт клиента по UF_CRM_TG_CHAT_ID (channelLabel="Telegram").
 		// skipLeadCreation=true — лид создаёт сама открытая линия B24, свой лид
