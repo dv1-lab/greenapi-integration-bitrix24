@@ -9,6 +9,6 @@ import { MediaController } from "./media.controller";
 @Module({
   providers: [Bitrix24Service, Bitrix24Transformer, I2crmTgMirrorService, TgBotMirrorService, MediaCacheService],
   controllers: [MediaController],
-  exports: [Bitrix24Service, I2crmTgMirrorService],
+  exports: [Bitrix24Service, I2crmTgMirrorService, TgBotMirrorService],
 })
 export class Bitrix24Module {}

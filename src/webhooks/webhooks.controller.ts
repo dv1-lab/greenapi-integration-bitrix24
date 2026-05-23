@@ -2,6 +2,7 @@ import { Controller, Post, Body, HttpCode, HttpStatus, Req, Res, UseGuards } fro
 import { Request, Response } from "express";
 import { Bitrix24Service } from "../bitrix24/bitrix24.service";
 import { I2crmTgMirrorService } from "../bitrix24/i2crm-tg-mirror.service";
+import { TgBotMirrorService } from "../bitrix24/tg-bot-mirror.service";
 import { GreenApiWebhook, GreenApiLogger } from "@green-api/greenapi-integration";
 import { Bitrix24WebhookDto } from "../bitrix24/dto/bitrix24-webhook.dto";
 import { Bitrix24WebhookGuard } from "./guards/bitrix24-webhook.guard";
@@ -25,6 +26,7 @@ export class WebhooksController {
 	constructor(
 		private readonly bitrix24Service: Bitrix24Service,
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
+		private readonly tgBotMirror: TgBotMirrorService,
 		private readonly prisma: PrismaService,
 	) {}
 
@@ -177,6 +179,51 @@ export class WebhooksController {
 		} catch (error: any) {
 			const errorResponse = this.mapError(error);
 			res.status(errorResponse.statusCode).json(errorResponse.body);
+		}
+	}
+
+	// Internal endpoint для wa-tg-bridge: оператор написал ответ в супергруппе
+	// зеркала наших Telegram-ботов (TG begovoy_bot / 1Б Поддержка) — bridge
+	// ловит это в TG-группе и пересылает сюда. Мы по (groupId, topicId)
+	// находим chatId клиента и отправляем через нужный бот-инстанс.
+	// Auth: X-Hint-Secret.
+	@Post("internal/tg-bot-reply")
+	@HttpCode(HttpStatus.OK)
+	async tgBotReply(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			groupId?: string; topicId?: number; text?: string; operatorName?: string;
+		};
+		const groupId = String(body.groupId || "");
+		const topicId = Number(body.topicId || 0);
+		const text = String(body.text || "").trim();
+		if (!groupId || !topicId || !text) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "groupId, topicId, text required" });
+			return;
+		}
+		const botName = this.bitrix24Service.getTgBotByGroupId(groupId);
+		if (!botName) {
+			res.status(HttpStatus.OK).json({ ok: false, reason: `groupId ${groupId} не привязан к tg-bot инстансу` });
+			return;
+		}
+		const chatId = await this.tgBotMirror.findChatIdByTopic(groupId, topicId);
+		if (!chatId) {
+			res.status(HttpStatus.OK).json({ ok: false, reason: `нет связи topic ${topicId} → клиент в group ${groupId}` });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.sendFromTgBot(
+				botName, chatId, text, body.operatorName,
+			);
+			res.json(result);
+		} catch (e: any) {
+			this.logger.error(`tg-bot-reply send failed: ${e.message}`);
+			res.status(HttpStatus.OK).json({ ok: false, error: e.message });
 		}
 	}
 

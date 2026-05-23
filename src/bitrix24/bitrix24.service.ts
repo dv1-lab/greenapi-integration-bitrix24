@@ -2511,6 +2511,60 @@ export class Bitrix24Service extends BaseAdapter<
 		return null;
 	}
 
+	/** Определить инстанс Telegram-бота по mirrorGroupId. Используется при
+	 *  обратном пути «оператор пишет в супергруппе зеркала → отправить
+	 *  клиенту через нужный бот». Public — controller вызывает напрямую. */
+	getTgBotByGroupId(groupId: string): string | null {
+		const g = String(groupId);
+		for (const name of ["begovoy", "support"]) {
+			const cfg = this.getTgBotConfig(name);
+			if (cfg && String(cfg.mirrorGroupId) === g) return name;
+		}
+		return null;
+	}
+
+	/** Отправить сообщение клиенту через указанный бот-инстанс. Используется
+	 *  обратным путём из bridge (оператор пишет в зеркале → клиенту через
+	 *  бот). emoji-шорткоды конвертируются. Outgoing журналируется. */
+	async sendFromTgBot(
+		botName: string, chatId: string, text: string, operatorName?: string,
+	): Promise<{ ok: boolean; error?: string; messageId?: number }> {
+		const cfg = this.getTgBotConfig(botName);
+		if (!cfg) return { ok: false, error: `unknown bot: ${botName}` };
+		if (!cfg.token) return { ok: false, error: `tg-bot[${botName}]: no token` };
+		const finalText = emoji.emojify(text);
+		try {
+			const resp: any = await axios.post(
+				`https://api.telegram.org/bot${cfg.token}/sendMessage`,
+				{ chat_id: chatId, text: finalText },
+				{ timeout: 15000, validateStatus: () => true },
+			);
+			if (resp.data?.ok !== true) {
+				const desc = resp.data?.description || `HTTP ${resp.status}`;
+				this.logger.error(`sendFromTgBot[${botName}] rejected: ${desc}`);
+				return { ok: false, error: desc };
+			}
+			const messageId = resp.data?.result?.message_id;
+			this.logger.info(`sendFromTgBot[${botName}]: → chat=${chatId} msg=${messageId}${operatorName ? ` by ${operatorName}` : ""}`);
+			// Журнал — direction=out, помечаем что пришло из mirror'а.
+			try {
+				await (this.prisma as any).tgBotEventLog.create({
+					data: {
+						updateId: `out_mirror_${Date.now()}_${messageId || "0"}`,
+						chatId, messageId: String(messageId || ""),
+						direction: "out",
+						payload: JSON.stringify({ chat_id: chatId, text, from_mirror: true, operator: operatorName }),
+						status: "sent", sentAt: new Date(),
+					},
+				});
+			} catch { /* non-fatal */ }
+			return { ok: true, messageId };
+		} catch (e: any) {
+			this.logger.error(`sendFromTgBot[${botName}] transport error: ${e.message}`);
+			return { ok: false, error: e.message };
+		}
+	}
+
 	async handleTelegramBotIncoming(update: any, botName: string = "begovoy"): Promise<{ success: boolean; reason?: string }> {
 		const cfg = this.getTgBotConfig(botName);
 		if (!cfg) return { success: false, reason: `unknown bot: ${botName}` };

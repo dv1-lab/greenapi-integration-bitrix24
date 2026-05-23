@@ -199,6 +199,20 @@ export class TgBotMirrorService {
 		}
 	}
 
+	// Обратный поиск: по (groupId, topicId) → chatId клиента. Используется
+	// для пути «оператор пишет в топике зеркала → отправить через бот
+	// клиенту». Возвращает chatId или null если связь не найдена.
+	async findChatIdByTopic(groupId: string, topicId: number): Promise<string | null> {
+		await this.loadMap();
+		const prefix = `${groupId}:`;
+		for (const [k, tid] of Object.entries(this.state.topics)) {
+			if (tid === topicId && k.startsWith(prefix)) {
+				return k.slice(prefix.length);
+			}
+		}
+		return null;
+	}
+
 	// Зеркалит входящее сообщение клиента в его топик. Медиа передаётся
 	// проксированным URL (social.9wb.ru/media/…) — бот-зеркало скачивает
 	// файл оттуда сам. mirrorGroupId — override группы для multi-bot:
