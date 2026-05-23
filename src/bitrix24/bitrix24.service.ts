@@ -855,6 +855,12 @@ export class Bitrix24Service extends BaseAdapter<
 		messageId?: string;
 		mediaUrl?: string;
 		mediaName?: string;
+		// A2/Customer-360: метаданные поста, под которым оставлен/отвечен
+		// коммент. Каждое событие неперезаписываемое — в ленте Customer-360
+		// видна полная история «какой пост → какой коммент → какой ответ».
+		postUrl?: string;
+		mediaId?: string;
+		commentId?: string;
 	}): Promise<void> {
 		const fc = await this._csFindOrCreate("ig_client", opts.clientId, "adapter-ig");
 		const payload: Record<string, any> = {
@@ -862,6 +868,9 @@ export class Bitrix24Service extends BaseAdapter<
 			username: opts.username || undefined,
 			ig_channel: opts.igChannel,
 			message_id: opts.messageId,
+			post_url: opts.postUrl || undefined,
+			media_id: opts.mediaId || undefined,
+			comment_id: opts.commentId || undefined,
 		};
 		// Медиа-вложение: скачиваем у себя (ссылка i2crm живёт недолго) и
 		// кладём наш URL в payload — лента Customer-360 покажет фото/видео
@@ -2888,6 +2897,9 @@ export class Bitrix24Service extends BaseAdapter<
 					? payload?.media_url || payload?.media?.url || undefined
 					: undefined,
 			mediaName: payload?.media?.file_name || undefined,
+			postUrl: igPostUrl || undefined,
+			mediaId: payload?.media_id ? String(payload.media_id) : undefined,
+			commentId: payload?.comment_id ? String(payload.comment_id) : undefined,
 		});
 
 		// Сохраняем последний media+comment-id для outgoing /target/feedback type=comment.
@@ -4142,12 +4154,17 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 		}
 		// Customer-360: исходящее IG-сообщение в customer_events (best-effort).
+		// A2: пишем media/comment/post_url, чтобы в ленте видно было, под каким
+		// именно постом ответ ушёл (особенно важно когда у клиента несколько
+		// открытых сессий-постов).
 		void this._emitIgMessageEvent({
 			clientId: String(clientId),
 			direction: "out",
 			text,
 			igChannel: replyAsDirect ? "direct" : "comment",
 			messageId: externalMessageId ? String(externalMessageId) : undefined,
+			mediaId: baseBody.media ? String(baseBody.media) : undefined,
+			commentId: baseBody.comment ? String(baseBody.comment) : undefined,
 		});
 
 		return {
