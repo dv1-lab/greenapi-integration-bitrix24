@@ -2684,15 +2684,21 @@ export class Bitrix24Service extends BaseAdapter<
 		const phoneE164 = phone && /^\+?\d{10,15}$/.test(String(phone))
 			? (String(phone).startsWith("+") ? String(phone) : `+${phone}`)
 			: "";
+		// skipLeadCreation=true — лид создаст сама открытая линия B24, свой
+		// «(auto)» лид не плодим. Контакт привяжем к лиду сессии ниже через
+		// backfillIgUfFields (см. контакт-привязку по образцу tg-бота).
+		let i2crmContactId: number | undefined;
 		try {
-			await this.ensureOpenLeadForPhone(
+			const leadResult = await this.ensureOpenLeadForPhone(
 				portalDomain,
 				phoneE164,
 				clientName,
 				lineId,
 				channelLabel,
 				String(clientId),
+				true,
 			);
+			i2crmContactId = leadResult?.contactId;
 		} catch (e: any) {
 			this.logger.warn(`i2crm: ensureLead failed (non-fatal): ${e.message}`);
 		}
@@ -2827,7 +2833,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// Передаём session/chat для карточки клиента в TG-mirror.
 		// URL поста (src в payload) приходит для комментариев — пишем в стандартный
 		// мультифилд LINK с типом LINK0 («активная ссылка на пост источника лида»).
-		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, igPostUrl).catch((e) => {
+		this.backfillIgUfFields(portalDomain, String(clientId), username, channelLabel, channel, sessionInfo, igPostUrl, i2crmContactId).catch((e) => {
 			this.logger.warn(`i2crm: backfill UF failed (non-fatal): ${e.message}`);
 		});
 
@@ -2936,6 +2942,7 @@ export class Bitrix24Service extends BaseAdapter<
 		channel: string = "instdir",
 		sessionInfo: { sessionId?: string; chatId?: string } = {},
 		postUrl: string = "",
+		passedContactId?: number,
 	): Promise<void> {
 		const userCode = `i2crm_ig_${clientId}`;
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -3003,6 +3010,16 @@ export class Bitrix24Service extends BaseAdapter<
 						usernameChange = { oldName: String(lead.UF_CRM_IG_USERNAME), newName: username };
 					}
 					let upd: Record<string, any> | null = buildUpdate(lead?.UF_CRM_IG_CHAT_ID, lead?.UF_CRM_IG_USERNAME, lead?.UF_CRM_INSTAGRAM);
+					// Если у нас есть зарезолвленный контакт клиента (по IG_CHAT_ID),
+					// а на лиде сессии CONTACT_ID не проставлен — привязываем.
+					// B24 матчит открытые линии по телефону, у Instagram-клиента его
+					// обычно нет, поэтому связку контакта делаем сами (симметрично
+					// tg-боту). Без этого вместо привязки получали бы дубль:
+					// «<клиент> - Instagram (auto)» от ensureLead + сессия-лид B24.
+					if (passedContactId && !lead?.CONTACT_ID) {
+						if (!upd) upd = {};
+						upd.CONTACT_ID = passedContactId;
+					}
 					// Yandex Metrika ClientId: только для лидов. С сайта заполняется
 					// через NetForm (заявка/звонок), у IG-лидов нет. B24 требует поле
 					// при смене стадии — ставим "-" если пусто.
