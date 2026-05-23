@@ -145,6 +145,27 @@ model IgCommentContext {
   @@id([clientId, mediaId])
 }
 
+// Связь b24 message_id ↔ Instagram comment_id (Этап 3 reply на конкретный
+// коммент в треде). При incoming IG-комменте мы шлём его в B24 через
+// imconnector.send.messages, потом узнаём b24 message_id через
+// im.dialog.messages.get (B24 не возвращает его в response send.messages)
+// и сохраняем связь сюда. Когда оператор в B24 делает reply на это
+// сообщение клиента — B24 в outgoing-webhook передаёт quote/parent с id
+// исходного, мы по нему находим оригинальный comment_id и отвечаем именно
+// на тот коммент в Instagram.
+model IgInboundB24Link {
+  id           BigInt   @id @default(autoincrement())
+  b24ChatId    String   @db.VarChar(64)
+  b24MessageId String   @db.VarChar(64)
+  clientId     String   @db.VarChar(40)
+  mediaId      String   @db.VarChar(64)
+  commentId    String   @db.VarChar(64)
+  createdAt    DateTime @default(now())
+
+  @@unique([b24ChatId, b24MessageId])
+  @@index([clientId, mediaId])
+}
+
 // Профилактика: журнал всех incoming-webhook'ов от i2crm Public API.
 // Если B24 заблокирован (OVERLOAD_LIMIT и др.) — сообщения сохраняются здесь
 // со status='pending'. После восстановления — endpoint /webhooks/internal/i2crm-replay

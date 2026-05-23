@@ -2937,6 +2937,17 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
 		});
 
+		// Этап 3: связываем b24 message_id с comment_id, чтобы при reply от
+		// оператора в B24 знать, на какой именно IG-коммент в треде отвечать.
+		// B24 не отдаёт message_id в response send.messages — узнаём через
+		// im.dialog.messages.get последнего сообщения в чате сессии.
+		if (isComment && sessionInfo.chatId && payload?.media_id && payload?.comment_id) {
+			void this.linkIgCommentToB24Message(
+				portalDomain, sessionInfo.chatId, String(clientId),
+				String(payload.media_id), String(payload.comment_id),
+			).catch((e) => this.logger.warn(`i2crm: ig-b24-link failed (non-fatal): ${e.message}`));
+		}
+
 		// Customer-360: входящее IG-сообщение в customer_events (best-effort).
 		void this._emitIgMessageEvent({
 			clientId: String(clientId),
@@ -3091,6 +3102,55 @@ export class Bitrix24Service extends BaseAdapter<
 
 		this.logger.info(`i2crm-replay: total=${total} sent=${sent} errors=${errors} skipped=${skipped}`);
 		return { total, sent, errors, skipped };
+	}
+
+	/** Этап 3: связь b24 message_id ↔ IG comment. После того как мы передали
+	 *  входящий IG-коммент клиента через imconnector.send.messages, B24 пишет
+	 *  его в чат открытой линии и присваивает свой message_id. Этот id в
+	 *  response B24 не возвращает — узнаём через im.dialog.messages.get
+	 *  последнего сообщения в чате (retry на случай race).
+	 *  Сохраняем (b24ChatId, b24MessageId) → (clientId, mediaId, commentId).
+	 *  Когда оператор в B24 сделает reply на это сообщение, по quote_id
+	 *  найдём оригинальный comment_id и ответим именно на тот коммент. */
+	private async linkIgCommentToB24Message(
+		portalDomain: string, b24ChatId: string, clientId: string,
+		mediaId: string, commentId: string,
+	): Promise<void> {
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		let b24MessageId: string | null = null;
+		for (let attempt = 1; attempt <= 5; attempt++) {
+			await sleep(attempt === 1 ? 500 : 800);
+			try {
+				const resp: any = await this.callBitrix24Method(portalDomain, "im.dialog.messages.get", {
+					DIALOG_ID: `chat${b24ChatId}`,
+					LIMIT: 1,
+				});
+				const list = Array.isArray(resp?.messages) ? resp.messages : [];
+				const last = list[0];
+				if (last?.id) {
+					b24MessageId = String(last.id);
+					break;
+				}
+			} catch (e: any) {
+				this.logger.debug(`linkIgComment: dialog.messages.get attempt ${attempt} failed: ${e.message}`);
+			}
+		}
+		if (!b24MessageId) {
+			this.logger.warn(`linkIgComment: no b24 message_id for chat=${b24ChatId} comment=${commentId}`);
+			return;
+		}
+		try {
+			await (this.prisma as any).igInboundB24Link.create({
+				data: { b24ChatId, b24MessageId, clientId, mediaId, commentId },
+			});
+			this.logger.info(`linkIgComment: b24 ${b24ChatId}:${b24MessageId} → comment ${commentId} media ${mediaId}`);
+		} catch (e: any) {
+			if (/Unique|duplicate/i.test(String(e?.message || ""))) {
+				this.logger.debug(`linkIgComment: already linked b24 ${b24ChatId}:${b24MessageId}`);
+			} else {
+				this.logger.warn(`linkIgComment: insert failed: ${e.message}`);
+			}
+		}
 	}
 
 	private async backfillIgUfFields(
@@ -4077,17 +4137,49 @@ export class Bitrix24Service extends BaseAdapter<
 			client: String(clientId),
 			type: replyAsDirect ? "direct" : "comment",
 		};
+		// Этап 3: если оператор в B24 сделал reply на конкретное сообщение
+		// клиента, B24 в outgoing-webhook передаёт quote/parent id. По нему
+		// ищем в IgInboundB24Link оригинальный comment_id+media_id и отвечаем
+		// именно на тот коммент в Instagram, а не на «последний из media».
+		// Поля разные у разных версий B24 — пробуем известные.
+		let replyMatched: { mediaId: string; commentId: string } | null = null;
+		const mm: any = m.message;
+		const imBlock: any = (m as any).im || {};
+		const replyB24MsgId = String(
+			mm?.parent_message_id || mm?.parent || mm?.parent_id ||
+			mm?.quote_message_id || mm?.reply_to_message_id ||
+			(mm?.quote && (mm.quote.id || mm.quote.message_id)) || ""
+		);
+		const replyB24ChatId = String(imBlock?.chat_id || "");
+		if (isComment && !replyAsDirect && replyB24MsgId && replyB24ChatId) {
+			try {
+				const link: any = await (this.prisma as any).igInboundB24Link.findUnique({
+					where: {
+						b24ChatId_b24MessageId: {
+							b24ChatId: replyB24ChatId,
+							b24MessageId: replyB24MsgId,
+						},
+					},
+				});
+				if (link?.commentId && link?.mediaId) {
+					replyMatched = { mediaId: link.mediaId, commentId: link.commentId };
+					this.logger.info(`i2crm reply: operator replied to b24 ${replyB24ChatId}:${replyB24MsgId} → comment ${link.commentId} media ${link.mediaId}`);
+				} else {
+					this.logger.debug(`i2crm reply: no link for b24 ${replyB24ChatId}:${replyB24MsgId}`);
+				}
+			} catch (e: any) {
+				this.logger.warn(`i2crm reply lookup failed: ${e.message}`);
+			}
+		}
+
 		// Для публичного comment-ответа: media (post id) и comment (parent
 		// comment id) обязательны после перехода i2crm на «официальный» способ.
-		// Берём из IgCommentContext. Для ответа с пометкой «др» (в Директ) эти
-		// поля не нужны — это обычное Direct-сообщение комментатору.
+		// Приоритет — replyMatched (reply на конкретное сообщение). Иначе
+		// IgCommentContext по mediaId. Для replyAsDirect эти поля не нужны.
 		if (isComment && !replyAsDirect) {
 			try {
-				// A2: ищем контекст конкретного поста (mediaId из chat.id). Если
-				// chat.id старый (без media-суффикса) — fallback на самый свежий
-				// контекст этого клиента (legacy-поведение «последний коммент»).
-				let ctx: any = null;
-				if (mediaIdFromChat) {
+				let ctx: any = replyMatched;
+				if (!ctx && mediaIdFromChat) {
 					ctx = await (this.prisma as any).igCommentContext.findUnique({
 						where: {
 							clientId_mediaId: {
@@ -4109,10 +4201,10 @@ export class Bitrix24Service extends BaseAdapter<
 					baseBody.media = ctx.mediaId;
 					baseBody.comment = ctx.commentId;
 				} else {
-					this.logger.warn(`i2crm comment: no IgCommentContext for client=${clientId} media=${mediaIdFromChat || "—"} — request will likely fail validation`);
+					this.logger.warn(`i2crm comment: no context for client=${clientId} media=${mediaIdFromChat || "—"} — request will likely fail validation`);
 				}
 			} catch (e: any) {
-				this.logger.warn(`i2crm comment: load IgCommentContext failed: ${e.message}`);
+				this.logger.warn(`i2crm comment: lookup failed: ${e.message}`);
 			}
 		}
 
