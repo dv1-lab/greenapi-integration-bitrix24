@@ -311,7 +311,10 @@ export class I2crmTgMirrorService {
 			? ` (<a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>)`
 			: "";
 		const header = `${clientName}${usernameLink}`;
-		const postUrl = payload?.post_url ? String(payload.post_url) : "";
+		// URL поста в i2crm payload приходит в `src` (основное поле, как для
+		// фото-сообщений), `post_url` / `media_url` — legacy fallback. Раньше
+		// читали только post_url → в зеркале «К посту:» терялся.
+		const postUrl = String(payload?.src || payload?.post_url || payload?.media_url || "");
 		const postCtx = isComment && postUrl
 			? `\nК посту: <a href="${this.escapeHtml(postUrl)}">${this.escapeHtml(postUrl)}</a>`
 			: "";
