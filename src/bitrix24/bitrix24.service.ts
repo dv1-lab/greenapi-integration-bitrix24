@@ -527,10 +527,30 @@ export class Bitrix24Service extends BaseAdapter<
 						CONTACT_ID: contactId,
 						"!STATUS_SEMANTIC_ID": ["F", "S"],
 					},
-					select: ["ID"],
+					select: ["ID", "UF_CRM_NF_YM_CLIENT_ID"],
 				});
 				if (Array.isArray(openLeads) && openLeads.length > 0) {
 					this.logger.info(`ensureLead: contact ${contactId} has ${openLeads.length} open lead(s) — no action`);
+					// Я.Метрика ClientId: метка `ym-<id>` из текста (сайт подставляет
+					// её при «Спросить о товаре в WhatsApp/Telegram»). Если на
+					// открытом лиде поле пусто или заглушка "-", а сейчас пришёл
+					// настоящий id — обновляем. Иначе метка терялась бы для всех
+					// повторных обращений клиента с открытым лидом.
+					if (ymClientId) {
+						const openLead = openLeads[0];
+						const currentYm = String(openLead?.UF_CRM_NF_YM_CLIENT_ID || "");
+						if (!currentYm || currentYm === "-") {
+							try {
+								await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+									id: parseInt(openLead.ID, 10),
+									fields: { UF_CRM_NF_YM_CLIENT_ID: ymClientId },
+								});
+								this.logger.info(`ensureLead: UF_CRM_NF_YM_CLIENT_ID=${ymClientId} → existing lead ${openLead.ID}`);
+							} catch (e: any) {
+								this.logger.warn(`ensureLead: failed to update YM on lead ${openLead.ID}: ${e.message}`);
+							}
+						}
+					}
 					return baseResult;
 				}
 
