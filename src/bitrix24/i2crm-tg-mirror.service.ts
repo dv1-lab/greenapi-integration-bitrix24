@@ -94,9 +94,13 @@ export class I2crmTgMirrorService {
 
 	private async botApi(method: string, body: any): Promise<any> {
 		const url = `https://api.telegram.org/bot${this.botToken}/${method}`;
-		const r = await axios.post(url, body, { timeout: 15000 });
+		// validateStatus: () => true чтобы 4xx не выбрасывал generic axios error
+		// «Request failed with status code 400» — нам нужна реальная description
+		// от TG API ("Bad Request: TOPIC_NOT_MODIFIED" и т.п.) для корректной
+		// классификации в refreshAllTopics.
+		const r = await axios.post(url, body, { timeout: 15000, validateStatus: () => true });
 		if (r.data?.ok === false) {
-			throw new Error(`Telegram API ${method} failed: ${r.data?.description || JSON.stringify(r.data)}`);
+			throw new Error(`Telegram API ${method} failed: ${r.data?.description || `HTTP ${r.status}`}`);
 		}
 		return r.data?.result;
 	}
