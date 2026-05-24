@@ -11,6 +11,7 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. Н
 | Что трогаешь | Что обязательно прочитать |
 |---|---|
 | `widget.controller.ts`, `handleI2crmIncoming/Outgoing`, `handleOutgoing*`, `mirrorToBitrix` | [`docs/OPEN_LINE_LIFECYCLE.md`](./docs/OPEN_LINE_LIFECYCLE.md) + [`docs/REGRESSIONS.md`](./docs/REGRESSIONS.md) + [`docs/CHECKLIST_WIDGET.md`](./docs/CHECKLIST_WIDGET.md) |
+| **Зеркала клиента** (TG-bot mirror, i2crm-tg-mirror, wa-tg-bridge bridge.py) — карточки, заголовки тем, подписи | [`docs/CLIENT_CARD_STANDARD.md`](./docs/CLIENT_CARD_STANDARD.md) — **обязательный единый стандарт**, любое отклонение = регрессия |
 | Любые `chat.id` / префиксы / каналы | те же 3 файла |
 | TG-боты | [`docs/TELEGRAM_BOT_FLOW.md`](./docs/TELEGRAM_BOT_FLOW.md) |
 | Instagram (i2crm) | [`docs/INSTAGRAM_FLOW.md`](./docs/INSTAGRAM_FLOW.md) |
