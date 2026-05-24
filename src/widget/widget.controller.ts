@@ -462,6 +462,25 @@ export class WidgetController {
 			});
 		}
 
+		// Фикс #47 (auto-take session). Без этого imconnector создаёт chat-user
+		// `sc_<chatId>` и сессию, но она висит в очереди «Неотвеченные» — пока
+		// оператор не нажмёт «Забрать диалог». Делаем auto-take от лица оператора,
+		// чтобы диалог сразу попадал в «В работе» и появлялся в правой панели
+		// карточки сделки/лида. Подробности — memory widget_max_47_root_cause.md.
+		if (lineForMirror && inst.user?.portalDomain && body.authId) {
+			const userKey = provider === "wa"
+				? `wa_${mirrorKey}`
+				: `sc_${mirrorKey}`;
+			this.bitrix24.autoTakeSession(
+				inst.user.portalDomain,
+				body.authId,
+				userKey,
+				{ displayName: displayNameForMirror, line: lineForMirror },
+			).catch((e: any) => {
+				this.logger.warn(`[widget] autoTakeSession failed (non-fatal): ${e?.message || e}`);
+			});
+		}
+
 		return {
 			ok: true, idMessage, chatId, idInstance,
 			line: lineForMirror, mirrored,

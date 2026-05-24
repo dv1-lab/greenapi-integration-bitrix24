@@ -364,6 +364,110 @@ export class Bitrix24Service extends BaseAdapter<
 		return this.callBitrix24Method(portalDomain, "imconnector.send.messages", payload);
 	}
 
+	/**
+	 * Auto-take open-line session для оператора (фикс #47 widget MAX).
+	 *
+	 * Корень #47: после `imconnector.send.messages` B24 создаёт chat-user `sc_<id>`
+	 * и сессию, но она висит в очереди «Неотвеченные» — пока кто-то явно её не
+	 * заберёт. Этот метод делает «забрать» автоматически от лица отправляющего
+	 * оператора, чтобы диалог сразу попадал в «В работе» и появлялся в правой
+	 * панели карточки сделки/лида.
+	 *
+	 * Алгоритм:
+	 *   1. operatorId = user.current?auth=<authId> (user-auth от widget).
+	 *   2. Retry-loop (5 × 1.5с, B24 создаёт chat 0-3с после send.messages):
+	 *      `im.recent.list TYPE=lines` → ищем item где chat.entity_id содержит
+	 *      `social_connector|<line>|<userKey>|<sessionId>` — наш userKey.
+	 *   3. imopenlines.operator.answer CHAT_ID=<num> USER_ID=<operatorId>.
+	 *      Если 400 → fallback imopenlines.session.join CHAT_ID=<num>.
+	 *
+	 * Не throw'аем — auto-take это нерegрессивное улучшение, ошибка не должна
+	 * ломать widget /send response. Каждый шаг логируется с trace-id чтобы
+	 * чинить регрессии 6-го уровня (когда B24 поменяет API).
+	 */
+	async autoTakeSession(
+		portalDomain: string,
+		operatorAuthId: string,
+		userKey: string,
+		opts: { displayName?: string; line?: number } = {},
+	): Promise<{ chatId?: number; operatorId?: number; ok?: boolean; reason?: string }> {
+		const trace = Math.random().toString(36).slice(2, 8);
+		try {
+			// 1. operatorId через user.current с user-auth (authId из widget body).
+			let operatorId: number | undefined;
+			try {
+				const r = await axios.get(
+					`https://${portalDomain}/rest/user.current?auth=${encodeURIComponent(operatorAuthId)}`,
+					{ timeout: 8000 },
+				);
+				const uid = Number(r.data?.result?.ID || r.data?.result?.id || 0);
+				if (uid > 0) operatorId = uid;
+			} catch (e: any) {
+				this.logger.warn(`autoTake[${trace}]: user.current failed: ${e.response?.data?.error_description || e.message}`);
+				return { reason: "user.current failed" };
+			}
+			if (!operatorId) {
+				this.logger.warn(`autoTake[${trace}]: operatorId not resolved from authId`);
+				return { reason: "no operatorId" };
+			}
+
+			// 2. retry-loop поиска chat по entity_id содержащему userKey.
+			// 1.5с × 5 = 7.5с total worst case — типично B24 создаёт chat за 1-3с.
+			let target: any = null;
+			for (let attempt = 0; attempt < 5; attempt++) {
+				await new Promise((res) => setTimeout(res, 1500));
+				try {
+					const recent: any = await this.callBitrix24Method(portalDomain, "im.recent.list", {
+						TYPE: "lines", LIMIT: 50,
+					});
+					// Структура recent: result?.items ИЛИ result.items в callBitrix24Method
+					// уже распакован — пробуем оба варианта.
+					const items: any[] = recent?.items || recent || [];
+					target = items.find((i: any) => {
+						const entityId = String(i?.chat?.entity_id || "");
+						return entityId.includes(userKey);
+					});
+					if (target) break;
+				} catch (e: any) {
+					this.logger.warn(`autoTake[${trace}]: im.recent.list attempt ${attempt + 1} failed: ${e?.message || e}`);
+				}
+			}
+			if (!target) {
+				this.logger.warn(`autoTake[${trace}]: chat for userKey=${userKey} not in im.recent.list after 5 attempts`);
+				return { operatorId, reason: "chat not found" };
+			}
+			const chatId = Number(target.chat_id);
+			if (!chatId) {
+				this.logger.warn(`autoTake[${trace}]: target chat without numeric id: ${JSON.stringify(target).slice(0, 200)}`);
+				return { operatorId, reason: "no chat_id" };
+			}
+
+			// 3. operator.answer; если не сработал — fallback session.join.
+			try {
+				await this.callBitrix24Method(portalDomain, "imopenlines.operator.answer", {
+					CHAT_ID: chatId, USER_ID: operatorId,
+				});
+				this.logger.info(`autoTake[${trace}]: chat ${chatId} → operator ${operatorId} (userKey=${userKey})`);
+				return { chatId, operatorId, ok: true };
+			} catch (e1: any) {
+				this.logger.warn(`autoTake[${trace}]: operator.answer failed: ${e1.message}, trying session.join`);
+				try {
+					await this.callBitrix24Method(portalDomain, "imopenlines.session.join", {
+						CHAT_ID: chatId,
+					});
+					this.logger.info(`autoTake[${trace}]: chat ${chatId} joined via session.join (userKey=${userKey})`);
+					return { chatId, operatorId, ok: true };
+				} catch (e2: any) {
+					this.logger.warn(`autoTake[${trace}]: session.join also failed: ${e2.message}`);
+					return { chatId, operatorId, reason: "both methods failed" };
+				}
+			}
+		} catch (err: any) {
+			this.logger.warn(`autoTake[${trace}]: unexpected error: ${err?.message || err}`);
+			return { reason: err?.message || "unexpected" };
+		}
+	}
+
 	async listConnectors(portalDomain: string): Promise<string[]> {
 		const result = (await this.callBitrix24Method(portalDomain, "imconnector.list", {})) as unknown;
 		if (Array.isArray(result)) return result.map((x) => String(x));
