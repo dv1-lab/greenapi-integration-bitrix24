@@ -115,9 +115,47 @@ export class TgBotMirrorService {
 		// классификации в refreshAllTopics (skipped_same vs errors).
 		const r = await axios.post(url, body, { timeout: 15000, validateStatus: () => true });
 		if (r.data?.ok === false) {
+			const desc = String(r.data?.description || "").toUpperCase();
+			if (
+				(desc.includes("TOPIC_ID_INVALID") || desc.includes("MESSAGE_THREAD_NOT_FOUND")) &&
+				typeof body?.message_thread_id === "number" &&
+				typeof body?.chat_id !== "undefined"
+			) {
+				void this._lazyCleanupTopic(String(body.chat_id), Number(body.message_thread_id))
+					.catch((e) => this.logger.warn(`lazy-cleanup failed: ${e.message}`));
+			}
 			throw new Error(`Telegram API ${method} failed: ${r.data?.description || `HTTP ${r.status}`}`);
 		}
 		return r.data?.result;
+	}
+
+	private async _lazyCleanupTopic(groupId: string, topicId: number): Promise<void> {
+		// Удаляем все записи в state указывающие на удалённый topicId
+		// (TG-bot mirror использует composite key «<groupId>:<chatId>»).
+		let removed = 0;
+		for (const [k, v] of Object.entries(this.state.topics)) {
+			if (v === topicId) {
+				delete this.state.topics[k];
+				removed++;
+			}
+		}
+		// cardsPosted — object {key: true}; key совпадает с topics key
+		const cardKeys = Object.keys(this.state.cardsPosted || {});
+		let cardsRemoved = 0;
+		for (const k of cardKeys) {
+			// Если record в topics более нет (удалили выше) — снести и cardsPosted
+			if (!(k in this.state.topics)) {
+				delete this.state.cardsPosted[k];
+				cardsRemoved++;
+			}
+		}
+		if (removed > 0 || cardsRemoved > 0) {
+			await this.persistMap();
+			this.logger.info(
+				`lazy-cleanup: TOPIC_ID_INVALID in group ${groupId} thread ${topicId} → ` +
+				`removed ${removed} topic-keys, ${cardsRemoved} card-records`,
+			);
+		}
 	}
 
 	private escapeHtml(s: string): string {
