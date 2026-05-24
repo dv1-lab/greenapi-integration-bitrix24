@@ -456,6 +456,13 @@ export class Bitrix24Service extends BaseAdapter<
 		const existing = this._ensureLeadLocks.get(lockKey);
 		if (existing) return existing;
 		const task: Promise<EnsureLeadResult> = (async (): Promise<EnsureLeadResult> => {
+			// Trace-id: помогает следить flow через несколько log-точек на одном
+			// вызове (виджет → ensureLead → orphan-link → backfill).
+			const trace = Math.random().toString(36).slice(2, 8);
+			this.logger.info(
+				`ensureLead[${trace}]: enter phone=${phoneE164 || "-"} chat=${chatId || "-"} ` +
+				`channel=${channelLabel} line=${lineId} skipLead=${skipLeadCreation}`,
+			);
 			try {
 				// 1. Поиск контакта по phone. Если phone пустой/невалидный —
 				// ищем по сохранённому chatId в UF_CRM_TG_CHAT_ID / UF_CRM_MAX_CHAT_ID
@@ -468,6 +475,12 @@ export class Bitrix24Service extends BaseAdapter<
 						values: [phoneE164],
 					});
 					contactId = dup?.CONTACT?.[0];
+					this.logger.info(
+						`ensureLead[${trace}]: findbycomm(PHONE=${phoneE164}) → ` +
+						`${contactId ? `contact=${contactId}` : "no contact"}`,
+					);
+				} else {
+					this.logger.info(`ensureLead[${trace}]: phone ${phoneE164 || "-"} not usable, skip duplicate.findbycomm`);
 				}
 				const chatIdUfMap: Record<string, string> = {
 					"Telegram": "UF_CRM_TG_CHAT_ID",
@@ -482,11 +495,13 @@ export class Bitrix24Service extends BaseAdapter<
 					});
 					if (Array.isArray(found) && found.length > 0) {
 						contactId = parseInt(found[0].ID, 10);
-						this.logger.info(`ensureLead: contact ${contactId} found via ${chatIdUf}=${chatId}`);
+						this.logger.info(`ensureLead[${trace}]: contact ${contactId} found via ${chatIdUf}=${chatId}`);
+					} else {
+						this.logger.info(`ensureLead[${trace}]: ${chatIdUf}=${chatId} also no match — contact will be created by B24`);
 					}
 				}
 				if (!contactId) {
-					this.logger.info(`ensureLead: no existing contact for ${phoneE164}/${chatId || "-"}, leaving creation to B24`);
+					this.logger.info(`ensureLead[${trace}]: no existing contact for ${phoneE164}/${chatId || "-"}, leaving creation to B24`);
 					return {};
 				}
 				// Если нашли контакт И есть chatId — сохраняем chatId в UF контакта
@@ -503,11 +518,19 @@ export class Bitrix24Service extends BaseAdapter<
 					if (chatId && chatIdUf) {
 						const existingValue = contactData?.[chatIdUf];
 						if (!existingValue) {
-							await this.callBitrix24Method(portalDomain, "crm.contact.update", {
-								id: contactId,
-								fields: { [chatIdUf]: chatId },
-							});
-							this.logger.info(`ensureLead: saved ${chatIdUf}=${chatId} on contact ${contactId}`);
+							try {
+								await this.callBitrix24Method(portalDomain, "crm.contact.update", {
+									id: contactId,
+									fields: { [chatIdUf]: chatId },
+								});
+								this.logger.info(`ensureLead[${trace}]: saved ${chatIdUf}=${chatId} on contact ${contactId}`);
+							} catch (updErr: any) {
+								this.logger.error(
+									`ensureLead[${trace}]: FAILED to save ${chatIdUf}=${chatId} on contact ${contactId} — ` +
+									`incoming/outgoing chat-user mismatch гарантирован. err=${updErr.message}`,
+								);
+								throw updErr;
+							}
 							// Контакт «новый» для этого канала — собираем под него всю
 							// прошлую историю. Ретроактивно привязываем все «свободные»
 							// лиды (CONTACT_ID пуст) с тем же chatId. backfillIgUfFields /
@@ -516,12 +539,17 @@ export class Bitrix24Service extends BaseAdapter<
 							void this.linkOrphanLeadsToContact(
 								portalDomain, contactId, chatIdUf, String(chatId),
 							).catch((e: any) =>
-								this.logger.warn(`ensureLead: orphan-link failed (non-fatal): ${e.message}`),
+								this.logger.warn(`ensureLead[${trace}]: orphan-link failed (non-fatal): ${e.message}`),
+							);
+						} else {
+							this.logger.info(
+								`ensureLead[${trace}]: ${chatIdUf} on contact ${contactId} already = ${existingValue} ` +
+								`(incoming new=${chatId}, ${existingValue === chatId ? "MATCH" : "MISMATCH — possible split chat-user"})`,
 							);
 						}
 					}
 				} catch (e: any) {
-					this.logger.warn(`ensureLead: failed to read/save contact ${contactId}: ${e.message}`);
+					this.logger.warn(`ensureLead[${trace}]: failed to read/save contact ${contactId}: ${e.message}`);
 				}
 
 				const baseResult: EnsureLeadResult = { contactId, contactName, contactLastName };
