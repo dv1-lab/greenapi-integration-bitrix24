@@ -136,8 +136,8 @@ export class I2crmTgMirrorService {
 
 	/**
 	 * Постит pinned-карточку клиента в новый IG-топик: аватарка из IG
-	 * (profile_pic_url из i2crm payload) + имя + ссылка
-	 * https://instagram.com/<username>/ + Direct/Comment отметка.
+	 * (profile_pic_url из i2crm payload) + унифицированная карточка с именем,
+	 * IG-ссылкой, линией, B24-ссылками и Customer-360 UUID.
 	 * Идёт async-задачей, чтобы не блокировать первое incoming-сообщение.
 	 * При ошибке download/sendPhoto — fallback на текст. Pin best-effort.
 	 */
@@ -148,21 +148,35 @@ export class I2crmTgMirrorService {
 			const username = String(payload?.client_username || "").trim();
 			const clientName = String(payload?.client_name || username || `IG_${payload?.client_id || ""}`).trim();
 			const channel = String(payload?.channel || "");
-			const channelLabel = channel === "instcom" ? "📷 Instagram коммент" : "💬 Instagram Direct";
-			const igLink = username
-				? `\nInstagram: <a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>`
-				: "";
+			const channelKind = channel === "instcom" ? "Comments" : "Direct";
 			const accountName = String(payload?.account_name || "").trim();
-			// «@1begovoy.ru» без HTML-обёртки Telegram автолинкует как свой
-			// username (несуществующий) — оборачиваем в ссылку на Instagram-
-			// бизнес-аккаунт, как сделано для @клиента в шапке.
-			const accountLine = accountName
-				? `\nЛиния: <a href="https://instagram.com/${this.escapeHtml(accountName)}/">@${this.escapeHtml(accountName)}</a>`
-				: "";
-			const caption =
-				`📋 Карточка клиента (${channelLabel.replace(/^[^\s]+\s+/, "")})\n` +
-				`Имя: ${this.escapeHtml(clientName)}` +
-				igLink + accountLine;
+			const clientId = String(payload?.client_id || "");
+
+			// Обогащающие lookup'ы (best-effort).
+			const [entities, uuid] = await Promise.all([
+				this.resolveB24Entities(clientId),
+				this.resolveCustomerUuid(clientId),
+			]);
+			const lineName = this.resolveIgLineName(channel, accountName);
+			const portal = this.b24Portal();
+
+			const lines: string[] = ["📋 Карточка клиента"];
+			if (clientName) lines.push(`Имя: ${this.escapeHtml(clientName)}`);
+			if (username) {
+				lines.push(`Instagram ${channelKind}: <a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>`);
+			} else {
+				lines.push(`Instagram ${channelKind}: client_id ${this.escapeHtml(clientId)}`);
+			}
+			lines.push(`Линия: ${this.escapeHtml(lineName)}`);
+			if (entities.leadId) {
+				lines.push(`B24 лид: https://${this.escapeHtml(portal)}/crm/lead/details/${entities.leadId}/`);
+			}
+			if (entities.contactId) {
+				lines.push(`B24 контакт: https://${this.escapeHtml(portal)}/crm/contact/details/${entities.contactId}/`);
+			}
+			if (uuid) lines.push(`Customer-360: ${this.escapeHtml(uuid)}`);
+			lines.push("Команды: /nnn &lt;текст&gt; — внутренняя заметка");
+			const caption = lines.join("\n");
 
 			let photoUrl: string | undefined;
 			const profilePic = payload?.profile_pic_url || payload?.client_profile_pic_url
@@ -209,7 +223,6 @@ export class I2crmTgMirrorService {
 					this.logger.debug(`tg-mirror: IG pinChatMessage failed: ${e.message}`);
 				}
 			}
-			const clientId = String(payload?.client_id || "");
 			if (clientId) {
 				if (!this.state.pinnedCards) this.state.pinnedCards = {};
 				this.state.pinnedCards[this.topicKey(groupId, clientId)] = true;
@@ -481,18 +494,31 @@ export class I2crmTgMirrorService {
 			return;
 		}
 
-		const portal = input.portalDomain || "1begovoy.bitrix24.ru";
-		const channelLabel = input.channel === "instcom" ? "Comments" : "Direct";
+		const portal = input.portalDomain || this.b24Portal();
+		const channelKind = input.channel === "instcom" ? "Comments" : "Direct";
 		const title = input.leadTitle ? this.escapeHtml(input.leadTitle) : "";
-		const sessionPart = input.sessionId && input.chatId
-			? `\nSession ID: ${input.sessionId} · Chat: chat${input.chatId}`
-			: input.sessionId
-				? `\nSession ID: ${input.sessionId}`
-				: "";
-		const text = `📋 Карточка клиента (Instagram ${channelLabel})\n` +
-			`Лид Bitrix: <a href="https://${portal}/crm/lead/details/${input.leadId}/">#${input.leadId}</a>` +
-			(title ? `\nИмя: ${title}` : "") +
-			sessionPart;
+
+		// Унифицированная карточка (тот же формат что и postIgPinnedCard, см.
+		// docs/ARCHITECTURE.md § Карточка клиента). Здесь — после backfill
+		// уже известен leadId, поэтому показываем его явно. Линия и UUID — best
+		// effort (если за timeout не отдалось — поле опускается).
+		const uuid = await this.resolveCustomerUuid(input.clientId);
+		const lineName = this.resolveIgLineName(input.channel, "");
+
+		const lines: string[] = ["📋 Карточка клиента"];
+		if (title) lines.push(`Имя: ${title}`);
+		lines.push(`Instagram ${channelKind}: client_id ${this.escapeHtml(input.clientId)}`);
+		lines.push(`Линия: ${this.escapeHtml(lineName)}`);
+		lines.push(`B24 лид: https://${this.escapeHtml(portal)}/crm/lead/details/${input.leadId}/`);
+		if (uuid) lines.push(`Customer-360: ${this.escapeHtml(uuid)}`);
+		if (input.sessionId) {
+			const sess = input.chatId
+				? `${input.sessionId} · chat${input.chatId}`
+				: String(input.sessionId);
+			lines.push(`Session: ${this.escapeHtml(sess)}`);
+		}
+		lines.push("Команды: /nnn &lt;текст&gt; — внутренняя заметка");
+		const text = lines.join("\n");
 
 		try {
 			await this.botApi("sendMessage", {
@@ -517,6 +543,84 @@ export class I2crmTgMirrorService {
 			.replace(/</g, "&lt;")
 			.replace(/>/g, "&gt;")
 			.replace(/"/g, "&quot;");
+	}
+
+	// Резолв lead/contact для IG-клиента через self-call adapter (тот же кеш
+	// что и в contact-name lookup). Возвращает оба ID, чтобы карточка показала
+	// и лид, и контакт когда есть оба.
+	private async resolveB24Entities(clientId: string): Promise<{ leadId: number | null; contactId: number | null }> {
+		const empty = { leadId: null, contactId: null };
+		if (!clientId) return empty;
+		try {
+			const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+			const port = this.configService.get<string>("PORT") || "3000";
+			// b24-entities не принимает igClientId напрямую — резолвим через
+			// crm.lead/contact.list по UF_CRM_IG_CHAT_ID. Здесь упрощаем: ходим
+			// в contact-name lookup и берём оттуда entityId+source. Это даёт
+			// один объект — либо контакт, либо лид. Для IG этого достаточно
+			// (у Instagram-клиента редко есть и контакт, и лид одновременно).
+			const resp = await axios.post(
+				`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
+				{ igClientId: clientId },
+				{
+					headers: secret ? { "X-Hint-Secret": secret } : undefined,
+					timeout: 5000,
+					validateStatus: () => true,
+				},
+			);
+			if (resp.status === 200) {
+				const eid = resp.data?.entityId ? Number(resp.data.entityId) : null;
+				const src = resp.data?.source as string | undefined;
+				if (eid && src === "lead") return { leadId: eid, contactId: null };
+				if (eid && src === "contact") return { leadId: null, contactId: eid };
+			}
+		} catch (e: any) {
+			this.logger.debug(`i2crm-tg-mirror: b24 entities lookup failed: ${e.message}`);
+		}
+		return empty;
+	}
+
+	// Customer-360 UUID для IG-клиента (alias_type=ig_client). Возвращает UUID
+	// либо null. Используется в pinned-карточке.
+	private async resolveCustomerUuid(clientId: string): Promise<string | null> {
+		if (!clientId) return null;
+		const url = this.configService.get<string>("CUSTOMER_SERVICE_URL") || "";
+		const secret = this.configService.get<string>("CUSTOMER_SERVICE_SECRET") || "";
+		if (!url || !secret) return null;
+		try {
+			const resp = await axios.post(
+				`${url.replace(/\/$/, "")}/customers/find-or-create`,
+				{ aliasType: "ig_client", aliasValue: String(clientId), addedBy: "i2crm-tg-mirror" },
+				{
+					headers: { "X-Service-Secret": secret },
+					timeout: 5000,
+					validateStatus: () => true,
+				},
+			);
+			if (resp.status === 200 || resp.status === 201) {
+				const c = resp.data?.customer;
+				if (c && c.uuid) return String(c.uuid);
+			}
+		} catch (e: any) {
+			this.logger.debug(`i2crm-tg-mirror: customer-360 resolve failed: ${e.message}`);
+		}
+		return null;
+	}
+
+	// Человеческое имя IG-линии. Базируется на channel + account_name из
+	// payload i2crm. Опционально LINE_NAMES может переопределить (если в env
+	// задан line_id IG-линии).
+	private resolveIgLineName(channel: string, accountName: string): string {
+		const channelLabel = channel === "instcom" ? "Instagram Comments" : "Instagram Direct";
+		const acc = accountName ? ` @${accountName}` : "";
+		return `${channelLabel}${acc}`;
+	}
+
+	private b24Portal(): string {
+		const cfg = this.configService.get<string>("BITRIX_PORTAL")
+			|| this.configService.get<string>("BITRIX_PORTAL_DOMAIN")
+			|| "";
+		return cfg.trim() || "1begovoy.bitrix24.ru";
 	}
 
 	// Массовое переименование всех IG-тем — обновляет название по текущему

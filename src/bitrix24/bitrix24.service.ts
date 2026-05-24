@@ -2720,10 +2720,13 @@ export class Bitrix24Service extends BaseAdapter<
 			.catch((e) => this.logger.warn(`tg-bot[${cfg.name}]: backfill link failed (non-fatal): ${e.message}`));
 
 		// Зеркало в TG-супергруппу инстанса — отдельно для каждого бота.
+		// botName + lineId передаём для построения карточки клиента
+		// (название линии + поиск активного лида/контакта в B24).
 		this.tgBotMirror.mirrorIncoming({
 			chatId, clientName, username, text, hasMedia,
 			mediaUrl: mediaFile?.url, mediaName: mediaFile?.name, mediaIsImage: mediaFile?.isImage,
 			mirrorGroupId: cfg.mirrorGroupId || undefined,
+			botName: cfg.name, lineId: cfg.lineId,
 		}).catch((e) => this.logger.warn(`tg-bot[${cfg.name}]: mirror incoming failed (non-fatal): ${e.message}`));
 
 		return { success: true };

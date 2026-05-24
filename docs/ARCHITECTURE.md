@@ -215,6 +215,79 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
 
 ---
 
+## 7.5. Карточка клиента в pinned-сообщении
+
+Каждый новый топик в TG-зеркале/IG-зеркале/TG-бот-зеркале начинается с
+**pinned-карточки клиента** — pinned message с базовой инфой, чтобы
+оператор сразу видел кто это и где о нём данные. Формат **унифицирован
+на все каналы** (2026-05-24).
+
+### Канонический формат
+
+```
+📋 Карточка клиента
+Имя: <ФИО клиента>                       ← пропускается если неизвестно
+<Канал>: <идентификатор>                  ← см. таблицу ниже
+Линия: <человеческое название линии>
+B24 лид: https://1begovoy.bitrix24.ru/crm/lead/details/<id>/         ← если есть
+B24 контакт: https://1begovoy.bitrix24.ru/crm/contact/details/<id>/  ← если есть
+Customer-360: <uuid>                      ← если customer-service отвечает
+Команды: /nnn <текст> — внутренняя заметка
+```
+
+### По каналам
+
+| Канал | Где код | Идентификатор | Группа-зеркало | «Линия» из |
+|---|---|---|---|---|
+| WhatsApp | `wa-tg-bridge/src/wa_tg_bridge/bridge.py` (`_build_client_card` + `_post_pinned_card`) | `WhatsApp: +<phone>` | per-инстанс (TELEGRAM_GROUP_CHAT_ID*) | env `LINE_NAMES` по lineId (BITRIX_INSTANCE_TO_LINE) → fallback channel_tag («WA 3354») |
+| MAX | то же | `MAX-ID: <chatId>` | per-инстанс | то же |
+| Telegram (через Green API) | то же | `Telegram-ID: <chatId>` | per-инстанс | то же |
+| Telegram-бот (`@begovoy_bot`, `@begovoy1support_bot`) | `adapter/src/bitrix24/tg-bot-mirror.service.ts` (`postClientCard`) | `Telegram: @username (chat_id …)` | TG_BOT*_MIRROR_GROUP_ID | env `TG_BOT_LINE_NAMES` (`begovoy:Telegram begovoy_main,support:Telegram 1Б Поддержка`) → fallback `LINE_NAMES` по lineId → «Telegram (@<botName>)» |
+| Instagram Direct/Comments (i2crm) | `adapter/src/bitrix24/i2crm-tg-mirror.service.ts` (`postIgPinnedCard` + `postClientCard`) | `Instagram Direct: @<username>` или `Instagram Direct: client_id <id>` | I2CRM_TG_MIRROR_GROUP_ID_DIRECT / _COMMENT | «Instagram Direct @<account_name>» / «Instagram Comments @<account_name>» |
+
+**MAX-канал** есть в WA-зеркале (через Green API инстанс с префиксом `3xxx`).
+Отдельный «зеркала MAX» как у Telegram-бота — не существует, потому что MAX
+у нас работает только через Green API.
+
+### Резолверы (lookup'ы для обогащения карточки)
+
+- **ФИО клиента из B24**: adapter endpoint `POST /webhooks/internal/contact-name`
+  (10-минутный кеш). Принимает `phone` / `tgChatId` / `maxChatId` / `igClientId`.
+  Возвращает `{name, source, entityId, link, igUsername}`.
+- **Лид + контакт B24 разом**: adapter endpoint `POST /webhooks/internal/b24-entities`.
+  Используется `bridge.py` и `tg-bot-mirror.service.ts` для показа обеих ссылок
+  («B24 лид» + «B24 контакт»).
+- **Customer-360 UUID**: `POST {CUSTOMER_SERVICE_URL}/customers/find-or-create`
+  с alias'ом по каналу (`phone`/`tg_user`/`max_chat`/`ig_client`). UUID
+  кладётся в карточку как plain text (UI customer-360 пока нет).
+
+Все обогащения — **best-effort**: если adapter/customer-service не ответил
+за timeout (3-5 сек), соответствующее поле в карточке просто пропускается.
+Базовое содержимое (имя из мессенджера + идентификатор + линия) всегда есть.
+
+### Refresh запиненных карточек (при изменении формата)
+
+После изменения шаблона — старые pinned-сообщения нужно переписать.
+Bridge даёт HTTP-endpoint:
+
+```
+POST /internal/refresh-pinned-cards
+Headers: X-Hint-Secret: <BRIDGE_HINT_SECRET>
+Body:    {"delay_sec": 1.5, "limit": 10000}
+```
+
+Идёт фоновой task'ой, не блокирует. Идемпотентно: переписывает только клиентов
+с `pinned_card_msg_id IS NOT NULL`, шаг 1.5 сек между правками (TG rate-limit).
+Прогресс в логах `wa-tg-bridge`: `refresh-cards: ... updated=N skipped=M errors=K`.
+
+Для **TG-бот-зеркал и IG-зеркал** аналогичного massjob refresh нет — карточка
+обновляется только при пересоздании топика. Это сознательно: их карточки
+ставятся через adapter (NestJS), там state хранится по-другому. Если припрёт —
+дописать как `backfillExistingTopicCards` в `i2crm-tg-mirror.service.ts`
+(уже есть, но не правит уже-pinned карточки, только новые).
+
+---
+
 ## 8. Сохранность
 
 Код — в GitHub (`dv1-lab/*`). Конфиги/секреты — `.env` на сервере (в git нет).

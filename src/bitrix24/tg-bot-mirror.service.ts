@@ -161,17 +161,138 @@ export class TgBotMirrorService {
 		return null;
 	}
 
+	// Резолв lead/contact для клиента — для ссылок в карточке. По tgChatId
+	// проходит через /webhooks/internal/b24-entities (тот же кеш B24 что и
+	// в contact-name).
+	private async resolveB24Entities(chatId: string): Promise<{ leadId: number | null; contactId: number | null }> {
+		const empty = { leadId: null, contactId: null };
+		try {
+			const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+			const port = this.configService.get<string>("PORT") || "3000";
+			const resp = await axios.post(
+				`http://127.0.0.1:${port}/webhooks/internal/b24-entities`,
+				{ tgChatId: chatId },
+				{
+					headers: secret ? { "X-Hint-Secret": secret } : undefined,
+					timeout: 5000,
+					validateStatus: () => true,
+				},
+			);
+			if (resp.status === 200) {
+				return {
+					leadId: resp.data?.leadId || null,
+					contactId: resp.data?.contactId || null,
+				};
+			}
+		} catch (e: any) {
+			this.logger.debug(`tg-bot-mirror: b24-entities lookup failed: ${e.message}`);
+		}
+		return empty;
+	}
+
+	// Резолв customer-360 UUID (создание новой записи если ещё не было).
+	// Возвращает UUID либо null при недоступности customer-service. Используется
+	// в карточке клиента (поле «Customer-360»).
+	private async resolveCustomerUuid(chatId: string): Promise<string | null> {
+		const url = this.configService.get<string>("CUSTOMER_SERVICE_URL") || "";
+		const secret = this.configService.get<string>("CUSTOMER_SERVICE_SECRET") || "";
+		if (!url || !secret) return null;
+		try {
+			const resp = await axios.post(
+				`${url.replace(/\/$/, "")}/customers/find-or-create`,
+				{ aliasType: "tg_user", aliasValue: String(chatId), addedBy: "tg-bot-mirror" },
+				{
+					headers: { "X-Service-Secret": secret },
+					timeout: 5000,
+					validateStatus: () => true,
+				},
+			);
+			if (resp.status === 200 || resp.status === 201) {
+				const c = resp.data?.customer;
+				if (c && c.uuid) return String(c.uuid);
+			}
+		} catch (e: any) {
+			this.logger.debug(`tg-bot-mirror: customer-360 resolve failed: ${e.message}`);
+		}
+		return null;
+	}
+
+	// Человеческое название TG-линии. Источники:
+	//  1. env TG_BOT_LINE_NAMES — формат "begovoy:Telegram begovoy_main,support:Telegram 1Б Поддержка"
+	//  2. fallback по lineId через env LINE_NAMES (общий формат "<lineId>:<name>")
+	//  3. ультимативный fallback: "Telegram (@<botName>)"
+	private resolveLineName(botName: string | undefined, lineId: number | undefined): string {
+		const raw = this.configService.get<string>("TG_BOT_LINE_NAMES") || "";
+		if (raw && botName) {
+			for (const pair of raw.split(",")) {
+				const idx = pair.indexOf(":");
+				if (idx < 0) continue;
+				const k = pair.slice(0, idx).trim();
+				const v = pair.slice(idx + 1).trim();
+				if (k === botName && v) return v;
+			}
+		}
+		const lineRaw = this.configService.get<string>("LINE_NAMES") || "";
+		if (lineRaw && lineId) {
+			for (const pair of lineRaw.split(",")) {
+				const idx = pair.indexOf(":");
+				if (idx < 0) continue;
+				const k = pair.slice(0, idx).trim();
+				const v = pair.slice(idx + 1).trim();
+				if (k === String(lineId) && v) return v;
+			}
+		}
+		return botName ? `Telegram (@${botName})` : "Telegram";
+	}
+
+	private b24Portal(): string {
+		const cfg = this.configService.get<string>("BITRIX_PORTAL")
+			|| this.configService.get<string>("BITRIX_PORTAL_DOMAIN")
+			|| "";
+		return cfg.trim() || "1begovoy.bitrix24.ru";
+	}
+
 	// Постит карточку клиента в топик (идемпотентно по (groupId,chatId)) + закрепляет.
+	// Унифицированный формат — см. docs/ARCHITECTURE.md § Карточка клиента.
 	private async postClientCard(
 		groupId: string, topicId: number, chatId: string, clientName: string, username: string,
+		botName?: string, lineId?: number,
 	): Promise<void> {
 		const ck = this.key(groupId, chatId);
 		if (this.state.cardsPosted[ck]) return;
-		const profileLink = username
-			? `\nTelegram: <a href="https://t.me/${this.escapeHtml(username)}">@${this.escapeHtml(username)}</a>`
-			: "";
-		const text = `📋 Карточка клиента (Telegram)\n`
-			+ `Имя: ${this.escapeHtml(clientName)}` + profileLink;
+
+		// Все обогащающие lookup'ы — best-effort параллельно. Если что-то
+		// не ответило за timeout, просто пропускаем соответствующую строку.
+		const [entities, uuid] = await Promise.all([
+			this.resolveB24Entities(chatId),
+			this.resolveCustomerUuid(chatId),
+		]);
+		const lineName = this.resolveLineName(botName, lineId);
+		const portal = this.b24Portal();
+
+		const lines: string[] = ["📋 Карточка клиента"];
+		if (clientName && clientName.trim()) {
+			lines.push(`Имя: ${this.escapeHtml(clientName)}`);
+		}
+		if (username) {
+			lines.push(
+				`Telegram: <a href="https://t.me/${this.escapeHtml(username)}">@${this.escapeHtml(username)}</a> (chat_id ${this.escapeHtml(chatId)})`,
+			);
+		} else {
+			lines.push(`Telegram chat_id: ${this.escapeHtml(chatId)}`);
+		}
+		lines.push(`Линия: ${this.escapeHtml(lineName)}`);
+		if (entities.leadId) {
+			lines.push(`B24 лид: https://${this.escapeHtml(portal)}/crm/lead/details/${entities.leadId}/`);
+		}
+		if (entities.contactId) {
+			lines.push(`B24 контакт: https://${this.escapeHtml(portal)}/crm/contact/details/${entities.contactId}/`);
+		}
+		if (uuid) {
+			lines.push(`Customer-360: ${this.escapeHtml(uuid)}`);
+		}
+		lines.push("Команды: /nnn &lt;текст&gt; — внутренняя заметка");
+		const text = lines.join("\n");
 		try {
 			const res = await this.botApi("sendMessage", {
 				chat_id: groupId,
@@ -223,6 +344,8 @@ export class TgBotMirrorService {
 		text: string; hasMedia: boolean;
 		mediaUrl?: string; mediaName?: string; mediaIsImage?: boolean;
 		mirrorGroupId?: string;
+		botName?: string;
+		lineId?: number;
 	}): Promise<void> {
 		if (!this.enabled) return;
 		const groupId = input.mirrorGroupId || this.defaultGroupId;
@@ -236,7 +359,10 @@ export class TgBotMirrorService {
 				groupId, chatId, `TG · ${displayName}`,
 			);
 			if (created) {
-				void this.postClientCard(groupId, topicId, chatId, displayName, username);
+				void this.postClientCard(
+					groupId, topicId, chatId, displayName, username,
+					input.botName, input.lineId,
+				);
 			}
 			const header = `👤 ${this.escapeHtml(displayName)}`;
 
