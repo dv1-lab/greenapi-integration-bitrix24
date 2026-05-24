@@ -8,6 +8,27 @@
 
 ---
 
+## 2026-05-24 · scanCandidates b24-cross — false positives через value-equality JOIN
+
+- **sha**: `c6ae152` (dv1-lab/customer-service, init с уже-fix'нутой версией) /
+  обнаружено в этой же сессии 2026-05-24
+- **Симптом**: `POST /suggestions/scan` создал 500 b24-cross suggestions, все
+  оказались мусором при ручной проверке.
+- **Причина**: SQL в `suggestions.service.ts` делал
+  `JOIN b24 a ... b24 b ON a.alias_value = b.alias_value AND a.alias_type != b.alias_type`
+  — матчил случаи когда `b24_lead.value == b24_contact.value`. Это бессмысленно:
+  в B24 lead.ID и contact.ID — разные namespace, могут случайно совпасть.
+- **Фикс**: переписан на JOIN через CH `customer_events`:
+  `SELECT customer_uuid, b24_lead_id, b24_contact_id FROM customer_events
+   WHERE source IN (...) AND b24_lead_id IS NOT NULL AND b24_contact_id IS NOT NULL`
+  → для каждой row lookup в PG `customer_aliases` по `b24_contact=contact_id`.
+- **НЕ повторять**: писать «находим дубли» SQL внутри customer-service без
+  проверки на реальных данных + без явного смысла (что значит matching).
+- **Также**: customer-service repo создан 2026-05-24 (раньше не было git'а вовсе),
+  теперь все правки через git → меньше шансов «потерять» fix.
+
+---
+
 ## 2026-05-24 · #47 «не подтягивается открытая линия когда пишешь в MAX клиентам»
 
 - **Симптом**: оператор открыл сделку → виджет «Social Connector» → написал в
