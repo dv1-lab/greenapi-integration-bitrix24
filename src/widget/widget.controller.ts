@@ -372,6 +372,7 @@ export class WidgetController {
 		let resolvedContactId: number | undefined;
 		let resolvedContactName: string | undefined;
 		let resolvedContactLastName: string | undefined;
+		let resolvedCustomerUuid: string | undefined;
 		if (lineForMirror && inst.user?.portalDomain && (phoneE164 || chatIdForUf)) {
 			try {
 				const res = await this.bitrix24.ensureOpenLeadForPhone(
@@ -386,6 +387,7 @@ export class WidgetController {
 				resolvedContactId = res.contactId;
 				resolvedContactName = res.contactName;
 				resolvedContactLastName = res.contactLastName;
+				resolvedCustomerUuid = res.customerUuid;
 			} catch (e: any) {
 				this.logger.warn(`[widget] ensureOpenLeadForPhone failed: ${e?.message || e}`);
 			}
@@ -462,22 +464,39 @@ export class WidgetController {
 			});
 		}
 
-		// Фикс #47 (auto-take session). Без этого imconnector создаёт chat-user
-		// `sc_<chatId>` и сессию, но она висит в очереди «Неотвеченные» — пока
-		// оператор не нажмёт «Забрать диалог». Делаем auto-take от лица оператора,
-		// чтобы диалог сразу попадал в «В работе» и появлялся в правой панели
-		// карточки сделки/лида. Подробности — memory widget_max_47_root_cause.md.
+		// Фикс #47 (auto-take session + context message). Без этого imconnector
+		// создаёт chat-user `sc_<chatId>` и сессию, но она висит в очереди
+		// «Неотвеченные» — пока оператор не нажмёт «Забрать диалог». Делаем
+		// auto-take от лица оператора, чтобы диалог сразу попадал в «В работе» и
+		// появлялся в правой панели карточки сделки/лида. После auto-take —
+		// постим системное сообщение со ссылками на лид/сделку/контакт/customer-360
+		// (фикс B), чтобы оператор сразу мог «прыгнуть» из карточки чата на нужную
+		// сущность вместо лида-дубликата. Подробности — memory widget_max_47_root_cause.md.
 		if (lineForMirror && inst.user?.portalDomain && body.authId) {
 			const userKey = provider === "wa"
 				? `wa_${mirrorKey}`
 				: `sc_${mirrorKey}`;
+			const portalDomain = inst.user.portalDomain;
 			this.bitrix24.autoTakeSession(
-				inst.user.portalDomain,
+				portalDomain,
 				body.authId,
 				userKey,
 				{ displayName: displayNameForMirror, line: lineForMirror },
-			).catch((e: any) => {
-				this.logger.warn(`[widget] autoTakeSession failed (non-fatal): ${e?.message || e}`);
+			).then((res) => {
+				// postContextMessage только если auto-take нашёл чат и есть что
+				// показать (открытая сделка/лид или customer-360 uuid).
+				if (res?.chatId && (resolvedContactId || openEntity || resolvedCustomerUuid)) {
+					return this.bitrix24.postContextMessage(portalDomain, res.chatId, {
+						contactId: resolvedContactId,
+						contactName: resolvedContactName,
+						openEntity: openEntity || undefined,
+						channelLabel,
+						customerUuid: resolvedCustomerUuid,
+					});
+				}
+				return undefined;
+			}).catch((e: any) => {
+				this.logger.warn(`[widget] autoTake/postContext failed (non-fatal): ${e?.message || e}`);
 			});
 		}
 

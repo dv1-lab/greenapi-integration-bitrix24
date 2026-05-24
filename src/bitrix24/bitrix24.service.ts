@@ -32,6 +32,7 @@ export interface EnsureLeadResult {
 	contactName?: string;
 	contactLastName?: string;
 	createdLeadId?: number;
+	customerUuid?: string;
 }
 
 // Автоответ на входящие в нерабочее время. Магазин работает ежедневно
@@ -385,6 +386,91 @@ export class Bitrix24Service extends BaseAdapter<
 	 * ломать widget /send response. Каждый шаг логируется с trace-id чтобы
 	 * чинить регрессии 6-го уровня (когда B24 поменяет API).
 	 */
+	// In-memory дедуп для postContextMessage. Не персистится — chat-id'ы
+	// открытых линий редко переиспользуются, перезапуск adapter раз в сутки
+	// норма. Trim до 5000 при росте сверх 10000 элементов.
+	private readonly _contextMessagePosted = new Set<number>();
+
+	/**
+	 * Фикс B (#47): системное сообщение со ссылками лид/сделка/контакт в начало
+	 * open-line диалога. Оператор сразу видит куда «прыгнуть» из карточки чата —
+	 * раньше панель показывала только связь с лидом-дубликатом, теперь — со
+	 * сделкой/реальным контактом.
+	 *
+	 * Идемпотентность: пер chat-id в памяти adapter. После рестарта повтор возможен
+	 * (раз в сутки норма). chatId — числовой ID из im.recent.list (то что отдаёт
+	 * autoTakeSession.chatId).
+	 *
+	 * Использует im.message.add SYSTEM=Y — сообщение от имени системного бота,
+	 * не от оператора. BB-коды [URL=...] для кликабельных ссылок.
+	 */
+	async postContextMessage(
+		portalDomain: string,
+		chatId: number,
+		ctx: {
+			contactId?: number;
+			contactName?: string;
+			openEntity?: { kind: "deal" | "lead"; id: number; title?: string };
+			channelLabel?: string;
+			customerUuid?: string;
+		},
+	): Promise<{ posted?: boolean; reason?: string }> {
+		if (!chatId) return { reason: "no chatId" };
+		if (this._contextMessagePosted.has(chatId)) return { reason: "already posted" };
+		this._contextMessagePosted.add(chatId);
+		// Trim чтобы Set не рос неограниченно. 10k → 5k последних — простая стратегия,
+		// конкретные id не важны, мы только хотим не отправлять подряд второй раз.
+		if (this._contextMessagePosted.size > 10000) {
+			const arr = [...this._contextMessagePosted];
+			this._contextMessagePosted.clear();
+			arr.slice(-5000).forEach((id) => this._contextMessagePosted.add(id));
+		}
+
+		const portalUrl = `https://${portalDomain}`;
+		const lines: string[] = ["[B]📎 Контекст клиента[/B]"];
+		if (ctx.contactId) {
+			const label = ctx.contactName ? `${ctx.contactName} (карточка)` : "карточка контакта";
+			lines.push(`👤 [URL=${portalUrl}/crm/contact/details/${ctx.contactId}/]${label}[/URL]`);
+		}
+		if (ctx.openEntity) {
+			const kindLabel = ctx.openEntity.kind === "deal" ? "💼 Открытая сделка" : "📋 Открытый лид";
+			const label = ctx.openEntity.title || `№${ctx.openEntity.id}`;
+			lines.push(`${kindLabel}: [URL=${portalUrl}/crm/${ctx.openEntity.kind}/details/${ctx.openEntity.id}/]${label}[/URL]`);
+		}
+		if (ctx.customerUuid) {
+			const dashUrl = this.configService.get<string>("DV_DASHBOARD_URL") || "https://dashboard.9wb.ru";
+			lines.push(`🧭 [URL=${dashUrl}/customer-360/${ctx.customerUuid}]Customer-360[/URL]`);
+		}
+		if (ctx.channelLabel) {
+			lines.push(`[I]Канал: ${ctx.channelLabel}[/I]`);
+		}
+		if (lines.length === 1) {
+			// Ничего кроме заголовка — нет смысла слать.
+			this._contextMessagePosted.delete(chatId);
+			return { reason: "no context to show" };
+		}
+
+		const text = lines.join("\n");
+		try {
+			await this.callBitrix24Method(portalDomain, "im.message.add", {
+				DIALOG_ID: `chat${chatId}`,
+				MESSAGE: text,
+				SYSTEM: "Y",
+				URL_PREVIEW: "N",
+			});
+			this.logger.info(
+				`postContextMessage: chat ${chatId} ← context (contact=${ctx.contactId || "-"}, ` +
+				`entity=${ctx.openEntity?.kind || "-"}/${ctx.openEntity?.id || "-"}, ` +
+				`uuid=${ctx.customerUuid || "-"})`,
+			);
+			return { posted: true };
+		} catch (e: any) {
+			this.logger.warn(`postContextMessage: failed for chat ${chatId}: ${e?.message || e}`);
+			this._contextMessagePosted.delete(chatId); // позволим повторить позже
+			return { reason: e?.message || "post failed" };
+		}
+	}
+
 	async autoTakeSession(
 		portalDomain: string,
 		operatorAuthId: string,
@@ -615,10 +701,12 @@ export class Bitrix24Service extends BaseAdapter<
 				// в imconnector и для backfill созданного лида).
 				let contactName: string | undefined;
 				let contactLastName: string | undefined;
+				let customerUuid: string | undefined;
 				try {
 					const contactData: any = await this.callBitrix24Method(portalDomain, "crm.contact.get", { id: contactId });
 					contactName = (contactData?.NAME || "").toString().trim() || undefined;
 					contactLastName = (contactData?.LAST_NAME || "").toString().trim() || undefined;
+					customerUuid = (contactData?.UF_CRM_PB_CUSTOMER_UUID || "").toString().trim() || undefined;
 					if (chatId && chatIdUf) {
 						const existingValue = contactData?.[chatIdUf];
 						if (!existingValue) {
@@ -656,7 +744,7 @@ export class Bitrix24Service extends BaseAdapter<
 					this.logger.warn(`ensureLead[${trace}]: failed to read/save contact ${contactId}: ${e.message}`);
 				}
 
-				const baseResult: EnsureLeadResult = { contactId, contactName, contactLastName };
+				const baseResult: EnsureLeadResult = { contactId, contactName, contactLastName, customerUuid };
 
 				if (skipLeadCreation) {
 					// Widget-flow: лид создаст imconnector, мы только зарезолвили контакт
