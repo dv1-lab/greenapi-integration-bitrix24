@@ -609,7 +609,8 @@ export class WebhooksController {
 	// Internal endpoint: массовое переименование всех IG-тем (refresh_all для IG).
 	// Идёт по state.topics в i2crm-tg-mirror, для каждой темы дёргает B24 за
 	// актуальным ФИО, формирует новое имя в текущем формате и edit'ит топик.
-	// Auth: тот же X-Hint-Secret.
+	// Fire-and-forget: задача запускается в фоне, endpoint возвращает started:true
+	// сразу. Прогресс/итог — в логах adapter'а (level=info). Auth: X-Hint-Secret.
 	@Post("internal/refresh-ig-topics")
 	@HttpCode(HttpStatus.OK)
 	async refreshIgTopics(@Req() req: Request, @Res() res: Response): Promise<void> {
@@ -620,16 +621,39 @@ export class WebhooksController {
 			return;
 		}
 		const body = (req.body || {}) as { channel?: string; accountName?: string };
-		try {
-			const result = await this.i2crmTgMirror.refreshAllTopics({
-				channel: body.channel,
-				accountName: body.accountName,
-			});
-			res.json(result);
-		} catch (error: any) {
-			this.logger.error(`refresh-ig-topics failed: ${error.message}`);
-			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		this.i2crmTgMirror.refreshAllTopics({
+			channel: body.channel,
+			accountName: body.accountName,
+		}).then(
+			(r) => this.logger.info(`refresh-ig-topics done: ${JSON.stringify(r)}`),
+			(e) => this.logger.error(`refresh-ig-topics failed: ${e.message}`),
+		);
+		res.json({ started: true });
+	}
+
+	// Internal endpoint: массовое переименование тем-зеркал TG-ботов
+	// (@begovoy_bot, @begovoy1support_bot, ...). Приводит к стандарту
+	// «TG · <botName> · <ФИО из B24>». Auth: X-Hint-Secret.
+	// Body: {botName?: "begovoy" | "support"} — фильтр по конкретному боту,
+	// по умолчанию обрабатываются темы всех ботов.
+	// Fire-and-forget — см. refreshIgTopics.
+	@Post("internal/refresh-tg-bot-topics")
+	@HttpCode(HttpStatus.OK)
+	async refreshTgBotTopics(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
 		}
+		const body = (req.body || {}) as { botName?: string };
+		this.tgBotMirror.refreshAllTopics({
+			botName: body.botName,
+		}).then(
+			(r) => this.logger.info(`refresh-tg-bot-topics done: ${JSON.stringify(r)}`),
+			(e) => this.logger.error(`refresh-tg-bot-topics failed: ${e.message}`),
+		);
+		res.json({ started: true });
 	}
 
 	// Internal endpoint: повторная доставка pending-событий i2crm в B24.

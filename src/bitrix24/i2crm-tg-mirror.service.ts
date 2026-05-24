@@ -160,7 +160,8 @@ export class I2crmTgMirrorService {
 			const lineName = this.resolveIgLineName(channel, accountName);
 			const portal = this.b24Portal();
 
-			const lines: string[] = ["📋 Карточка клиента"];
+			const headerChannel = channel === "instcom" ? "Instagram Comments" : "Instagram Direct";
+			const lines: string[] = [`📋 Карточка клиента (${headerChannel})`];
 			if (clientName) lines.push(`Имя: ${this.escapeHtml(clientName)}`);
 			if (username) {
 				lines.push(`Instagram ${channelKind}: <a href="https://instagram.com/${this.escapeHtml(username)}/">@${this.escapeHtml(username)}</a>`);
@@ -358,13 +359,21 @@ export class I2crmTgMirrorService {
 		}
 		const username = payload?.client_username;
 		const clientName = payload?.client_name || username || `IG_${clientId}`;
-		// Префикс канала в названии темы — "IG Direct @1begovoy.ru" /
-		// "IG Comment @1begovoy.ru". Имя бизнес-аккаунта берём из payload
-		// (account_name). При нескольких подключённых IG-аккаунтах поможет
-		// визуально различать их в общем списке тем TG-группы.
-		const accountName = String(payload?.account_name || "").trim();
-		const accountTag = accountName ? ` @${accountName}` : "";
-		const channelPrefix = (channel === "instcom" ? "IG Comment" : "IG Direct") + accountTag;
+		// Единый формат заголовка темы «<CHANNEL> · <SOURCE> · <CLIENT_NAME>»:
+		//   Direct:   "IG-Direct · @<ig_username> · <Имя>" (или "IG-Direct · IG · …" без username)
+		//   Comments: "IG-Comments · пост #<media_id_short> · <Имя>"
+		// SOURCE для Direct — @username клиента (стабильнее account_name);
+		// для Comments — короткий хвост media_id (последние 6 символов), чтобы
+		// топик однозначно ассоциировался с конкретным постом.
+		let sourceTag: string;
+		if (channel === "instcom") {
+			const mediaId = String(payload?.media_id || "");
+			const shortMedia = mediaId ? mediaId.slice(-6) : "";
+			sourceTag = shortMedia ? `пост #${shortMedia}` : "пост";
+		} else {
+			sourceTag = username ? `@${username}` : "IG";
+		}
+		const channelLabel = channel === "instcom" ? "IG-Comments" : "IG-Direct";
 		// ФИО клиента из B24 — через HTTP self-call к собственному endpoint
 		// /webhooks/internal/contact-name. Прямая инжекция bitrix24Service'а
 		// сюда даст circular dep (он же инжектит i2crm-tg-mirror), поэтому
@@ -390,7 +399,7 @@ export class I2crmTgMirrorService {
 			this.logger.debug(`tg-mirror: B24 name self-lookup failed: ${e.message}`);
 		}
 		const baseName = b24Name || (username ? `@${username}` : clientName);
-		const topicName = `${channelPrefix} · ${baseName}`;
+		const topicName = `${channelLabel} · ${sourceTag} · ${baseName}`.slice(0, 128);
 
 		try {
 			const { topicId, created } = await this.findOrCreateTopic(groupId, clientId, topicName);
@@ -505,7 +514,8 @@ export class I2crmTgMirrorService {
 		const uuid = await this.resolveCustomerUuid(input.clientId);
 		const lineName = this.resolveIgLineName(input.channel, "");
 
-		const lines: string[] = ["📋 Карточка клиента"];
+		const headerChannel = input.channel === "instcom" ? "Instagram Comments" : "Instagram Direct";
+		const lines: string[] = [`📋 Карточка клиента (${headerChannel})`];
 		if (title) lines.push(`Имя: ${title}`);
 		lines.push(`Instagram ${channelKind}: client_id ${this.escapeHtml(input.clientId)}`);
 		lines.push(`Линия: ${this.escapeHtml(lineName)}`);
@@ -623,11 +633,18 @@ export class I2crmTgMirrorService {
 		return cfg.trim() || "1begovoy.bitrix24.ru";
 	}
 
-	// Массовое переименование всех IG-тем — обновляет название по текущему
-	// формату 'IG Direct @<account> · <ФИО из B24>'. Используется когда формат
-	// изменился (например, добавили префикс @account_name) и нужно ретроактивно
-	// применить ко всем существующим темам.
+	// Массовое переименование всех IG-тем — обновляет название по единому
+	// стандарту:
+	//   Direct:   "IG-Direct · @<username> · <ФИО из B24>"
+	//             (если username нет — sourceTag fallback'ит на "IG")
+	//   Comments: "IG-Comments · пост · <ФИО из B24>"
+	//             media_id в state не хранится (один клиент = один топик
+	//             в Comments-группе по факту, A2 поменял только B24 chat.id),
+	//             поэтому при backfill ставим обобщённое "пост". Новые темы
+	//             создаются с media_id из payload (см. mirrorIncoming).
 	// channel: 'instdir' / 'instcom' / undefined (= оба сразу).
+	// accountName — оставлен для обратной совместимости, в новом формате не
+	// используется (нужен только для Direct fallback'а на username).
 	async refreshAllTopics(input: { channel?: string; accountName?: string } = {}): Promise<{
 		total: number; renamed: number; skipped_same: number; no_b24: number; errors: number;
 	}> {
@@ -636,11 +653,6 @@ export class I2crmTgMirrorService {
 		}
 		await this.loadMap();
 		const channelFilter = input.channel || "";
-		// Если не передали account_name (raw payload отсутствует) — попробуем
-		// из env I2CRM_INSTAGRAM_ACCOUNT_NAME, fallback на "1begovoy.ru".
-		const accountName = input.accountName
-			|| this.configService.get<string>("I2CRM_INSTAGRAM_ACCOUNT_NAME")
-			|| "1begovoy.ru";
 
 		let total = 0;
 		let renamed = 0;
@@ -651,7 +663,10 @@ export class I2crmTgMirrorService {
 		const port = this.configService.get<string>("PORT") || "3000";
 		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
 
-		for (const [key, topicId] of Object.entries(this.state.topics)) {
+		const allEntries = Object.entries(this.state.topics);
+		this.logger.info(`refresh-ig: starting, ${allEntries.length} тем в state, ETA ~${Math.round((allEntries.length * 5) / 60)}мин (B24-lookup + edit)`);
+		let processed = 0;
+		for (const [key, topicId] of allEntries) {
 			// Ключи бывают:
 			//   <groupId>:<clientId> — current формат (после разделения групп)
 			//   <clientId>           — legacy (один топик на клиента, оба канала)
@@ -676,11 +691,12 @@ export class I2crmTgMirrorService {
 			total++;
 
 			try {
-				// ФИО из B24 через self-call (избегаем circular dep). Timeout
-				// большой (30с), т.к. при параллельной нагрузке (backfill #22)
-				// B24-квота OPERATION_TIME_LIMIT может задерживать crm.contact.list
-				// и crm.lead.list до 5-15 секунд.
+				// ФИО + username из B24 через self-call (избегаем circular dep).
+				// Timeout большой (30с), т.к. при параллельной нагрузке
+				// (backfill #22) B24-квота OPERATION_TIME_LIMIT может задерживать
+				// crm.contact.list и crm.lead.list до 5-15 секунд.
 				let b24Name: string | null = null;
+				let igUsername: string | null = null;
 				try {
 					const resp = await axios.post(
 						`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
@@ -691,7 +707,10 @@ export class I2crmTgMirrorService {
 							validateStatus: () => true,
 						},
 					);
-					if (resp.status === 200) b24Name = (resp.data?.name as string) || null;
+					if (resp.status === 200) {
+						b24Name = (resp.data?.name as string) || null;
+						igUsername = (resp.data?.igUsername as string) || null;
+					}
 				} catch (e: any) {
 					this.logger.debug(`refresh-ig: B24 lookup failed for ${clientId}: ${e.message}`);
 				}
@@ -700,8 +719,16 @@ export class I2crmTgMirrorService {
 					continue;
 				}
 
-				const prefix = (channel === "instcom" ? "IG Comment" : "IG Direct") + ` @${accountName}`;
-				const newName = `${prefix} · ${b24Name}`.slice(0, 128);
+				const channelLabel = channel === "instcom" ? "IG-Comments" : "IG-Direct";
+				let sourceTag: string;
+				if (channel === "instcom") {
+					// state не хранит media_id, по A2 один клиент = один топик
+					// в Comments-группе — оставляем обобщённое «пост».
+					sourceTag = "пост";
+				} else {
+					sourceTag = igUsername ? `@${igUsername}` : "IG";
+				}
+				const newName = `${channelLabel} · ${sourceTag} · ${b24Name}`.slice(0, 128);
 
 				try {
 					await this.botApi("editForumTopic", {
@@ -724,7 +751,18 @@ export class I2crmTgMirrorService {
 				this.logger.warn(`refresh-ig: iteration failed for ${key}: ${e.message}`);
 				errors++;
 			}
+			processed++;
+			if (processed % 50 === 0) {
+				this.logger.info(
+					`refresh-ig: progress ${processed}/${allEntries.length} ` +
+					`(renamed=${renamed} skipped=${skipped_same} no_b24=${no_b24} errors=${errors})`,
+				);
+			}
 		}
+		this.logger.info(
+			`refresh-ig: finished total=${total} renamed=${renamed} ` +
+			`skipped_same=${skipped_same} no_b24=${no_b24} errors=${errors}`,
+		);
 
 		return { total, renamed, skipped_same, no_b24, errors };
 	}

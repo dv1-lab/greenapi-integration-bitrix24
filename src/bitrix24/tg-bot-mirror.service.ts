@@ -11,6 +11,11 @@ import { GreenApiLogger } from "@green-api/greenapi-integration";
 // (groupId,chatId)→topicId и (groupId,chatId)→cardsPosted в одном JSON-файле,
 // чтобы топики разных инстансов не пересекались. Бот зеркала один общий —
 // @begovoyconnect_bot (TG_MIRROR_BOT_TOKEN).
+//
+// botByGroupId: маппинг groupId → botName для refresh — у топика в JSON-state
+// есть groupId, по нему можно достать botName из env TG_BOT_MIRROR_GROUPS
+// (формат: "<botName>:<groupId>,..."). Используется при backfill заголовков
+// — иначе мы не знаем под каким botName тема создавалась.
 interface MirrorState {
 	topics: Record<string, number>;      // "<groupId>:<chatId>" → topic_id
 	cardsPosted: Record<string, true>;   // "<groupId>:<chatId>" → карточка постилась
@@ -252,8 +257,66 @@ export class TgBotMirrorService {
 		return cfg.trim() || "1begovoy.bitrix24.ru";
 	}
 
+	// Достаёт photoFileId клиента через клиентский бот-инстанс (НЕ зеркало!).
+	// У зеркального бота (TG_MIRROR_BOT_TOKEN) аватарок клиентов нет — клиент
+	// никогда с ним не общался. Нужен токен того бота, через которого клиент
+	// писал в нашу систему (@begovoy_bot / @begovoy1support_bot).
+	// botName опционален; если не передан — попробуем дефолтный TG_BOT_TOKEN.
+	private async fetchClientAvatarFileId(
+		chatId: string, botName?: string,
+	): Promise<string | null> {
+		// Резолв токена клиентского бота по имени.
+		let clientToken: string | undefined;
+		if (botName === "support") {
+			clientToken = this.configService.get<string>("TG_BOT_SUPPORT_TOKEN");
+		} else if (botName) {
+			// Шаблон: TG_BOT_<BOTNAME_UPPER>_TOKEN, для legacy «begovoy» —
+			// TG_BOT_TOKEN.
+			const upper = botName.toUpperCase();
+			clientToken = this.configService.get<string>(`TG_BOT_${upper}_TOKEN`)
+				|| this.configService.get<string>("TG_BOT_TOKEN");
+		} else {
+			clientToken = this.configService.get<string>("TG_BOT_TOKEN");
+		}
+		if (!clientToken) return null;
+		try {
+			const r = await axios.get(
+				`https://api.telegram.org/bot${clientToken}/getUserProfilePhotos`,
+				{
+					params: { user_id: chatId, limit: 1 },
+					timeout: 10000,
+					validateStatus: () => true,
+				},
+			);
+			if (r.data?.ok !== true) return null;
+			const photos = r.data?.result?.photos as any[] | undefined;
+			if (!photos || photos.length === 0) return null;
+			const sizes = photos[0] as any[];
+			if (!sizes || sizes.length === 0) return null;
+			// Берём самую крупную (последнюю в массиве).
+			const biggest = sizes[sizes.length - 1];
+			const fileId = biggest?.file_id as string | undefined;
+			if (!fileId) return null;
+			// Скачиваем через getFile + file_path в Buffer (file_id клиентского
+			// бота не работает у бота-зеркала — нужно перезагрузить как фото).
+			const info: any = await axios.get(
+				`https://api.telegram.org/bot${clientToken}/getFile`,
+				{ params: { file_id: fileId }, timeout: 10000, validateStatus: () => true },
+			);
+			if (info.data?.ok !== true) return null;
+			const filePath = info.data?.result?.file_path as string | undefined;
+			if (!filePath) return null;
+			return `https://api.telegram.org/file/bot${clientToken}/${filePath}`;
+		} catch (e: any) {
+			this.logger.debug(`tg-bot-mirror: fetchClientAvatar failed: ${e.message}`);
+			return null;
+		}
+	}
+
 	// Постит карточку клиента в топик (идемпотентно по (groupId,chatId)) + закрепляет.
 	// Унифицированный формат — см. docs/ARCHITECTURE.md § Карточка клиента.
+	// Если у клиента есть аватар в Telegram (getUserProfilePhotos через клиентский
+	// бот) — карточка идёт sendPhoto с caption; иначе текстом.
 	private async postClientCard(
 		groupId: string, topicId: number, chatId: string, clientName: string, username: string,
 		botName?: string, lineId?: number,
@@ -263,14 +326,15 @@ export class TgBotMirrorService {
 
 		// Все обогащающие lookup'ы — best-effort параллельно. Если что-то
 		// не ответило за timeout, просто пропускаем соответствующую строку.
-		const [entities, uuid] = await Promise.all([
+		const [entities, uuid, avatarUrl] = await Promise.all([
 			this.resolveB24Entities(chatId),
 			this.resolveCustomerUuid(chatId),
+			this.fetchClientAvatarFileId(chatId, botName),
 		]);
 		const lineName = this.resolveLineName(botName, lineId);
 		const portal = this.b24Portal();
 
-		const lines: string[] = ["📋 Карточка клиента"];
+		const lines: string[] = ["📋 Карточка клиента (Telegram)"];
 		if (clientName && clientName.trim()) {
 			lines.push(`Имя: ${this.escapeHtml(clientName)}`);
 		}
@@ -294,19 +358,38 @@ export class TgBotMirrorService {
 		lines.push("Команды: /nnn &lt;текст&gt; — внутренняя заметка");
 		const text = lines.join("\n");
 		try {
-			const res = await this.botApi("sendMessage", {
-				chat_id: groupId,
-				message_thread_id: topicId,
-				text,
-				parse_mode: "HTML",
-				disable_web_page_preview: true,
-				disable_notification: true,
-			});
-			if (res?.message_id) {
+			let messageId: number | undefined;
+			if (avatarUrl) {
+				try {
+					const res = await this.botApi("sendPhoto", {
+						chat_id: groupId,
+						message_thread_id: topicId,
+						photo: avatarUrl,
+						caption: text,
+						parse_mode: "HTML",
+						disable_notification: true,
+					});
+					messageId = res?.message_id;
+				} catch (e: any) {
+					this.logger.debug(`tg-bot-mirror: sendPhoto failed (${e.message}), falling back to text`);
+				}
+			}
+			if (!messageId) {
+				const res = await this.botApi("sendMessage", {
+					chat_id: groupId,
+					message_thread_id: topicId,
+					text,
+					parse_mode: "HTML",
+					disable_web_page_preview: true,
+					disable_notification: true,
+				});
+				messageId = res?.message_id;
+			}
+			if (messageId) {
 				try {
 					await this.botApi("pinChatMessage", {
 						chat_id: groupId,
-						message_id: res.message_id,
+						message_id: messageId,
 						disable_notification: true,
 					});
 				} catch (e: any) {
@@ -318,6 +401,115 @@ export class TgBotMirrorService {
 		} catch (e: any) {
 			this.logger.warn(`tg-bot-mirror: postClientCard failed: ${e.message}`);
 		}
+	}
+
+	// Массовое переименование тем под единый стандарт «TG · <botName> · <ФИО>».
+	// Идёт по state.topics, для каждой темы:
+	//  1. Определяет channel-source (botName) по groupId — резолв через env
+	//     TG_BOT_MIRROR_GROUPS (формат: "begovoy:-1003988471578,support:-1003772436222").
+	//  2. Дёргает adapter self-call /webhooks/internal/contact-name за актуальным
+	//     ФИО (если в B24 оператор переименовал клиента — подтягиваем).
+	//  3. editForumTopic — rate-limit 1 op/sec (TG лимит для group-level edits).
+	//
+	// Возвращает {total, renamed, skipped_same, no_b24, errors}. botName и
+	// channel определяются по groupId, поэтому опционально можно отфильтровать
+	// конкретный бот через input.botName.
+	async refreshAllTopics(input: { botName?: string } = {}): Promise<{
+		total: number; renamed: number; skipped_same: number; no_b24: number; errors: number;
+	}> {
+		if (!this.enabled) {
+			return { total: 0, renamed: 0, skipped_same: 0, no_b24: 0, errors: 0 };
+		}
+		await this.loadMap();
+
+		// Маппинг groupId → botName. Источники в порядке приоритета:
+		//  1. env TG_BOT_MIRROR_GROUPS_MAP — явный список:
+		//     "begovoy:-1003988471578,support:-1003772436222"
+		//  2. fallback: дефолтные env TG_BOT_MIRROR_GROUP_ID → "begovoy",
+		//     TG_BOT_SUPPORT_MIRROR_GROUP_ID → "support".
+		// Темы в неизвестной группе пропускаются.
+		const raw = this.configService.get<string>("TG_BOT_MIRROR_GROUPS_MAP") || "";
+		const groupToBot: Record<string, string> = {};
+		for (const pair of raw.split(",")) {
+			const idx = pair.indexOf(":");
+			if (idx < 0) continue;
+			const bot = pair.slice(0, idx).trim();
+			const gid = pair.slice(idx + 1).trim();
+			if (bot && gid) groupToBot[gid] = bot;
+		}
+		// Fallback: дефолтные имена env-переменных по бот-инстансу.
+		const begGid = this.configService.get<string>("TG_BOT_MIRROR_GROUP_ID");
+		if (begGid && !groupToBot[begGid]) groupToBot[begGid] = "begovoy";
+		const supGid = this.configService.get<string>("TG_BOT_SUPPORT_MIRROR_GROUP_ID");
+		if (supGid && !groupToBot[supGid]) groupToBot[supGid] = "support";
+
+		const port = this.configService.get<string>("PORT") || "3000";
+		const secret = this.configService.get<string>("BRIDGE_HINT_SECRET") || "";
+
+		let total = 0;
+		let renamed = 0;
+		let skipped_same = 0;
+		let no_b24 = 0;
+		let errors = 0;
+
+		const allEntries = Object.entries(this.state.topics);
+		this.logger.info(`refresh-tg-bot: starting, ${allEntries.length} тем (групп ${Object.keys(groupToBot).length})`);
+		for (const [key, topicId] of allEntries) {
+			if (!key.includes(":")) continue; // composite-only
+			const idx = key.indexOf(":");
+			const groupId = key.slice(0, idx);
+			const chatId = key.slice(idx + 1);
+			const botName = groupToBot[groupId];
+			if (!botName) continue; // тема в неизвестной группе — skip
+			if (input.botName && input.botName !== botName) continue;
+			total++;
+
+			let b24Name: string | null = null;
+			try {
+				const resp = await axios.post(
+					`http://127.0.0.1:${port}/webhooks/internal/contact-name`,
+					{ tgChatId: chatId },
+					{
+						headers: secret ? { "X-Hint-Secret": secret } : undefined,
+						timeout: 20000,
+						validateStatus: () => true,
+					},
+				);
+				if (resp.status === 200) b24Name = (resp.data?.name as string) || null;
+			} catch (e: any) {
+				this.logger.debug(`refresh-tg-bot: B24 lookup failed for ${chatId}: ${e.message}`);
+			}
+			if (!b24Name) {
+				no_b24++;
+				continue;
+			}
+
+			const newName = `TG · ${botName} · ${b24Name}`.slice(0, 128);
+			try {
+				await this.botApi("editForumTopic", {
+					chat_id: groupId,
+					message_thread_id: topicId,
+					name: newName,
+				});
+				renamed++;
+			} catch (e: any) {
+				const msg = String(e.message || "");
+				if (msg.includes("TOPIC_NOT_MODIFIED")) {
+					skipped_same++;
+				} else {
+					this.logger.warn(`refresh-tg-bot: editForumTopic failed for ${topicId}: ${msg}`);
+					errors++;
+				}
+			}
+			// Rate-limit 1 req/sec (TG group edits).
+			await new Promise((r) => setTimeout(r, 1000));
+		}
+		this.logger.info(
+			`refresh-tg-bot: finished total=${total} renamed=${renamed} ` +
+			`skipped_same=${skipped_same} no_b24=${no_b24} errors=${errors}`,
+		);
+
+		return { total, renamed, skipped_same, no_b24, errors };
 	}
 
 	// Обратный поиск: по (groupId, topicId) → chatId клиента. Используется
@@ -355,8 +547,14 @@ export class TgBotMirrorService {
 		try {
 			const b24Name = await this.resolveB24Name(chatId);
 			const displayName = b24Name || input.clientName;
+			// Единый формат заголовка темы во всех каналах:
+			// «<CHANNEL> · <SOURCE> · <CLIENT_NAME>». Для TG-бота:
+			//   CHANNEL = TG; SOURCE = botName (`begovoy_bot` / `support_bot` без `1`).
+			// Если botName неизвестен — fallback на голый «TG · <name>».
+			const sourceTag = input.botName ? `${input.botName} · ` : "";
+			const topicTitle = `TG · ${sourceTag}${displayName}`.slice(0, 128);
 			const { topicId, created } = await this.findOrCreateTopic(
-				groupId, chatId, `TG · ${displayName}`,
+				groupId, chatId, topicTitle,
 			);
 			if (created) {
 				void this.postClientCard(
