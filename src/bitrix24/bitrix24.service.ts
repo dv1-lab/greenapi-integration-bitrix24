@@ -1790,6 +1790,69 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Аналог addTimelineCommentByPhone, но для TG-бот-каналов (UF_CRM_TG_CHAT_ID).
+	 * Используется при /nnn в супергруппе TG-bot зеркала (@begovoy_bot /
+	 * @begovoy1support_bot): у TG-бот клиента нет phone, искать нужно по chatId.
+	 * Возвращает {ok, entity, entityId, reason} — как сестринский метод.
+	 */
+	async addTimelineCommentByTgChat(
+		tgChatId: string, text: string,
+	): Promise<{ ok: boolean; entity?: "deal" | "lead" | "contact"; entityId?: number; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, reason: "no portal" };
+		try {
+			// Контакт по UF_CRM_TG_CHAT_ID — для TG-бот клиента может не быть phone
+			const contacts: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+				filter: { "UF_CRM_TG_CHAT_ID": tgChatId },
+				select: ["ID"],
+				order: { ID: "DESC" },
+			}, undefined, 0, "customer360");
+			const contactId = Array.isArray(contacts) && contacts.length > 0 ? Number(contacts[0].ID) : null;
+
+			// Открытая сделка контакта
+			if (contactId) {
+				const deals: any = await this.callBitrix24Method(portalDomain, "crm.deal.list", {
+					filter: { CONTACT_ID: contactId, "!STAGE_SEMANTIC_ID": ["F", "P"] },
+					select: ["ID"],
+					order: { DATE_CREATE: "DESC" },
+				}, undefined, 0, "customer360");
+				if (Array.isArray(deals) && deals.length > 0) {
+					const dealId = Number(deals[0].ID);
+					const cid = await this.addTimelineComment(portalDomain, "deal", dealId, text, "customer360");
+					if (cid) return { ok: true, entity: "deal", entityId: dealId };
+				}
+			}
+
+			// Открытый лид — сначала по контакту (если есть), потом по UF_CRM_TG_CHAT_ID
+			const leadFilters: Array<Record<string, any>> = [];
+			if (contactId) {
+				leadFilters.push({ CONTACT_ID: contactId, "!STATUS_SEMANTIC_ID": ["F", "S"] });
+			}
+			leadFilters.push({ "UF_CRM_TG_CHAT_ID": tgChatId, "!STATUS_SEMANTIC_ID": ["F", "S"] });
+			for (const filter of leadFilters) {
+				const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+					filter, select: ["ID"], order: { DATE_CREATE: "DESC" },
+				}, undefined, 0, "customer360");
+				if (Array.isArray(leads) && leads.length > 0) {
+					const leadId = Number(leads[0].ID);
+					const cid = await this.addTimelineComment(portalDomain, "lead", leadId, text, "customer360");
+					if (cid) return { ok: true, entity: "lead", entityId: leadId };
+				}
+			}
+
+			// Last resort — комментарий в контакте
+			if (contactId) {
+				const cid = await this.addTimelineComment(portalDomain, "contact", contactId, text, "customer360");
+				if (cid) return { ok: true, entity: "contact", entityId: contactId };
+			}
+			return { ok: false, reason: contactId ? "no open deal/lead" : "no contact by UF_CRM_TG_CHAT_ID" };
+		} catch (e: any) {
+			return { ok: false, reason: e.message };
+		}
+	}
+
+	/**
 	 * crm.timeline.comment.add в указанную сделку/лид. Возвращает id комментария
 	 * или null при ошибке (логируется warn). Используется в widget /send для
 	 * фиксации исходящего сообщения в открытой сущности клиента вместо создания

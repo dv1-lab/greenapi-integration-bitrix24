@@ -227,6 +227,45 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint для wa-tg-bridge: /nnn в супергруппе TG-бот зеркала
+	// (begovoy / support) → timeline-comment во внутренней сущности клиента в B24.
+	// У TG-бот клиента нет phone — резолвим через UF_CRM_TG_CHAT_ID.
+	// Auth: X-Hint-Secret.
+	@Post("internal/tg-bot-note")
+	@HttpCode(HttpStatus.OK)
+	async tgBotNote(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			groupId?: string; topicId?: number; text?: string; author?: string;
+		};
+		const groupId = String(body.groupId || "");
+		const topicId = Number(body.topicId || 0);
+		const text = String(body.text || "").trim();
+		const author = String(body.author || "").trim();
+		if (!groupId || !topicId || !text) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "groupId, topicId, text required" });
+			return;
+		}
+		const botName = this.bitrix24Service.getTgBotByGroupId(groupId);
+		if (!botName) {
+			res.status(HttpStatus.OK).json({ ok: false, reason: `groupId ${groupId} не привязан к tg-bot инстансу` });
+			return;
+		}
+		const chatId = await this.tgBotMirror.findChatIdByTopic(groupId, topicId);
+		if (!chatId) {
+			res.status(HttpStatus.OK).json({ ok: false, reason: `нет связи topic ${topicId} → клиент в group ${groupId}` });
+			return;
+		}
+		const prefix = author ? `📝 Заметка от ${author}:\n` : "📝 Заметка:\n";
+		const result = await this.bitrix24Service.addTimelineCommentByTgChat(chatId, prefix + text);
+		res.json(result);
+	}
+
 	// Internal endpoint для wa-tg-bridge: получить ФИО клиента из B24 по phone
 	// (для WA/MAX/TG) или igClientId (для Instagram). Авторизация общим секретом
 	// BRIDGE_HINT_SECRET (он же используется для operator-hint). Контейнер
