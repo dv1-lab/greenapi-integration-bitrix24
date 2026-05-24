@@ -54,11 +54,11 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. Н
 ## Деплой
 
 ```bash
-# pull изменения
+# pull изменения (репо живёт в source/, compose — в корне)
 cd /home/dv/greenapi-b24/source && git pull
 
-# rebuild + restart (--build обязательно, иначе старый dist)
-docker compose up -d adapter --build --force-recreate
+# build + up — из корня, не из source/
+cd /home/dv/greenapi-b24 && docker compose up -d adapter --build --force-recreate
 
 # проверка
 docker compose logs adapter --tail 30 | grep -iE "Nest application|error"
@@ -66,6 +66,18 @@ docker compose logs adapter --tail 30 | grep -iE "Nest application|error"
 
 `docker compose restart` НЕ перечитывает `.env` и НЕ пересобирает образ — для
 изменений кода нужно `up -d --build`.
+
+**Почему deploy из корня, а не из source/** (выяснено 2026-05-25):
+В `/home/dv/greenapi-b24/` есть `docker-compose.yml` + `docker-compose.override.yml`
++ `.env`. В `source/` лежит **репо** (Dockerfile, package.json, src/). Корневой
+compose имеет `build: source` (точка входа build-контекста), а override
+переопределяет `ports`/`env_file`/`volumes` (bind mount на `/home/dv/greenapi-b24/mysql-data/`,
+а не named volume). Запуск из source/ игнорирует override → port 3000 коллизия
+и пустой mysql named volume.
+
+`COMPOSE_PROJECT_NAME=source` в `.env` фиксирует имена контейнеров
+`source-adapter-1`/`source-db-1` — на них завязаны `backup.sh`, monitor-bot,
+healthchecks. Менять имя проекта = ломать инфраструктуру.
 
 ## Безопасность
 

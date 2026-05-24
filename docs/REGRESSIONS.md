@@ -65,11 +65,26 @@
     (формат phone в B24 отличается от того, что шлёт widget); app=`social`
     не имел прав на `crm.contact.update`; widget /send упал на этапе до
     `ensureOpenLeadForPhone`.
-- **Статус**: документация написана (`OPEN_LINE_LIFECYCLE.md`, `CHECKLIST_WIDGET.md`).
-  Фикс — отдельная сессия #21 с timestamps adapter-логов конкретного отправления +
-  reproduce. По итогам — patch widget с явным sanity-check «UF записался?».
+- **Реальный корень 2026-05-24/25 (часть 2)**: префикс `sc_` в `imconnector.send.messages`
+  (user.id=`sc_77109671`) не матчится с UF_CRM_MAX_CHAT_ID=`77109671` (без префикса) →
+  B24 заводит **новый** chat-user → новая open-line сессия → новый «свободный»
+  лид-дубликат в очереди «Неотвеченные». Подтверждено логами `ensureLead[lm25qw]` +
+  visual reproduce. Подробности — memory `widget_max_47_root_cause.md`.
+- **Фикс A.v2 (sha `2f27713`, 2026-05-24/25)**: `Bitrix24Service.autoTakeSession`:
+  получает operatorId через `user.current?auth=<authId>` → retry-loop по
+  `im.recent.list TYPE=lines` ищет chat с `entity_id` содержащим userKey →
+  `imopenlines.operator.answer CHAT_ID=<num> USER_ID=<op>` (fallback `session.join`).
+  Вызывается асинхронно из `widget /send` после `mirrorToBitrix`. Не throw'ает —
+  graceful с trace-id. Эффект: диалог сразу в «В работе» оператора, не в «Неотвеченных».
+- **Hot-fix sleep(2000) в ensureOpenLeadForPhone**: бесполезен (корень — префикс,
+  не race-condition), откачен `git checkout` 2026-05-24 22:00 МСК.
+- **Осталось**: фикс B — `imopenlines.crm.chat.attach` для привязки chat-user
+  к существующей сделке (а не к новому лиду-дубликату). Системное сообщение
+  со ссылками лид/контакт/customer-360/МойСклад в начало диалога — отдельная подзадача.
 - **НЕ повторять**: написание фикса без полной проверки 4 каналов (WA/TG/MAX/IG)
-  × 2 направлений (in/out) × 2 сценариев (виджет / с мобильного).
+  × 2 направлений (in/out) × 2 сценариев (виджет / с мобильного). Не пытаться
+  чинить через `sleep` («race condition») когда реальный корень — несовпадение
+  идентификаторов.
 
 ---
 
