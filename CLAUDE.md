@@ -82,7 +82,9 @@ healthchecks. Менять имя проекта = ломать инфрастр
 ## Безопасность
 
 - Никаких `grep .env | cut` — пароли утекают в transcript. Использовать
-  `awk '/^KEY=/ {printf "%s=<set,%d>\n",$1,length($0)-length($1)-1}'`.
+  `awk -F= '/^KEY=/ {printf "%s=<set,%d>\n",$1,length($0)-length($1)-1}'`.
+  **ОБЯЗАТЕЛЬНО `-F=`** — без него `$1` это вся строка, printf напечатает пароль
+  целиком (инцидент 2026-05-25, [[feedback-awk-mask-fs-required]]).
 - Пароли для DATABASE_URL — alphanumeric only (без `+/=`), Prisma URL-encoding
   ломается.
 - Webhook URL B24 не выводить `cat`/`echo` целиком — заменять `/rest/<num>/<token>/`
