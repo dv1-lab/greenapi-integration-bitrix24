@@ -220,34 +220,61 @@ Instagram через bridge **не идёт** — i2crm шлёт вебхуки 
 Каждый новый топик в TG-зеркале/IG-зеркале/TG-бот-зеркале начинается с
 **pinned-карточки клиента** — pinned message с базовой инфой, чтобы
 оператор сразу видел кто это и где о нём данные. Формат **унифицирован
-на все каналы** (2026-05-24).
+на все каналы** (2026-05-24 второй проход).
 
-### Канонический формат
+> **Полная спецификация — обязательное чтение перед любой правкой mirror-
+> кода**: [`CLIENT_CARD_STANDARD.md`](./CLIENT_CARD_STANDARD.md). История
+> прошлых регрессий «фикс в одном канале, забыли в других» — в
+> [`REGRESSIONS.md`](./REGRESSIONS.md).
+
+### Заголовок форум-темы
 
 ```
-📋 Карточка клиента
+<CHANNEL> · <SOURCE> · <CLIENT_NAME>
+```
+
+| Канал | CHANNEL | SOURCE | Пример |
+|---|---|---|---|
+| WhatsApp | `WA` | last4 shard | `WA · 3354 · Иван Петров` |
+| Telegram (Green API shard) | `TG` | last4 shard | `TG · 3354 · Анна` |
+| MAX | `MAX` | last4 shard | `MAX · 3354 · +79055994431` |
+| TG-бот `@begovoy_bot` | `TG` | `begovoy` | `TG · begovoy · Olga K` |
+| TG-бот `@begovoy1support_bot` | `TG` | `support` | `TG · support · Иван` |
+| Instagram Direct | `IG-Direct` | `@<ig_username>` или `IG` | `IG-Direct · @anna_p · Анна П.` |
+| Instagram Comments | `IG-Comments` | `пост #<media_id_short>` | `IG-Comments · пост #abc123 · Олег П.` |
+
+`CLIENT_NAME` — резолв в порядке: ФИО из B24 → имя из мессенджера → phone/username
+fallback. Лимит TG forum_topic name = 128 символов; обрезается CLIENT_NAME.
+
+### Канонический формат pinned-карточки
+
+```
+📋 Карточка клиента (<канал>)
+
+[фотография клиента]                     ← как media-сообщение, если есть
+
 Имя: <ФИО клиента>                       ← пропускается если неизвестно
-<Канал>: <идентификатор>                  ← см. таблицу ниже
-Линия: <человеческое название линии>
-B24 лид: https://1begovoy.bitrix24.ru/crm/lead/details/<id>/         ← если есть
-B24 контакт: https://1begovoy.bitrix24.ru/crm/contact/details/<id>/  ← если есть
-Customer-360: <uuid>                      ← если customer-service отвечает
+<Канал>: <идентификатор>
+Линия: <человеческое название>
+B24 лид: https://…/crm/lead/details/<id>/        ← если открытый
+B24 контакт: https://…/crm/contact/details/<id>/  ← если есть
+B24 сделка: https://…/crm/deal/details/<id>/     ← если открытая
+Customer-360: <uuid>                     ← всегда (find-or-create)
 Команды: /nnn <текст> — внутренняя заметка
 ```
 
 ### По каналам
 
-| Канал | Где код | Идентификатор | Группа-зеркало | «Линия» из |
+| Канал | Где код | Идентификатор клиента | Группа-зеркало | Источник фото |
 |---|---|---|---|---|
-| WhatsApp | `wa-tg-bridge/src/wa_tg_bridge/bridge.py` (`_build_client_card` + `_post_pinned_card`) | `WhatsApp: +<phone>` | per-инстанс (TELEGRAM_GROUP_CHAT_ID*) | env `LINE_NAMES` по lineId (BITRIX_INSTANCE_TO_LINE) → fallback channel_tag («WA 3354») |
-| MAX | то же | `MAX-ID: <chatId>` | per-инстанс | то же |
-| Telegram (через Green API) | то же | `Telegram-ID: <chatId>` | per-инстанс | то же |
-| Telegram-бот (`@begovoy_bot`, `@begovoy1support_bot`) | `adapter/src/bitrix24/tg-bot-mirror.service.ts` (`postClientCard`) | `Telegram: @username (chat_id …)` | TG_BOT*_MIRROR_GROUP_ID | env `TG_BOT_LINE_NAMES` (`begovoy:Telegram begovoy_main,support:Telegram 1Б Поддержка`) → fallback `LINE_NAMES` по lineId → «Telegram (@<botName>)» |
-| Instagram Direct/Comments (i2crm) | `adapter/src/bitrix24/i2crm-tg-mirror.service.ts` (`postIgPinnedCard` + `postClientCard`) | `Instagram Direct: @<username>` или `Instagram Direct: client_id <id>` | I2CRM_TG_MIRROR_GROUP_ID_DIRECT / _COMMENT | «Instagram Direct @<account_name>» / «Instagram Comments @<account_name>» |
+| WhatsApp | `wa-tg-bridge/src/wa_tg_bridge/bridge.py` (`_build_client_card`) | `WhatsApp: +<phone>` | per-инстанс (`TELEGRAM_GROUP_CHAT_ID*`) | Green API `GetAvatar` |
+| MAX | то же | `MAX: <chat_id>` | per-инстанс | Green API `GetAvatar` |
+| Telegram (Green API) | то же | `Telegram: <chat_id>` | per-инстанс | Green API `GetAvatar` |
+| TG-боты | `tg-bot-mirror.service.ts` (`postClientCard` + `fetchClientAvatarFileId`) | `Telegram: @username (chat_id …)` | `TG_BOT*_MIRROR_GROUP_ID` | Bot API `getUserProfilePhotos` → `sendPhoto` |
+| Instagram Direct/Comments | `i2crm-tg-mirror.service.ts` (`postIgPinnedCard`) | `Instagram Direct: @<username>` или `client_id <id>` | `I2CRM_TG_MIRROR_GROUP_ID_DIRECT` / `_COMMENT` | i2crm payload `profile_pic_url` |
 
-**MAX-канал** есть в WA-зеркале (через Green API инстанс с префиксом `3xxx`).
-Отдельный «зеркала MAX» как у Telegram-бота — не существует, потому что MAX
-у нас работает только через Green API.
+**MAX-канал** ходит через Green API shard'ы префикса `3xxx`. Отдельных зеркал
+MAX нет — он внутри wa-tg-bridge с собственным `MAX` channel-tag.
 
 ### Резолверы (lookup'ы для обогащения карточки)
 
@@ -265,26 +292,31 @@ Customer-360: <uuid>                      ← если customer-service отве
 за timeout (3-5 сек), соответствующее поле в карточке просто пропускается.
 Базовое содержимое (имя из мессенджера + идентификатор + линия) всегда есть.
 
-### Refresh запиненных карточек (при изменении формата)
+### Refresh запиненных карточек и заголовков тем (при изменении формата)
 
-После изменения шаблона — старые pinned-сообщения нужно переписать.
-Bridge даёт HTTP-endpoint:
+После изменения шаблона — старые pinned-сообщения и заголовки тем нужно
+переписать. **Три fire-and-forget endpoint'а**, по одному на каждое из
+трёх mirror-семейств:
 
-```
-POST /internal/refresh-pinned-cards
-Headers: X-Hint-Secret: <BRIDGE_HINT_SECRET>
-Body:    {"delay_sec": 1.5, "limit": 10000}
-```
+| Endpoint | Сервис | Каналы | Параметры |
+|---|---|---|---|
+| `POST /internal/refresh-pinned-cards` | wa-tg-bridge | WA / TG-shard / MAX | `{delay_sec, limit, rename_topics?}` |
+| `POST /webhooks/internal/refresh-tg-bot-topics` | adapter | TG-боты (begovoy / support) | `{botName?: "begovoy" \| "support"}` |
+| `POST /webhooks/internal/refresh-ig-topics` | adapter | IG Direct + Comments | `{}` |
 
-Идёт фоновой task'ой, не блокирует. Идемпотентно: переписывает только клиентов
-с `pinned_card_msg_id IS NOT NULL`, шаг 1.5 сек между правками (TG rate-limit).
-Прогресс в логах `wa-tg-bridge`: `refresh-cards: ... updated=N skipped=M errors=K`.
+Все три:
+- Авторизация: `X-Hint-Secret: <BRIDGE_HINT_SECRET>`
+- Параллельно переименовывают заголовки тем (`editForumTopic`) и обновляют
+  pinned-карточки (`editMessageText` / `editMessageMedia`)
+- Rate-limit: 1 op/1.5-2 сек между правками (TG Bot API flood control)
+- Идемпотентны: повторный вызов даёт `skipped_same`, не ломает state
+- Прогресс в логах:
+  - bridge: `refresh-cards: updated=N renamed=M skipped=K errors=L`
+  - adapter: `refresh-{tg-bot,ig}: progress N/M (renamed=… skipped=… errors=…)`
+  - adapter финиш: `refresh-{tg-bot,ig}: finished total=N renamed=… skipped_same=… no_b24=… errors=…`
 
-Для **TG-бот-зеркал и IG-зеркал** аналогичного massjob refresh нет — карточка
-обновляется только при пересоздании топика. Это сознательно: их карточки
-ставятся через adapter (NestJS), там state хранится по-другому. Если припрёт —
-дописать как `backfillExistingTopicCards` в `i2crm-tg-mirror.service.ts`
-(уже есть, но не правит уже-pinned карточки, только новые).
+Один полный refresh (24 мая 2026): WA-bridge 143/143 переименовано,
+TG-bot 8/8, IG 289 (3 renamed + 277 skipped_same + 9 no_b24 + 0 errors).
 
 ---
 
