@@ -78,9 +78,15 @@
   graceful с trace-id. Эффект: диалог сразу в «В работе» оператора, не в «Неотвеченных».
 - **Hot-fix sleep(2000) в ensureOpenLeadForPhone**: бесполезен (корень — префикс,
   не race-condition), откачен `git checkout` 2026-05-24 22:00 МСК.
-- **Осталось**: фикс B — `imopenlines.crm.chat.attach` для привязки chat-user
-  к существующей сделке (а не к новому лиду-дубликату). Системное сообщение
-  со ссылками лид/контакт/customer-360/МойСклад в начало диалога — отдельная подзадача.
+- **Фикс B (sha `a7ec9f5`, 2026-05-25)**: `imopenlines.crm.chat.attach` в B24 REST
+  **нет** (research'ил 25.05 — все имена `imopenlines.crm.chat.*` возвращают
+  `ERROR_METHOD_NOT_FOUND`). Реализовано через **системное сообщение** в начало
+  open-line диалога: `Bitrix24Service.postContextMessage` шлёт `im.message.add
+  SYSTEM=Y DIALOG_ID=chat<num>` с BB-кодами [URL=...] на контакт/сделку/лид/
+  customer-360. Оператор видит ссылки в карточке диалога и одним кликом
+  прыгает на нужную CRM-сущность. In-memory Set дедуп — не повторяем второй раз
+  для одного chat-id. `EnsureLeadResult.customerUuid` читается из
+  `UF_CRM_PB_CUSTOMER_UUID` контакта.
 - **НЕ повторять**: написание фикса без полной проверки 4 каналов (WA/TG/MAX/IG)
   × 2 направлений (in/out) × 2 сценариев (виджет / с мобильного). Не пытаться
   чинить через `sleep` («race condition») когда реальный корень — несовпадение
