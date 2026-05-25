@@ -8,6 +8,41 @@
 
 ---
 
+## 2026-05-25 · TG-зеркало IG: ответ оператора как нативный Telegram reply (4 итерации)
+
+- **Запрос** Дмитрия: «можно сделать чтобы это сообщение было прям ответом
+  не в таком вот формате (BB-разделители), а именно как ответ на сообщение,
+  которое прокомментировано — со ссылкой на него, как в Telegram нативный
+  reply с серой полоской».
+- **Архитектура**: bridge `ig_bridge.py` через polling видит outgoing
+  оператора в B24 OpenLine chat. Если оператор использовал «Цитировать
+  сообщение» в B24 — text начинается с BB-блока (`-{20,}\nавтор [дата]\n
+  [Instagram комментарий…]\n<тело>\n-{20,}\n<ответ>`). По телу цитаты можно
+  найти соответствующий incoming `tg_message_id` в `ig_msg_map` и передать
+  Telegram'у через `reply_parameters` для нативного reply.
+- **4 итерации фикса** (всё на серверe + локально через rsync):
+  1. **`cf14832`** — добавлен `_find_reply_to_for_quote` + `reply_to_message_id`
+     в `bot.send_message`. Не сработало — Telegram игнорировал.
+  2. **`bdd05da`** — fix typo `self.db._conn` → `self.db.conn` (отдельная
+     ошибка attribute access).
+  3. **`1bfd8bc`** + **`bdd05da`** — universal regex для парсинга цитаты
+     (raw text приходит с `<br />` от B24, не `\n`). Lookup стал HIT'ить,
+     но Telegram всё равно показывал плоский текст без полоски.
+  4. **`1e2318d`** — `reply_to_message_id` deprecated в aiogram 3.13+.
+     Заменён на `reply_parameters=ReplyParameters(message_id=N,
+     allow_sending_without_reply=True)`. Сработало — native reply preview
+     появился.
+  5. **`b74f0bb`** — финальный штрих: вырезать BB-цитату из text когда
+     reply установлен (Telegram уже даёт preview, дубль в теле избыточен).
+- **Verify**: Дмитрий протестировал 25.05 22:36 МСК — сообщение `8-)`
+  пришло как чистый native reply со серой полоской и preview исходного
+  коммента «🔥👏🔥👏».
+- **Что НЕ делать**: не использовать `reply_to_message_id` напрямую как
+  kwarg в aiogram 3.13+. Только `reply_parameters=ReplyParameters(...)`.
+  Telegram молча примет deprecated kwarg, но **не отрисует** reply preview.
+
+---
+
 ## 2026-05-25 · TG-зеркало IG: B24-смайлики `<img>` прилетают сырыми
 
 - **Симптом**: оператор отвечает из B24 со смайликом (`:)` через emoji-picker).

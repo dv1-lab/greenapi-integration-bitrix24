@@ -91,7 +91,9 @@ imconnector.send.messages в линию 18 или 22
 B24 создаёт сессию открытой линии + лид (CRM_CREATE=lead)
         │
         ├─► backfill UF_CRM_IG_CHAT_ID / UF_CRM_IG_USERNAME
-        └─► зеркало в TG-группу insta-comments (I2crmTgMirrorService)
+        └─► зеркало в TG-группу insta-comments через wa-tg-bridge IgBridge polling
+            (раньше делал I2crmTgMirrorService в adapter — отключён 25.05,
+             см. REGRESSIONS «два TG-зеркала параллельно»)
 ```
 
 Формат incoming-webhook от i2crm (эмпирически, Instagram):
