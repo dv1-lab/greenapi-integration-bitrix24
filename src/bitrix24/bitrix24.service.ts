@@ -3296,6 +3296,21 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.warn(`i2crm: tg-mirror failed (non-fatal): ${e.message}`);
 		});
 
+		// B24-аналог TG pinned-поста (25.05): для IG-Comment отправляем
+		// служебное RICH_LINK-сообщение с превью поста IG в B24-чат — чтобы
+		// оператор сразу видел на какой пост клиент комментирует. SYSTEM=Y
+		// → НЕ форвардится на коннектор (клиент в IG не получит дубль).
+		// Дедуп по (clientId, mediaId).pinnedMediaSent — раз в сессию.
+		if (isComment && sessionInfo.chatId && igPostUrl && payload?.media_id) {
+			void this.maybeSendPinnedPostThumbnail(
+				portalDomain,
+				sessionInfo.chatId,
+				String(clientId),
+				String(payload.media_id),
+				igPostUrl,
+			).catch((e) => this.logger.warn(`i2crm: pinned-thumb failed (non-fatal): ${e.message}`));
+		}
+
 		// Этап 3: связываем b24 message_id с comment_id, чтобы при reply от
 		// оператора в B24 знать, на какой именно IG-коммент в треде отвечать.
 		// B24 не отдаёт message_id в response send.messages — узнаём через
@@ -3482,6 +3497,128 @@ export class Bitrix24Service extends BaseAdapter<
 	 *  Сохраняем (b24ChatId, b24MessageId) → (clientId, mediaId, commentId).
 	 *  Когда оператор в B24 сделает reply на это сообщение, по quote_id
 	 *  найдём оригинальный comment_id и ответим именно на тот коммент. */
+
+	/**
+	 * Скачивает og:image / og:video с публичной страницы Instagram-поста.
+	 *
+	 * IG отдаёт OG-теги только OG-ботам соцсетей (whitelist Meta) — Chrome UA
+	 * ловит login-wall. Поэтому используется User-Agent `facebookexternalhit`.
+	 *
+	 * og:image в HTML приходит с HTML-entities (`&amp;` вместо `&`). Без
+	 * unescape Telegram/B24 не парсят query string CDN-URL → 403. Декодируем
+	 * перед отдачей.
+	 *
+	 * Returns: { kind: "photo"|"video"|"none", url } — url пригоден для
+	 * прямой подстановки в ATTACH B24 или photo Telegram'у.
+	 */
+	private async fetchInstagramPostMedia(
+		postUrl: string,
+	): Promise<{ kind: "photo" | "video" | "none"; url: string | null }> {
+		try {
+			const r = await axios.get(postUrl, {
+				timeout: 10000,
+				headers: {
+					"User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+					"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+					"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+				},
+				maxRedirects: 5,
+				validateStatus: () => true,
+			});
+			if (r.status !== 200 || typeof r.data !== "string") {
+				return { kind: "none", url: null };
+			}
+			const decode = (s: string): string =>
+				s.replace(/&amp;/g, "&")
+					.replace(/&lt;/g, "<")
+					.replace(/&gt;/g, ">")
+					.replace(/&quot;/g, '"')
+					.replace(/&#039;/g, "'")
+					.replace(/&#39;/g, "'");
+			const html = r.data as string;
+			const mv = html.match(/<meta\s+property="og:video"\s+content="([^"]+)"/i);
+			if (mv) return { kind: "video", url: decode(mv[1]) };
+			const mi = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+			if (mi) return { kind: "photo", url: decode(mi[1]) };
+			return { kind: "none", url: null };
+		} catch (e: any) {
+			this.logger.warn(`fetchInstagramPostMedia ${postUrl}: ${e.message}`);
+			return { kind: "none", url: null };
+		}
+	}
+
+	/**
+	 * После imconnector.send.messages для IG-Comment отправляет в B24-чат
+	 * служебное (SYSTEM=Y) сообщение с RICH_LINK-карточкой поста IG —
+	 * оператор сразу видит превью поста, на который клиент комментирует.
+	 *
+	 * Дедуп: `IgCommentContext.pinnedMediaSent` (timestamp). Если уже
+	 * установлен — повтор не делаем (например, в той же сессии пришло
+	 * несколько комментов клиента под одним постом).
+	 *
+	 * SYSTEM=Y подтверждён эмпирически 25.05.2026: B24 рендерит attach
+	 * в чате как ℹ️-сообщение, но НЕ форвардит на коннектор open-line.
+	 * Клиент в Instagram дубль картинки своего поста не получает.
+	 */
+	private async maybeSendPinnedPostThumbnail(
+		portalDomain: string,
+		b24ChatId: string,
+		clientId: string,
+		mediaId: string,
+		postUrl: string,
+	): Promise<void> {
+		// Проверяем дедуп: уже отправляли в этой (clientId, mediaId) сессии?
+		const existing: any = await (this.prisma as any).igCommentContext.findUnique({
+			where: { clientId_mediaId: { clientId, mediaId } },
+		});
+		if (existing?.pinnedMediaSent) {
+			return;
+		}
+
+		const { kind, url } = await this.fetchInstagramPostMedia(postUrl);
+		if (kind === "none" || !url) {
+			this.logger.info(
+				`i2crm pinned-thumb: og:image=none for ${postUrl} — skip (но контекст останется без флага, при следующем incoming повторим)`,
+			);
+			return;
+		}
+
+		try {
+			const attach = [
+				{
+					RICH_LINK: {
+						LINK: postUrl,
+						NAME: "Пост клиента в Instagram",
+						PREVIEW: url,
+						DESC: "Комментарий клиента к этому посту",
+					},
+				},
+			];
+			await this.callBitrix24Method(portalDomain, "im.message.add", {
+				DIALOG_ID: `chat${b24ChatId}`,
+				MESSAGE: "🖼 Пост клиента",
+				ATTACH: attach,
+				SYSTEM: "Y",
+			});
+			this.logger.info(
+				`i2crm pinned-thumb: sent RICH_LINK to chat${b24ChatId} for media=${mediaId} kind=${kind}`,
+			);
+			// Помечаем upsert'ом (на случай если context ещё не существует —
+			// он будет создан немного позже в основном flow, тогда update пройдёт).
+			await (this.prisma as any).igCommentContext.upsert({
+				where: { clientId_mediaId: { clientId, mediaId } },
+				create: {
+					clientId, mediaId,
+					commentId: "", // будет перезаписан основным upsert'ом ниже в pipeline
+					pinnedMediaSent: new Date(),
+				},
+				update: { pinnedMediaSent: new Date() },
+			});
+		} catch (e: any) {
+			this.logger.warn(`i2crm pinned-thumb: send failed: ${e.message}`);
+		}
+	}
+
 	private async linkIgCommentToB24Message(
 		portalDomain: string, b24ChatId: string, clientId: string,
 		mediaId: string, commentId: string, commentText: string = "",
