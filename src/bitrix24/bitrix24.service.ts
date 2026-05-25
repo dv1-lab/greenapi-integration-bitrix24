@@ -2338,7 +2338,7 @@ export class Bitrix24Service extends BaseAdapter<
 					type: "direct",
 					text: OFF_HOURS_REPLY_TEXT,
 				},
-				{ params: { key: targetKey }, timeout: 15000, validateStatus: () => true },
+				{ params: { key: targetKey }, timeout: 60000, validateStatus: () => true },
 			);
 			this.logger.info(`off-hours auto-reply sent → ig:${clientId}`);
 		} catch (e: any) {
@@ -4633,7 +4633,13 @@ export class Bitrix24Service extends BaseAdapter<
 						{ ...baseBody, text: part.text },
 						{
 							params: { key: targetKey },
-							timeout: 15000,
+							// 60s — i2crm обрабатывает запрос синхронно и ждёт ответ
+							// Instagram Graph API. При тормозах Meta 15s часто мало,
+							// adapter падал «transport error: timeout of 15000ms exceeded»,
+							// в UI плашка «не доставлено», хотя i2crm потом доставлял
+							// (запрос-то прошёл, мы просто перестали ждать ответ).
+							// Инцидент 25.05 — Анастасия Василенко, IG-direct.
+							timeout: 60000,
 							// i2crm возвращает 200 с error в теле даже для бизнес-ошибок.
 							validateStatus: () => true,
 						},
@@ -4716,7 +4722,9 @@ export class Bitrix24Service extends BaseAdapter<
 		chunks.push(Buffer.from(`${CRLF}--${boundary}--${CRLF}`));
 		return axios.post(`${apiBase}/target/feedback`, Buffer.concat(chunks), {
 			params: { key: targetKey },
-			timeout: 30000,
+			// 60s — i2crm с фото ещё медленнее, чем без (upload + Meta API).
+			// Раньше было 30s, иногда не хватало.
+			timeout: 60000,
 			headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
 			maxBodyLength: Infinity,
 			maxContentLength: Infinity,
