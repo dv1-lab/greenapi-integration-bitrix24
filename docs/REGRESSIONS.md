@@ -8,6 +8,104 @@
 
 ---
 
+## 2026-05-26 · dv-dashboard customer page: merged UUID показывал пустую страницу
+
+- **Симптом**: открываешь `/customer/<source_uuid>` для merged-клиента →
+  Badge «merged → <target_uuid>» висит, но **на странице** «Нет алиасов»,
+  «Нет связанных сущностей в B24», «Нет документов МойСклад». Оператор
+  думает что клиент пустой, хотя у target_uuid все данные есть.
+- **Корень**: после merge в customer-service все aliases переезжают на
+  target. source_uuid остаётся как «redirect-метка» (поле `merged_into` в
+  customers PG). Страница рендерила данные source — у которого aliases=0,
+  events=0 (через `effective_uuid` они доступны, но не через
+  `customer_uuid`). Видимый Badge `merged → <target>` ничего не делал,
+  кроме информации.
+- **Фикс sha `16d0e63`** в dv-dashboard:
+  - В `customer/[uuid]/page.tsx` после `customerByUuid` — `if
+    customer.merged_into && != uuid → redirect("/customer/" +
+    merged_into + "?from=<short>")`.
+  - Server-side redirect через `next/navigation`, перехват query
+    `from=<short>` сохраняет след откуда пришёл оператор.
+- **Verify**: проверено вживую 26.05 на UUID `fdc19b32-bc05-46a3-947f-bb5fd76c2876`
+  (Евгения, sole-TG UUID merged в `db9818fd-...`) — открытие → автоматический
+  redirect на target → видны 3 лида + контакт + сделка + заказ МойСклад
+  52940₽.
+- **Что НЕ делать**:
+  - **Не показывать «merged» badge без redirect'а** — это hint без действия,
+    оператор путается. Если merged_into есть — редирект, точка.
+  - Возможно стоит расширить на другие merged-сценарии (наследование
+    переходов через customer_merges цепочку), но пока двух-уровневая
+    хватит.
+
+---
+
+## 2026-05-26 · TG-клиенты Customer-360: нет связи с B24-лидом (Евгения и 6 других)
+
+- **Симптом**: на странице `/customer/<uuid>` для TG-клиентов «Нет
+  связанных сущностей B24», «Нет документов МойСклад», даже если в B24
+  есть лид с тем же TG_CHAT_ID и сделка через CONTACT_ID.
+- **Корень**: для TG-канала (через @begovoy_bot Green API TG-shard) у нас
+  было **два UUID одного клиента**:
+  1. UUID-A — создан bridge.py при first incoming message_in (только
+     `tg_user` alias)
+  2. UUID-B — создан adapter-sync при создании B24-лида (`phone`,
+     `b24_lead`, потом `b24_contact`)
+
+  Merge engine **не предлагал** слияние — нет общего alias (phone vs tg_user
+  ничем не пересекаются). Сигнал `B24 lead.UF_CRM_TG_CHAT_ID = tg_user` не
+  использовался merge engine.
+- **Фикс (разовый backfill 26.05)**: скрипт `/tmp/backfill_tg_merge.sh`
+  прошёлся по всем sole-TG UUID:
+  1. SELECT customer_uuid из customer_aliases WHERE tg_user-only (без
+     phone/b24_*)
+  2. Для каждого: B24 `crm.lead.list filter[UF_CRM_TG_CHAT_ID]=<tg_user>` →
+     найден lead → найден b24-side UUID
+  3. POST `/customers/merge` source=tg-only target=b24-side
+  4. Результат: 19 sole-TG UUID → 7 merge (Евгения + 6 других), 2 TG-группы
+     скип, 10 без B24-лида.
+- **Системный фикс не сделан** (запись `bridge` → adapter event.bind
+  `lead_added` для TG-канала). Без него gap будет повторяться: каждый
+  новый TG-клиент получит sole-TG UUID на 1-й day, потом adapter создаст
+  второй UUID для B24-лида. Workaround — повторный прогон backfill раз в
+  неделю.
+- **Что НЕ делать**:
+  - **Не делать прямой INSERT в `customer_aliases`** для дублирующего
+    b24_lead — там UNIQUE PK `(alias_type, alias_value)` и владеть им
+    должен один UUID. Только через `/customers/merge`.
+  - **Не пересоздавать tg_user alias после merge** — пройдёт следующее
+    сообщение, bridge снова сделает resolveAlias и упсертит на правильный
+    UUID (тот, в который смержили).
+
+---
+
+## 2026-05-26 · Customer page: имя клиента отсутствует в заголовке
+
+- **Симптом**: heading показывает phone `+7 926 916-66-79` для клиента
+  Евгения — хотя её имя известно (B24 contact NAME='Евгения'), AI-summary
+  её называет «Евгения». Оператор не сразу понимает кто это.
+- **Корень**: `customerDisplay()` использует только PG `customer_aliases` —
+  там имени никогда не было. Имена хранятся в `bitrix1begovoy.contacts`
+  (CH через mp-analytics sync) и не использовались.
+- **Фикс sha `d7f8112`** в dv-dashboard:
+  - Новый query `customerB24Name(uuid)`:
+    1. SELECT alias_type, alias_value FROM customer_aliases WHERE
+       customer_uuid=$1 AND alias_type IN ('b24_contact','b24_lead')
+    2. CH: `SELECT name, last_name FROM bitrix1begovoy.contacts WHERE id IN
+       (...) ORDER BY date_modify DESC LIMIT 1`
+    3. Fallback на `bitrix1begovoy.leads` если в contacts пусто
+    4. Returns склеенное `name + last_name`
+  - В `customer/[uuid]/page.tsx` — `b24Name` в Promise.all,
+    `d.primary = b24Name ?? customerDisplay(...).primary`.
+- **Verify**: страница Евгении 26.05 показывает «Евгения» вверху, telephone
+  ушёл в Идентификаторы блок (где и должно быть).
+- **Что НЕ делать**:
+  - **Не fetch'ить B24 API напрямую** — `crm.contact.get` per page-render =
+    лишняя нагрузка. Используем CH sync который и так есть.
+  - **Не закладывать имя в `customers.display_name`** PG — там нет колонки,
+    добавление потребует sync с CH/B24. Запрос «на лету» из CH дешевле.
+
+---
+
 ## 2026-05-25 · TG-зеркало IG-Comments: pinned-пост в начале темы (3 итерации)
 
 - **Запрос** Дмитрия: «когда комментарий в IG, чтобы в TG-зеркале **прямо

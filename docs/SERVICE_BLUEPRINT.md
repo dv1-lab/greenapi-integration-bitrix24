@@ -5,7 +5,7 @@
 (`ARCHITECTURE.md`, `INSTAGRAM_FLOW.md`, `OPEN_LINE_LIFECYCLE.md` и т.д.) —
 здесь компактный recipe, без «почему так».
 
-Последнее обновление: 2026-05-25.
+Последнее обновление: 2026-05-26 (B24 pinned post thumbnail + message_delivery_status emit для outgoing-pending, sha c733403/039c5b3).
 
 ---
 
