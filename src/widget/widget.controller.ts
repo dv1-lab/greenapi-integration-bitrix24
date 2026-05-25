@@ -424,6 +424,11 @@ export class WidgetController {
 			body.authId, body.domain, lineForMirror, provider,
 			displayNameForMirror,
 		);
+		// Извлекаем chatId open-line диалога из ответа B24 (DATA.RESULT[0].session.CHAT_ID).
+		// Используется в autoTakeSession как fast-path вместо retry-loop по im.recent.list.
+		const mirroredChatId = (typeof mirrored === "object" && mirrored && "chatId" in mirrored)
+			? mirrored.chatId
+			: undefined;
 
 		// Timeline-comment в открытую сделку/лид — отдельно от backfill,
 		// потому что в open entity мы пишем сразу, не дожидаясь пока B24
@@ -481,7 +486,7 @@ export class WidgetController {
 				portalDomain,
 				body.authId,
 				userKey,
-				{ displayName: displayNameForMirror, line: lineForMirror },
+				{ displayName: displayNameForMirror, line: lineForMirror, knownChatId: mirroredChatId },
 			).then((res) => {
 				// postContextMessage только если auto-take нашёл чат и есть что
 				// показать (открытая сделка/лид или customer-360 uuid).
@@ -764,7 +769,7 @@ export class WidgetController {
 		authId?: string, domain?: string, lineOverride?: number,
 		provider: string = "wa",
 		displayNameOverride?: string,
-	): Promise<boolean | string> {
+	): Promise<boolean | string | { ok: true; chatId?: number; sessionId?: number }> {
 		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
 
@@ -827,7 +832,14 @@ export class WidgetController {
 		try {
 			const r: any = await this.bitrix24.sendImconnectorMessage(portalDomain, payload);
 			if (r?.error) return `b24:${r.error}`;
-			return true;
+			// B24 кладёт реальный CHAT_ID/SESSION_ID open-line диалога в response —
+			// нам это нужно для autoTakeSession (im.recent.list от app-context
+			// не видит свежесозданный chat-user, проверено 25.05).
+			//   r.DATA.RESULT[0].session.{ID,CHAT_ID}
+			const sess = r?.DATA?.RESULT?.[0]?.session || r?.result?.DATA?.RESULT?.[0]?.session;
+			const chatId = sess?.CHAT_ID ? Number(sess.CHAT_ID) : undefined;
+			const sessionId = sess?.ID ? Number(sess.ID) : undefined;
+			return { ok: true, chatId, sessionId };
 		} catch (err: any) {
 			return `b24 mirror via app-OAuth failed: ${err.response?.data?.error_description || err.message}`;
 		}

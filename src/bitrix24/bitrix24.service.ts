@@ -475,7 +475,7 @@ export class Bitrix24Service extends BaseAdapter<
 		portalDomain: string,
 		operatorAuthId: string,
 		userKey: string,
-		opts: { displayName?: string; line?: number } = {},
+		opts: { displayName?: string; line?: number; knownChatId?: number } = {},
 	): Promise<{ chatId?: number; operatorId?: number; ok?: boolean; reason?: string }> {
 		const trace = Math.random().toString(36).slice(2, 8);
 		try {
@@ -497,34 +497,42 @@ export class Bitrix24Service extends BaseAdapter<
 				return { reason: "no operatorId" };
 			}
 
-			// 2. retry-loop поиска chat по entity_id содержащему userKey.
-			// 1.5с × 5 = 7.5с total worst case — типично B24 создаёт chat за 1-3с.
-			let target: any = null;
-			for (let attempt = 0; attempt < 5; attempt++) {
-				await new Promise((res) => setTimeout(res, 1500));
-				try {
-					const recent: any = await this.callBitrix24Method(portalDomain, "im.recent.list", {
-						TYPE: "lines", LIMIT: 50,
-					});
-					// Структура recent: result?.items ИЛИ result.items в callBitrix24Method
-					// уже распакован — пробуем оба варианта.
-					const items: any[] = recent?.items || recent || [];
-					target = items.find((i: any) => {
-						const entityId = String(i?.chat?.entity_id || "");
-						return entityId.includes(userKey);
-					});
-					if (target) break;
-				} catch (e: any) {
-					this.logger.warn(`autoTake[${trace}]: im.recent.list attempt ${attempt + 1} failed: ${e?.message || e}`);
-				}
-			}
-			if (!target) {
-				this.logger.warn(`autoTake[${trace}]: chat for userKey=${userKey} not in im.recent.list after 5 attempts`);
-				return { operatorId, reason: "chat not found" };
-			}
-			const chatId = Number(target.chat_id);
+			// 2. Быстрый путь: если widget уже извлёк chat_id из ответа
+			// imconnector.send.messages (DATA.RESULT[0].session.CHAT_ID) — используем
+			// его напрямую. im.recent.list от app-context не видит свежесозданные
+			// chat-users (проверено 25.05 — autoTake fail'ил с `chat not found`).
+			let chatId: number | undefined = opts.knownChatId && opts.knownChatId > 0
+				? opts.knownChatId
+				: undefined;
+
+			// 3. Fallback: retry-loop по im.recent.list (только если knownChatId не
+			// передан — для совместимости с местами вызова где session не возвращена).
 			if (!chatId) {
-				this.logger.warn(`autoTake[${trace}]: target chat without numeric id: ${JSON.stringify(target).slice(0, 200)}`);
+				let target: any = null;
+				for (let attempt = 0; attempt < 5; attempt++) {
+					await new Promise((res) => setTimeout(res, 1500));
+					try {
+						const recent: any = await this.callBitrix24Method(portalDomain, "im.recent.list", {
+							TYPE: "lines", LIMIT: 50,
+						});
+						const items: any[] = recent?.items || recent || [];
+						target = items.find((i: any) => {
+							const entityId = String(i?.chat?.entity_id || "");
+							return entityId.includes(userKey);
+						});
+						if (target) break;
+					} catch (e: any) {
+						this.logger.warn(`autoTake[${trace}]: im.recent.list attempt ${attempt + 1} failed: ${e?.message || e}`);
+					}
+				}
+				if (!target) {
+					this.logger.warn(`autoTake[${trace}]: chat for userKey=${userKey} not in im.recent.list after 5 attempts`);
+					return { operatorId, reason: "chat not found" };
+				}
+				chatId = Number(target.chat_id);
+			}
+			if (!chatId) {
+				this.logger.warn(`autoTake[${trace}]: no numeric chat_id resolved for userKey=${userKey}`);
 				return { operatorId, reason: "no chat_id" };
 			}
 
