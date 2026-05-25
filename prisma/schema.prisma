@@ -160,10 +160,14 @@ model IgInboundB24Link {
   clientId     String   @db.VarChar(40)
   mediaId      String   @db.VarChar(64)
   commentId    String   @db.VarChar(64)
+  // Сырой текст коммента клиента (без префикса «[Instagram комментарий
+  // к посту…]»). Используется для матча из B24 BB-цитаты при reply.
+  commentText  String?  @db.VarChar(500)
   createdAt    DateTime @default(now())
 
   @@unique([b24ChatId, b24MessageId])
   @@index([clientId, mediaId])
+  @@index([b24ChatId], map: "IgInboundB24Link_b24ChatId_idx")
 }
 
 // Профилактика: журнал всех incoming-webhook'ов от i2crm Public API.

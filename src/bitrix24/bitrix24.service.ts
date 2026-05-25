@@ -3304,6 +3304,7 @@ export class Bitrix24Service extends BaseAdapter<
 			void this.linkIgCommentToB24Message(
 				portalDomain, sessionInfo.chatId, String(clientId),
 				String(payload.media_id), String(payload.comment_id),
+				String(payload?.text || ""),
 			).catch((e) => this.logger.warn(`i2crm: ig-b24-link failed (non-fatal): ${e.message}`));
 		}
 
@@ -3473,7 +3474,7 @@ export class Bitrix24Service extends BaseAdapter<
 	 *  найдём оригинальный comment_id и ответим именно на тот коммент. */
 	private async linkIgCommentToB24Message(
 		portalDomain: string, b24ChatId: string, clientId: string,
-		mediaId: string, commentId: string,
+		mediaId: string, commentId: string, commentText: string = "",
 	): Promise<void> {
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 		let b24MessageId: string | null = null;
@@ -3499,10 +3500,13 @@ export class Bitrix24Service extends BaseAdapter<
 			return;
 		}
 		try {
+			// commentText кладём как есть (без префикса «[Instagram комментарий…]»),
+			// trim до 500 cимволов — длинных комментов в Instagram не бывает.
+			const ct = (commentText || "").trim().slice(0, 500) || null;
 			await (this.prisma as any).igInboundB24Link.create({
-				data: { b24ChatId, b24MessageId, clientId, mediaId, commentId },
+				data: { b24ChatId, b24MessageId, clientId, mediaId, commentId, commentText: ct },
 			});
-			this.logger.info(`linkIgComment: b24 ${b24ChatId}:${b24MessageId} → comment ${commentId} media ${mediaId}`);
+			this.logger.info(`linkIgComment: b24 ${b24ChatId}:${b24MessageId} → comment ${commentId} media ${mediaId} text="${(ct || "").slice(0, 40)}"`);
 		} catch (e: any) {
 			if (/Unique|duplicate/i.test(String(e?.message || ""))) {
 				this.logger.debug(`linkIgComment: already linked b24 ${b24ChatId}:${b24MessageId}`);
@@ -4519,38 +4523,56 @@ export class Bitrix24Service extends BaseAdapter<
 			client: String(clientId),
 			type: replyAsDirect ? "direct" : "comment",
 		};
-		// Этап 3: если оператор в B24 сделал reply на конкретное сообщение
-		// клиента, B24 в outgoing-webhook передаёт quote/parent id. По нему
-		// ищем в IgInboundB24Link оригинальный comment_id+media_id и отвечаем
-		// именно на тот коммент в Instagram, а не на «последний из media».
-		// Поля разные у разных версий B24 — пробуем известные.
+		// Этап 3 v2: B24 open-lines не передаёт parent_id для «Ответить» в
+		// outgoing-webhook — это просто focus в UI без API-связки. Но если
+		// оператор воспользовался «Цитировать сообщение» (доп. в меню), то
+		// в text прилетает BB-цитата с разделителями `------`. Парсим её,
+		// извлекаем тело + ищем в IgInboundB24Link по `commentText` совпадение.
+		// Если нашлось — отвечаем именно на тот comment_id.
 		let replyMatched: { mediaId: string; commentId: string } | null = null;
-		const mm: any = m.message;
 		const imBlock: any = (m as any).im || {};
-		const replyB24MsgId = String(
-			mm?.parent_message_id || mm?.parent || mm?.parent_id ||
-			mm?.quote_message_id || mm?.reply_to_message_id ||
-			(mm?.quote && (mm.quote.id || mm.quote.message_id)) || ""
-		);
 		const replyB24ChatId = String(imBlock?.chat_id || "");
-		if (isComment && !replyAsDirect && replyB24MsgId && replyB24ChatId) {
+		// Регексп цитаты: разделитель = строка из 20+ дефисов, дальше автор
+		// `<name> [<date>]`, потом тело, потом ещё разделитель, потом ответ.
+		const quoteRegex = /^-{20,}\s*\n[^\n]+\[[^\]]+\]\s*\n([\s\S]*?)\n-{20,}\s*\n([\s\S]*)$/;
+		const quoteMatch = text.match(quoteRegex);
+		let quotedBody = "";
+		if (isComment && !replyAsDirect && quoteMatch) {
+			quotedBody = quoteMatch[1].trim();
+			// Очищаем тело цитаты:
+			// — снимаем префикс «[Instagram комментарий к посту …]\n» (с/без BB-URL)
+			// — раскрываем [URL=…]label[/URL] до raw URL
+			quotedBody = quotedBody
+				.replace(/^\[Instagram\s+комментарий\s+к\s+посту[^\n]*\n/i, "")
+				.replace(/\[URL=([^\]]+)\][^\[]*\[\/URL\]/g, "$1")
+				.trim();
+			// Заменяем оператор-text цитатой+ответом → только ответом.
+			text = quoteMatch[2].trim();
+		}
+		if (isComment && !replyAsDirect && quotedBody && replyB24ChatId) {
 			try {
-				const link: any = await (this.prisma as any).igInboundB24Link.findUnique({
-					where: {
-						b24ChatId_b24MessageId: {
-							b24ChatId: replyB24ChatId,
-							b24MessageId: replyB24MsgId,
-						},
-					},
-				});
-				if (link?.commentId && link?.mediaId) {
-					replyMatched = { mediaId: link.mediaId, commentId: link.commentId };
-					this.logger.info(`i2crm reply: operator replied to b24 ${replyB24ChatId}:${replyB24MsgId} → comment ${link.commentId} media ${link.mediaId}`);
+				// LIKE для устойчивости к мелкой разнице (emoji rendering, пробелы).
+				// Берём первые ~120 cимволов тела цитаты — достаточно для точного матча.
+				const needle = quotedBody.slice(0, 120);
+				const rows: any[] = await (this.prisma as any).$queryRaw`
+					SELECT b24MessageId, mediaId, commentId, commentText
+					FROM IgInboundB24Link
+					WHERE b24ChatId = ${replyB24ChatId}
+					  AND commentText IS NOT NULL
+					  AND commentText LIKE ${needle + "%"}
+					ORDER BY createdAt DESC
+					LIMIT 1
+				`;
+				if (rows.length > 0 && rows[0].commentId && rows[0].mediaId) {
+					replyMatched = { mediaId: rows[0].mediaId, commentId: rows[0].commentId };
+					this.logger.info(
+						`i2crm reply: цитата «${needle.slice(0, 40)}» → comment ${rows[0].commentId} media ${rows[0].mediaId}`,
+					);
 				} else {
-					this.logger.debug(`i2crm reply: no link for b24 ${replyB24ChatId}:${replyB24MsgId}`);
+					this.logger.info(`i2crm reply: цитата «${needle.slice(0, 40)}» — match не найден, fallback на «последний коммент»`);
 				}
 			} catch (e: any) {
-				this.logger.warn(`i2crm reply lookup failed: ${e.message}`);
+				this.logger.warn(`i2crm reply quote lookup failed: ${e.message}`);
 			}
 		}
 
