@@ -3308,6 +3308,16 @@ export class Bitrix24Service extends BaseAdapter<
 			).catch((e) => this.logger.warn(`i2crm: ig-b24-link failed (non-fatal): ${e.message}`));
 		}
 
+		// IG Direct: связываем b24 message_id с внешним external_id IG-сообщения.
+		// Используется при reply «через Цитирование» в B24 → передаём в i2crm
+		// reply_to → клиент в Instagram видит нативный reply со стрелкой.
+		if (!isComment && sessionInfo.chatId && payload?.external_id) {
+			void this.linkIgDirectInboundToB24Message(
+				portalDomain, sessionInfo.chatId, String(clientId),
+				String(payload.external_id), String(payload?.text || ""),
+			).catch((e) => this.logger.warn(`i2crm: ig-direct-link failed (non-fatal): ${e.message}`));
+		}
+
 		// Customer-360: входящее IG-сообщение в customer_events (best-effort).
 		void this._emitIgMessageEvent({
 			clientId: String(clientId),
@@ -3512,6 +3522,48 @@ export class Bitrix24Service extends BaseAdapter<
 				this.logger.debug(`linkIgComment: already linked b24 ${b24ChatId}:${b24MessageId}`);
 			} else {
 				this.logger.warn(`linkIgComment: insert failed: ${e.message}`);
+			}
+		}
+	}
+
+	/** IG Direct incoming → запоминаем (b24ChatId, b24MessageId) → external_id IG-сообщения.
+	 *  Используется при reply «через Цитирование» в B24: парсим цитату, ищем text → external_id,
+	 *  передаём в i2crm как reply_to_message_id → клиент в IG видит нативный reply.
+	 *  Аналог linkIgCommentToB24Message, но для Direct (без media/comment_id). */
+	private async linkIgDirectInboundToB24Message(
+		portalDomain: string, b24ChatId: string, clientId: string,
+		externalMessageId: string, messageText: string = "",
+	): Promise<void> {
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		let b24MessageId: string | null = null;
+		for (let attempt = 1; attempt <= 5; attempt++) {
+			await sleep(attempt === 1 ? 500 : 800);
+			try {
+				const resp: any = await this.callBitrix24Method(portalDomain, "im.dialog.messages.get", {
+					DIALOG_ID: `chat${b24ChatId}`, LIMIT: 1,
+				});
+				const list = Array.isArray(resp?.messages) ? resp.messages : [];
+				const last = list[0];
+				if (last?.id) { b24MessageId = String(last.id); break; }
+			} catch (e: any) {
+				this.logger.debug(`linkIgDirectInbound: dialog.messages.get attempt ${attempt} failed: ${e.message}`);
+			}
+		}
+		if (!b24MessageId) {
+			this.logger.warn(`linkIgDirectInbound: no b24 message_id for chat=${b24ChatId} ext=${externalMessageId}`);
+			return;
+		}
+		try {
+			const mt = (messageText || "").trim().slice(0, 500) || null;
+			await (this.prisma as any).igDirectInboundB24Link.create({
+				data: { b24ChatId, b24MessageId, clientId, externalMessageId, messageText: mt },
+			});
+			this.logger.info(`linkIgDirectInbound: b24 ${b24ChatId}:${b24MessageId} → ext ${externalMessageId} text="${(mt || "").slice(0, 40)}"`);
+		} catch (e: any) {
+			if (/Unique|duplicate/i.test(String(e?.message || ""))) {
+				this.logger.debug(`linkIgDirectInbound: already linked b24 ${b24ChatId}:${b24MessageId}`);
+			} else {
+				this.logger.warn(`linkIgDirectInbound: insert failed: ${e.message}`);
 			}
 		}
 	}

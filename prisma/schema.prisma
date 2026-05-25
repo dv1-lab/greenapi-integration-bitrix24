@@ -153,6 +153,23 @@ model IgCommentContext {
 // сообщение клиента — B24 в outgoing-webhook передаёт quote/parent с id
 // исходного, мы по нему находим оригинальный comment_id и отвечаем именно
 // на тот коммент в Instagram.
+// IG Direct: связь b24 chat-message ↔ внешний IG message_id для reply
+// «через цитирование» в B24 → нативный reply в Instagram Direct.
+// Заполняется при incoming Direct, читается при reply из B24.
+model IgDirectInboundB24Link {
+  id                  BigInt   @id @default(autoincrement())
+  b24ChatId           String   @db.VarChar(64)
+  b24MessageId        String   @db.VarChar(64)
+  clientId            String   @db.VarChar(40)
+  externalMessageId   String   @db.VarChar(120)
+  messageText         String?  @db.VarChar(500)
+  createdAt           DateTime @default(now())
+
+  @@unique([b24ChatId, b24MessageId])
+  @@index([clientId])
+  @@index([b24ChatId], map: "IgDirectInbound_b24ChatId_idx")
+}
+
 model IgInboundB24Link {
   id           BigInt   @id @default(autoincrement())
   b24ChatId    String   @db.VarChar(64)
