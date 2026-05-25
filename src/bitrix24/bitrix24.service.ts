@@ -4411,24 +4411,31 @@ export class Bitrix24Service extends BaseAdapter<
 		//   instcom:  i2crm_ig_<client_id>_c<media_id>  (A2: пост на сессию)
 		// Старые сессии без media_id-суффикса поддерживаем для обратной совместимости.
 		const rawChatId = String(m.chat?.id || "");
-		const matchWithMedia = rawChatId.match(/^i2crm_ig_(\d+)_c(\d+)$/);
+		// Форматы chat.id для IG (incoming пишет их же, должны сопадать):
+		//   i2crm_ig_<clientId>                                   — direct
+		//   i2crm_ig_<clientId>_c<mediaId>                        — старый comment (legacy)
+		//   i2crm_ig_<clientId>_c<mediaId>_<accountId>            — текущий comment (A2, sha cacfa1f)
+		// Раньше regex был только на первые два — все актуальные comments
+		// падали в fallback \D → garbage склейка → i2crm «Некорректные данные».
+		// Инцидент 25.05 14:31 (dima_kuznetsov reply «!!!» и «=)» — оба не дошли).
+		const matchCommentFull = rawChatId.match(/^i2crm_ig_(\d+)_c(\d+)_(\d+)$/);
+		const matchCommentLegacy = rawChatId.match(/^i2crm_ig_(\d+)_c(\d+)$/);
 		const matchClientOnly = rawChatId.match(/^i2crm_ig_(\d+)$/);
 		let clientId: string;
 		let mediaIdFromChat = "";
-		if (matchWithMedia) {
-			clientId = matchWithMedia[1];
-			mediaIdFromChat = matchWithMedia[2];
+		if (matchCommentFull) {
+			clientId = matchCommentFull[1];
+			mediaIdFromChat = matchCommentFull[2];
+			// group 3 = accountId, нам он не нужен (источник = настроенный в .env)
+		} else if (matchCommentLegacy) {
+			clientId = matchCommentLegacy[1];
+			mediaIdFromChat = matchCommentLegacy[2];
 		} else if (matchClientOnly) {
 			clientId = matchClientOnly[1];
 		} else {
-			// Раньше fallback был rawChatId.replace(/\D/g, "") — это склеивало
-			// все цифры подряд в гигантскую строку (видели 49-cifr мусор в логах
-			// 25.05 11:01:34: client="2855898364721128580739018951060349332968215238716"
-			// → i2crm отвечал «Некорректные данные»). Логируем raw chat.id и не
-			// шлём — пусть оператор знает что мы не смогли разобрать.
 			this.logger.error(
-				`handleI2crmOutgoing: chat.id "${rawChatId}" не матчит ни ` +
-				`i2crm_ig_<num>_c<num>, ни i2crm_ig_<num> (line=${lineNumber}, isComment=${isComment})`,
+				`handleI2crmOutgoing: chat.id "${rawChatId}" не матчит i2crm_ig_<num>(_c<num>(_<num>)?)? ` +
+				`(line=${lineNumber}, isComment=${isComment})`,
 			);
 			return {
 				success: false,
