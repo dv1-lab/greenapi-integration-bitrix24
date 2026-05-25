@@ -4995,13 +4995,19 @@ export class Bitrix24Service extends BaseAdapter<
 			const externalMessageId = greenApiResult.idMessage;
 			const externalChatId = originalMessage.chat?.id || "unknown";
 
+			// B24 ждёт id строкой — для i2crm IG прилетает числовой external_id
+			// (result.data.id от i2crm = 619666523). При числовом id B24 в UI
+			// показывает «сообщение не доставлено», хотя delivery confirmation
+			// ушёл успешно. WA шлёт hex-строку — там всё ОК. (Инцидент 25.05.)
+			const externalMessageIdStr = String(externalMessageId);
+
 			await this.callBitrix24Method(domain, "imconnector.send.status.delivery", {
 				CONNECTOR: connectorId,
 				LINE: line,
 				MESSAGES: [{
 					im: originalMessage.im,
 					message: {
-						id: [externalMessageId],
+						id: [externalMessageIdStr],
 						status: "delivered",
 					},
 					chat: {
