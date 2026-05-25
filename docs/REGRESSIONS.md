@@ -8,6 +8,37 @@
 
 ---
 
+## 2026-05-25 · IG outgoing «сообщение не доставлено» — i2crm timeout 15s мало
+
+- **sha**: `60468b4`
+- **Симптом**: Анастасия пишет клиенту в IG Direct из B24 → в UI красная плашка
+  «сообщение не доставлено». При этом клиент в Instagram сообщение **получает**.
+  Часть отправок проходит (10-30% по моим оценкам по логам), большинство — нет.
+- **Корень**: `axios.post` к `https://app.i2crm.ru/api_v1/target/feedback` с
+  timeout=15000ms. i2crm обрабатывает запрос **синхронно** — сначала принимает,
+  потом ждёт ответ Instagram Graph API. При тормозах Meta запрос реально может
+  занять 30-40 секунд. Замеры на проде 25.05: kambol__92 — 34с, 1august9w — 36с,
+  vitaliy_ivanov — 1с. На 15s падает с `i2crm outgoing transport error: timeout of 15000ms exceeded`.
+  Клиент **уже** получил сообщение (i2crm успел дойти до Meta), но adapter
+  перестал ждать → не шлёт `imconnector.send.status.delivery` → B24 UI через
+  минуту падает в «не доставлено».
+- **Фикс**: timeout 15s → 60s в трёх местах `bitrix24.service.ts`:
+  1. `handleI2crmOutgoing` JSON POST (line 4631)
+  2. `handleI2crmOutgoing` multipart POST с фото (`_postI2crmFeedbackMultipart`)
+  3. off-hours auto-reply (line 2341)
+- **Тест**: 25.05 после deploy — 4 свежих outgoing прошли (включая 34s и 36s),
+  всем отправлен delivery confirmation. Плашка «не доставлено» исчезла.
+- **Что НЕ делать**:
+  - Не повышать timeout до бесконечности — adapter висит на блокирующих
+    HTTP-вызовах в event loop. 60s — компромисс.
+  - Не пытаться чинить через `String()` cast externalMessageId в
+    `send.status.delivery` — это было гипотезой 25.05, но корень другой.
+    Если будет похожий симптом «плашка „не доставлено“ + i2crm OK в логах» —
+    смотри не на формат delivery payload, а на сам i2crm POST: успел ли он
+    дойти до log-точки `i2crm outgoing OK` или упал в `transport error`.
+
+---
+
 ## 2026-05-24 · Класс «карточка/тема клиента не унифицирована» — 10-й инцидент
 
 - **Симптом** (повторяющийся 10+ раз): жалоба «в одном канале есть X, в другом
