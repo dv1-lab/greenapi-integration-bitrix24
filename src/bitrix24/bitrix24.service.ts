@@ -3516,6 +3516,120 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	/**
+	 * Backfill свежесозданного Direct-лида (от mirror-to-direct после `!` в comment-чате):
+	 *   1. Подтянуть CONTACT_ID + UF_CRM_IG_CHAT_ID + UF_CRM_IG_USERNAME из контакта клиента
+	 *      (резолвим по UF_CRM_IG_CHAT_ID на contact'е).
+	 *   2. Найти открытый comment-лид того же клиента (SOURCE_ID="22|I2CRM", не F/S).
+	 *      Если есть — записать его id в UF_CRM_LEAD_ID на Direct-лиде. Оператор увидит ссылку
+	 *      «связан с лидом N» в карточке Direct-лида и сможет одним кликом перейти в comment.
+	 *   3. STATUS_ID НЕ меняем (не помечаем как Дубликат) — иначе Direct-лид пропадёт из активной
+	 *      ленты «В работе», и операторы не увидят новые входящие в Direct.
+	 *
+	 * Idempotent: если поля уже заполнены — пропускаем. Если Direct-лид не нашли — non-fatal
+	 * (B24 мог не создать лид в принципе, например линия 18 настроена без CRM_CREATE).
+	 */
+	private async _backfillDirectMirrorLead(
+		portalDomain: string,
+		clientId: string,
+		displayName: string,
+		directLine: number,
+	): Promise<void> {
+		// B24 создаёт лид async после imconnector.send.messages (0-15с). retry до 6 раз.
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		let directLead: any = null;
+		for (let attempt = 1; attempt <= 6; attempt++) {
+			await sleep(attempt === 1 ? 2000 : 2500);
+			try {
+				const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+				const leads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+					filter: {
+						"=SOURCE_ID": `${directLine}|I2CRM`,
+						"%TITLE": displayName,
+						">DATE_CREATE": cutoff,
+					},
+					select: ["ID", "TITLE", "CONTACT_ID", "UF_CRM_IG_CHAT_ID", "UF_CRM_IG_USERNAME", "UF_CRM_LEAD_ID", "STATUS_ID"],
+					order: { DATE_CREATE: "DESC" },
+				});
+				if (Array.isArray(leads) && leads.length > 0) {
+					directLead = leads[0];
+					break;
+				}
+			} catch (e: any) {
+				this.logger.debug(`backfillDirectMirror: crm.lead.list attempt ${attempt} failed: ${e.message}`);
+			}
+		}
+		if (!directLead) {
+			this.logger.warn(`backfillDirectMirror: не нашли свежесозданный Direct-лид для ${clientId}/${displayName}`);
+			return;
+		}
+
+		// Резолвим контакт по UF_CRM_IG_CHAT_ID
+		let contactId: number | undefined;
+		try {
+			const contacts: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+				filter: { UF_CRM_IG_CHAT_ID: clientId },
+				select: ["ID"],
+			});
+			if (Array.isArray(contacts) && contacts.length > 0) {
+				contactId = parseInt(contacts[0].ID, 10);
+			}
+		} catch (e: any) {
+			this.logger.warn(`backfillDirectMirror: contact.list failed: ${e.message}`);
+		}
+
+		// Ищем открытый comment-лид (SOURCE_ID="22|I2CRM" или любой не-F/S — берём по UF_CRM_IG_CHAT_ID)
+		let openCommentLeadId: number | undefined;
+		try {
+			const openLeads: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", {
+				filter: {
+					UF_CRM_IG_CHAT_ID: clientId,
+					"!STATUS_SEMANTIC_ID": ["F", "S"],
+					"!=ID": directLead.ID,
+				},
+				select: ["ID", "SOURCE_ID", "DATE_CREATE"],
+				order: { DATE_CREATE: "DESC" },
+			});
+			if (Array.isArray(openLeads) && openLeads.length > 0) {
+				// Приоритет comment-лид (22|I2CRM); иначе любой открытый.
+				const commentLead = openLeads.find((l: any) => String(l.SOURCE_ID).startsWith("22|"));
+				openCommentLeadId = parseInt((commentLead || openLeads[0]).ID, 10);
+			}
+		} catch (e: any) {
+			this.logger.warn(`backfillDirectMirror: open-comment lookup failed: ${e.message}`);
+		}
+
+		const updateFields: Record<string, any> = {};
+		if (contactId && (!directLead.CONTACT_ID || Number(directLead.CONTACT_ID) === 0)) {
+			updateFields.CONTACT_ID = contactId;
+		}
+		if (!directLead.UF_CRM_IG_CHAT_ID) {
+			updateFields.UF_CRM_IG_CHAT_ID = clientId;
+		}
+		if (!directLead.UF_CRM_IG_USERNAME) {
+			updateFields.UF_CRM_IG_USERNAME = displayName;
+		}
+		if (openCommentLeadId && !directLead.UF_CRM_LEAD_ID) {
+			updateFields.UF_CRM_LEAD_ID = openCommentLeadId;
+		}
+		if (Object.keys(updateFields).length === 0) {
+			this.logger.info(`backfillDirectMirror: lead ${directLead.ID} уже заполнен, nothing to update`);
+			return;
+		}
+		try {
+			await this.callBitrix24Method(portalDomain, "crm.lead.update", {
+				id: directLead.ID,
+				fields: updateFields,
+			});
+			this.logger.info(
+				`backfillDirectMirror: lead ${directLead.ID} ← ${Object.keys(updateFields).join(",")} ` +
+				`(contact=${contactId || "-"}, linkedCommentLead=${openCommentLeadId || "-"})`,
+			);
+		} catch (e: any) {
+			this.logger.warn(`backfillDirectMirror: lead.update failed for ${directLead.ID}: ${e.message}`);
+		}
+	}
+
 	private async backfillIgUfFields(
 		portalDomain: string,
 		clientId: string,
@@ -4776,6 +4890,13 @@ export class Bitrix24Service extends BaseAdapter<
 						`mirror-to-direct: создана зеркальная Direct open-line ` +
 						`(client=${clientId}, line=${directLine})`,
 					);
+					// Дозаполняем свежесозданный Direct-лид:
+					//   - CONTACT_ID + UF_CRM_IG_CHAT_ID + UF_CRM_IG_USERNAME — чтобы лид не висел «оторванным»;
+					//   - UF_CRM_LEAD_ID = открытый comment-лид клиента — чтобы оператор мог прыгнуть из Direct в Comment одним кликом.
+					// Async, не блокируем основной flow.
+					void this._backfillDirectMirrorLead(
+						portalDomain, String(clientId), displayName, directLine,
+					).catch((e: any) => this.logger.warn(`backfillDirectMirror failed for ${clientId}: ${e.message}`));
 				} catch (e: any) {
 					this.logger.warn(`mirror-to-direct failed for client=${clientId}: ${e.message}`);
 				}
