@@ -8,6 +8,56 @@
 
 ---
 
+## 2026-05-25 · TG-зеркало IG-Comments: pinned-пост в начале темы (3 итерации)
+
+- **Запрос** Дмитрия: «когда комментарий в IG, чтобы в TG-зеркале **прямо
+  пост прикреплялся** — картинка / Reels с подписью, а не голая ссылка
+  «🖼 К посту» в каждом сообщении».
+- **Архитектура**: при создании новой темы IG-Comments в `_onboard_lead`
+  (`ig_bridge.py`) → парсим из истории первый `instagram.com/p/<id>` URL →
+  `fetch_instagram_post_media` (og:image / og:video с публичной страницы) →
+  `bot.send_photo` / `send_video` в начало темы. Сохраняем URL в
+  `ig_leads.pinned_post_url` (новая колонка, миграция). В `_format_message`
+  при post_url == pinned_post_url шапка «🖼 К посту» **не** ставится.
+- **3 итерации фикса**:
+  1. **`cbe8bdf`** — основная фича + миграция `pinned_post_url TEXT`. Отправка
+     упала с `TelegramBadRequest` для всех URL: Chrome UA отдавал login-wall
+     (og:image=none), а потом и без login-wall URL не принимался Telegram.
+  2. **`5276e41`** — два корня. Первый: **User-Agent** `Mozilla/5.0 Chrome`
+     получает от Instagram login-wall (страница 898 KB JS без og-тегов).
+     Меняем на `facebookexternalhit/1.1` — IG whitelist'ит OG-ботов соцсетей
+     и отдаёт нормальный og:image. Второй: og:image в HTML-meta приходит
+     с **HTML-entities** (`&amp;` вместо `&`), Telegram не парсит такой
+     query string и возвращает `BadRequest`. Добавлен `html.unescape()`
+     перед отдачей URL. Smoke-тест: `HEAD https://scontent…&amp;…` → 403,
+     после unescape → 200 image/jpeg 27 KB ✓.
+  3. **`96b68c9`** — bonus-фикс параллельной проблемы: outgoing TG→IG идёт
+     в B24-чате от «Пользователь Технический» (OAuth-app), не видно кто
+     ответил. Добавлен `send_chat_system_message(chat_id, text)` с
+     `SYSTEM=Y` — после основного `send_chat_message` отправляет ℹ️
+     «📤 Ответил из TG: @<username>». Verify-тест: один outgoing webhook
+     на коннектор (только основной text), system НЕ форвардится → клиент
+     в IG получил `👍` без префикса, оператор в B24 видит автора.
+- **Backfill** для существующих тем: 111 IG-Comment тем без
+  pinned_post_url → 73 покрыты (1.5s + retry-проход с adaptive sleep
+  на `TelegramRetryAfter`). 37 без URL поста в preview (старые темы,
+  не покрываются). 1 удалённый пост (og:image=none).
+- **Verify**: `kinzhalov.yuriy` (lead 361252), `dima_kuznetsov`
+  (lead 361254) — pinned-картинка/Reels в начале темы, сообщения ниже
+  без шапки «К посту». ℹ️-пометка автора видна в B24.
+- **Что НЕ делать**:
+  - **Не использовать Chrome UA для `instagram.com/p/<id>`** — будет
+    login-wall. Только `facebookexternalhit` (или `Twitterbot`,
+    `TelegramBot` — оба тоже в whitelist).
+  - **Не отдавать og:image без `html.unescape`** — Telegram не парсит
+    `&amp;` в query string CDN-URL. Любой `httpx.get`-парсинг HTML
+    должен сразу декодировать entities.
+  - **SYSTEM=Y action в open-line** — подтверждено: НЕ форвардится на
+    коннектор. Можно использовать для bookkeeping в чате op-line без
+    риска что клиент в WA/IG/TG получит дубль.
+
+---
+
 ## 2026-05-25 · TG-зеркало IG: ответ оператора как нативный Telegram reply (4 итерации)
 
 - **Запрос** Дмитрия: «можно сделать чтобы это сообщение было прям ответом

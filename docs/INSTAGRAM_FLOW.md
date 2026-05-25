@@ -6,7 +6,7 @@
 
 Общая документация по сервису — [`SOCIAL_CONNECTOR.md`](./SOCIAL_CONNECTOR.md).
 
-Последнее обновление: 2026-05-25.
+Последнее обновление: 2026-05-25 (pinned-пост IG в TG-зеркале, sha cbe8bdf+5276e41+96b68c9).
 
 ---
 
@@ -94,6 +94,17 @@ B24 создаёт сессию открытой линии + лид (CRM_CREATE
         └─► зеркало в TG-группу insta-comments через wa-tg-bridge IgBridge polling
             (раньше делал I2crmTgMirrorService в adapter — отключён 25.05,
              см. REGRESSIONS «два TG-зеркала параллельно»)
+            │
+            ├─► pinned-пост в начале темы (25.05, sha cbe8bdf + 5276e41):
+            │   bridge парсит instagram.com/p/<id> URL из истории →
+            │   fetch_instagram_post_media (og:image/og:video с UA
+            │   `facebookexternalhit` + html.unescape) → bot.send_photo
+            │   / send_video с caption «🖼 Пост клиента». URL сохраняется
+            │   в ig_leads.pinned_post_url; в шапках incoming-сообщений
+            │   ниже «🖼 К посту» больше не дублируется.
+            └─► outgoing TG→B24 от оператора: ℹ️ system-метка
+                «📤 Ответил из TG: @<author>» (25.05, sha 96b68c9) —
+                SYSTEM=Y, в IG не уходит, видна только в B24-чате.
 ```
 
 Формат incoming-webhook от i2crm (эмпирически, Instagram):
