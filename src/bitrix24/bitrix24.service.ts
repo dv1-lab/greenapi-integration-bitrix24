@@ -4413,12 +4413,28 @@ export class Bitrix24Service extends BaseAdapter<
 		const rawChatId = String(m.chat?.id || "");
 		const matchWithMedia = rawChatId.match(/^i2crm_ig_(\d+)_c(\d+)$/);
 		const matchClientOnly = rawChatId.match(/^i2crm_ig_(\d+)$/);
-		const clientId = matchWithMedia
-			? matchWithMedia[1]
-			: matchClientOnly
-				? matchClientOnly[1]
-				: rawChatId.replace(/\D/g, "");
-		const mediaIdFromChat = matchWithMedia ? matchWithMedia[2] : "";
+		let clientId: string;
+		let mediaIdFromChat = "";
+		if (matchWithMedia) {
+			clientId = matchWithMedia[1];
+			mediaIdFromChat = matchWithMedia[2];
+		} else if (matchClientOnly) {
+			clientId = matchClientOnly[1];
+		} else {
+			// Раньше fallback был rawChatId.replace(/\D/g, "") — это склеивало
+			// все цифры подряд в гигантскую строку (видели 49-cifr мусор в логах
+			// 25.05 11:01:34: client="2855898364721128580739018951060349332968215238716"
+			// → i2crm отвечал «Некорректные данные»). Логируем raw chat.id и не
+			// шлём — пусть оператор знает что мы не смогли разобрать.
+			this.logger.error(
+				`handleI2crmOutgoing: chat.id "${rawChatId}" не матчит ни ` +
+				`i2crm_ig_<num>_c<num>, ни i2crm_ig_<num> (line=${lineNumber}, isComment=${isComment})`,
+			);
+			return {
+				success: false,
+				message: `cannot parse client_id from chat.id=${rawChatId} (line=${lineNumber})`,
+			};
+		}
 		if (!clientId) {
 			return { success: false, message: `cannot parse client_id from chat.id=${rawChatId}` };
 		}
