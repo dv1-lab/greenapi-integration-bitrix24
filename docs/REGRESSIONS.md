@@ -8,6 +8,30 @@
 
 ---
 
+## 2026-05-25 · IG comment outgoing — chat.id regex отстал от incoming формата
+
+- **sha**: `c6ea78d`
+- **Симптом**: Дмитрий пишет «!!!» / «=)» в IG-comment лиде dima_kuznetsov →
+  красная плашка «не доставлено» в B24, клиент в Instagram сообщение не получает.
+- **Корень**: `handleI2crmOutgoing` парсил `chat.id` regex'ом
+  `^i2crm_ig_(\d+)_c(\d+)$` (2 сегмента после `i2crm_ig_`). Но incoming pipeline
+  с sha `cacfa1f` (A2: один пост = одна сессия) стал писать `chat.id` вида
+  `i2crm_ig_<clientId>_c<mediaId>_<accountId>` (3 сегмента). Все comment outgoing
+  падали в fallback `rawChatId.replace(/\D/g, "")` → склейка всех цифр →
+  гигантский client_id (49 cifr) → i2crm возвращал «Некорректные данные».
+- **Фикс**: добавлен regex `^i2crm_ig_(\d+)_c(\d+)_(\d+)$` (3-segment), сохранили
+  совместимость со старым 2-segment форматом. Fallback `\D` убран — при
+  необычном chat.id логируем error и возвращаем `success: false`, чтобы не
+  плодить мусорные запросы в i2crm.
+- **Verify**: 25.05 12:10:25 Дмитрий написал «! проверка» в comment-лид
+  → лог `i2crm: ответ в чате комментария с пометкой «!» → Директ` +
+  `type:"direct"` + `OK`. Клиент в Instagram просмотрел сообщение.
+- **Что НЕ повторять**: при добавлении нового сегмента в chat.id (или userKey)
+  для **incoming** — **обязательно** обновлять regex в `handleI2crmOutgoing`
+  и аналогах. Класс «outgoing parser отстал от incoming writer».
+
+---
+
 ## 2026-05-25 · IG outgoing «сообщение не доставлено» — i2crm timeout 15s мало
 
 - **sha**: `60468b4`
