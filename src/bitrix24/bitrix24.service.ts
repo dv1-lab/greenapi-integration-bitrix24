@@ -4848,6 +4848,11 @@ export class Bitrix24Service extends BaseAdapter<
 		if (replyAsDirect && isComment) {
 			const portalDomain = webhook.auth?.domain;
 			const directLine = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+			// operatorId = тот оператор, который написал «!» в comment-чате.
+			// Берём из webhook MESSAGES[0].message.user_id (это тот кто отправил
+			// сообщение в B24-чате). Используем для auto-transfer Direct-сессии
+			// сразу к нему, минуя очередь «Неотвеченные».
+			const operatorId = Number(m?.message?.user_id) || 0;
 			if (portalDomain && directLine) {
 				const directUserKey = `i2crm_ig_${clientId}`;
 				// Имя клиента: вытащим из B24 контакта по UF_CRM_IG_CHAT_ID если есть.
@@ -4868,7 +4873,7 @@ export class Bitrix24Service extends BaseAdapter<
 					this.logger.warn(`mirror-to-direct: failed to resolve displayName for ${clientId}: ${e.message}`);
 				}
 				try {
-					await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+					const mirrorResp: any = await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
 						CONNECTOR: "social_connector",
 						LINE: directLine,
 						MESSAGES: [{
@@ -4890,6 +4895,28 @@ export class Bitrix24Service extends BaseAdapter<
 						`mirror-to-direct: создана зеркальная Direct open-line ` +
 						`(client=${clientId}, line=${directLine})`,
 					);
+					// Auto-transfer Direct-сессии на оператора, написавшего «!» —
+					// чтобы диалог попадал сразу в его активную ленту, минуя очередь
+					// «Неотвеченные». Аналог #47 widget MAX, но через operator.transfer
+					// с TRANSFER_ID (а не operator.answer через user-auth — у нас в
+					// outgoing-flow authId недоступен, есть только app-OAuth+operatorId
+					// из webhook). Verified 25.05: app-OAuth operator.transfer работает.
+					const mirrorChatId = Number(
+						mirrorResp?.DATA?.RESULT?.[0]?.session?.CHAT_ID ||
+						mirrorResp?.result?.DATA?.RESULT?.[0]?.session?.CHAT_ID || 0,
+					);
+					if (mirrorChatId && operatorId) {
+						try {
+							await this.callBitrix24Method(portalDomain, "imopenlines.operator.transfer", {
+								CHAT_ID: mirrorChatId, TRANSFER_ID: operatorId, MODE: "USER",
+							});
+							this.logger.info(
+								`mirror-to-direct: chat ${mirrorChatId} → operator ${operatorId} via operator.transfer`,
+							);
+						} catch (e: any) {
+							this.logger.warn(`mirror-to-direct: operator.transfer failed: ${e.message}`);
+						}
+					}
 					// Дозаполняем свежесозданный Direct-лид:
 					//   - CONTACT_ID + UF_CRM_IG_CHAT_ID + UF_CRM_IG_USERNAME — чтобы лид не висел «оторванным»;
 					//   - UF_CRM_LEAD_ID = открытый comment-лид клиента — чтобы оператор мог прыгнуть из Direct в Comment одним кликом.
