@@ -4692,16 +4692,21 @@ export class Bitrix24Service extends BaseAdapter<
 		const quoteRegex = /^-{20,}\s*\n[^\n]+\[[^\]]+\]\s*\n([\s\S]*?)\n-{20,}\s*\n([\s\S]*)$/;
 		const quoteMatch = text.match(quoteRegex);
 		let quotedBody = "";
-		if (isComment && !replyAsDirect && quoteMatch) {
+		// Цитата всегда вырезается из text — клиенту в Instagram уходит только
+		// сам ответ оператора, без BB-разделителей и текста цитируемого сообщения.
+		// (Раньше вырезалось только в comment-режиме для матча commentId,
+		// в Direct оставалось сырым → клиент видел «-------\ndima_kuznetsov
+		// [сегодня, 16:30]\n…\n-------\nответ» как plain text. Жалоба 25.05.)
+		if (quoteMatch) {
 			quotedBody = quoteMatch[1].trim();
-			// Очищаем тело цитаты:
+			// Очищаем тело цитаты для последующего матча в БД (только для comment):
 			// — снимаем префикс «[Instagram комментарий к посту …]\n» (с/без BB-URL)
 			// — раскрываем [URL=…]label[/URL] до raw URL
 			quotedBody = quotedBody
 				.replace(/^\[Instagram\s+комментарий\s+к\s+посту[^\n]*\n/i, "")
 				.replace(/\[URL=([^\]]+)\][^\[]*\[\/URL\]/g, "$1")
 				.trim();
-			// Заменяем оператор-text цитатой+ответом → только ответом.
+			// Оператор-text = цитата + ответ → оставляем только ответ.
 			text = quoteMatch[2].trim();
 		}
 		if (isComment && !replyAsDirect && quotedBody && replyB24ChatId) {
