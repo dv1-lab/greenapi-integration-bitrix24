@@ -8,6 +8,23 @@
 
 ---
 
+## 2026-05-25 · TG-зеркало IG — ДВА механизма параллельно (adapter+bridge), дубль-топики
+
+- **sha**: `aa602ff` (REGRESSIONS), env-фикс на сервере 25.05 ~21:53 МСК
+- **Симптом**: каждый IG-коммент создаёт **2 топика** в группе `1begovoy.ru_insta_comments`:
+  - «IG-Comments · пост · dima_kuznetsov dima_kuznetsov» (40 сообщений, не работает outgoing — bridge не знает что писать)
+  - «dima_kuznetsov - Instagram Comment - 1begovoy.ru» (14 сообщений, outgoing работает)
+- **Корень**: ОБА механизма зеркала активны одновременно:
+  1. `adapter src/bitrix24/i2crm-tg-mirror.service.ts` — старый прямой mirror IG-incoming → TG через `TG_MIRROR_BOT_TOKEN` (формат заголовка «IG-Comments · пост · client_id»)
+  2. `bridge wa-tg-bridge/src/wa_tg_bridge/ig_bridge.py` — polling B24 OpenLines → TG (формат «<client> - Instagram Comment - 1begovoy.ru» из лида TITLE)
+  17.05 рефакторинг должен был отключить adapter-mirror в пользу bridge, но `i2crm-tg-mirror.service` оставлен active. ig_bridge тогда же случайно disable'нут (4 env'а удалены), parallel-зеркало некоторое время не доминировало. После моего restore IgBridge 25.05 — оба mirror'а заработали вместе.
+- **Фикс**: очистил `I2CRM_TG_MIRROR_GROUP_ID*` (3 переменные) в `/home/dv/greenapi-b24/.env` + `source/.env`. `I2crmTgMirrorService.enabled = false` (см. геттер — без groupId сервис skip'нет). Restart adapter. Bridge остался единственным mirror'ом.
+- **Verify**: новые IG-comments создают только bridge-формат топиков; outgoing TG → IG работает в bridge-топиках (см. «Вы 👍 21:51 ✓✓✓» на скрине от Дмитрия).
+- **Старые топики**: оба остаются в TG (40 + 14 сообщений). В adapter-mirror топики больше не пишутся. cleanup — отдельная manual задача (или просто `unpinAllForumTopicMessages` бесшумно skip когда topic_id потерян).
+- **Что НЕ делать**: при включении одного полу-mirror'а — обязательно проверять что **второй** не активен. Параллельные mirror'ы умножают confusion операторам.
+
+---
+
 ## 2026-05-25 · wa-tg-bridge IgBridge — отключен с 17.05 (TG-зеркало IG не работало 9 дней)
 
 - **Симптом**: 25.05 жалоба Дмитрия «из TG IG-Direct группы не уходят сообщения,
