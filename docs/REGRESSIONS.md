@@ -50,7 +50,7 @@
 
 ---
 
-## 2026-05-24 · #47 «не подтягивается открытая линия когда пишешь в MAX клиентам»
+## 2026-05-24/25 · #47 «не подтягивается открытая линия когда пишешь в MAX клиентам» — **ЗАКРЫТО**
 
 - **Симптом**: оператор открыл сделку 108126 → виджет «Social Connector» →
   написал в MAX. В правой панели B24 диалог не появился. Диалог подтянулся
@@ -70,23 +70,29 @@
   B24 заводит **новый** chat-user → новая open-line сессия → новый «свободный»
   лид-дубликат в очереди «Неотвеченные». Подтверждено логами `ensureLead[lm25qw]` +
   visual reproduce. Подробности — memory `widget_max_47_root_cause.md`.
-- **Фикс A.v2 (sha `2f27713`, 2026-05-24/25)**: `Bitrix24Service.autoTakeSession`:
-  получает operatorId через `user.current?auth=<authId>` → retry-loop по
-  `im.recent.list TYPE=lines` ищет chat с `entity_id` содержащим userKey →
-  `imopenlines.operator.answer CHAT_ID=<num> USER_ID=<op>` (fallback `session.join`).
-  Вызывается асинхронно из `widget /send` после `mirrorToBitrix`. Не throw'ает —
-  graceful с trace-id. Эффект: диалог сразу в «В работе» оператора, не в «Неотвеченных».
+- **Фикс A.v2** — три итерации до рабочего состояния:
+  1. `2f27713` (24.05 вечер) — autoTakeSession + retry-loop по `im.recent.list`.
+     Fail: app-context не видит свежесозданный chat-user → `chat not found`.
+  2. `f040d41` (25.05 утро) — fast-path: chatId извлекается из ответа
+     `imconnector.send.messages` (`DATA.RESULT[0].session.CHAT_ID`), retry-loop
+     остался fallback'ом. Стало находить chat. Fail: `operator.answer` через
+     app-OAuth attachит сессию к bot-user'у adapter'а («Технический Пользователь»),
+     не к фактически отправляющему оператору.
+  3. `ea3d1dd` (25.05 утро) — `operator.answer` через **user-auth** оператора
+     (прямой `axios.post` с `?auth=<operatorAuthId>`, не через app-OAuth).
+     **Verified by user 25.05 13:40 МСК**: «сейчас все ок».
 - **Hot-fix sleep(2000) в ensureOpenLeadForPhone**: бесполезен (корень — префикс,
   не race-condition), откачен `git checkout` 2026-05-24 22:00 МСК.
-- **Фикс B (sha `a7ec9f5`, 2026-05-25)**: `imopenlines.crm.chat.attach` в B24 REST
-  **нет** (research'ил 25.05 — все имена `imopenlines.crm.chat.*` возвращают
-  `ERROR_METHOD_NOT_FOUND`). Реализовано через **системное сообщение** в начало
-  open-line диалога: `Bitrix24Service.postContextMessage` шлёт `im.message.add
-  SYSTEM=Y DIALOG_ID=chat<num>` с BB-кодами [URL=...] на контакт/сделку/лид/
-  customer-360. Оператор видит ссылки в карточке диалога и одним кликом
-  прыгает на нужную CRM-сущность. In-memory Set дедуп — не повторяем второй раз
-  для одного chat-id. `EnsureLeadResult.customerUuid` читается из
-  `UF_CRM_PB_CUSTOMER_UUID` контакта.
+- **Фикс B (sha `a7ec9f5` + `ea3d1dd`, 2026-05-25)**: `imopenlines.crm.chat.attach`
+  в B24 REST **нет** (research'ил 25.05 — все имена `imopenlines.crm.chat.*`
+  возвращают `ERROR_METHOD_NOT_FOUND`). Реализовано через **системное сообщение**
+  в начало open-line диалога: `Bitrix24Service.postContextMessage` шлёт
+  `im.message.add SYSTEM=Y DIALOG_ID=chat<num>` с BB-кодами [URL=...] на
+  контакт/сделку/лид/customer-360. Оператор видит ссылки и одним кликом прыгает
+  на нужную CRM-сущность. In-memory Set дедуп — не повторяем второй раз.
+  `EnsureLeadResult.customerUuid` читается из `UF_CRM_PB_CUSTOMER_UUID` контакта.
+  Поправка `ea3d1dd`: customer-360 URL → `/customer/<uuid>` (не `/customer-360/<uuid>`,
+  тот 404).
 - **НЕ повторять**: написание фикса без полной проверки 4 каналов (WA/TG/MAX/IG)
   × 2 направлений (in/out) × 2 сценариев (виджет / с мобильного). Не пытаться
   чинить через `sleep` («race condition») когда реальный корень — несовпадение
