@@ -8,6 +8,42 @@
 
 ---
 
+## 2026-05-25 · wa-tg-bridge IgBridge — отключен с 17.05 (TG-зеркало IG не работало 9 дней)
+
+- **Симптом**: 25.05 жалоба Дмитрия «из TG IG-Direct группы не уходят сообщения,
+  и из B24 в TG не приходят». Проверил: bridge получает `ONOPENLINEMESSAGEADD`
+  от B24 (через `/bitrix/event`), но не зеркалит. `handle_tg_outgoing` для
+  IG-группы не срабатывает.
+- **Корень**: 17.05 кто-то (вероятно я в прошлой сессии) сделал бэкап
+  `.env.bak-2026-05-17-disable-igbridge` и **удалил** из текущего `.env`
+  4 переменные: `BITRIX_IG_DIRECT_LINE`, `BITRIX_IG_DIRECT_GROUP`,
+  `BITRIX_IG_COMMENTS_LINE`, `BITRIX_IG_COMMENTS_GROUP`. Без них
+  `config.bitrix.ig_lines` пустой → в `__main__.py:402` блок инициализации
+  `IgBridge` пропускается → `bridge.ig = None` → `handle_tg_outgoing` для
+  IG-group молча выходит. Polling `_scan_new_sessions` тоже не запускался,
+  baseline `last_activity_updated` застрял на 16.05 23:32.
+- **Накоплено**: 1058 `IMOPENLINES_SESSION`-активностей с 17.05 не обработаны
+  (через B24 `crm.activity.list filter[>LAST_UPDATED]=2026-05-16T23:32:57+03:00`).
+- **Почему оригинальная регрессия**: причина disable не задокументирована.
+  Возможно был баг с дублированием или TG-rate-limit, но эпизод не записан.
+  При восстановлении баг не воспроизвёлся.
+- **Фикс**: 25.05 19:23 МСК — восстановил 4 env-переменные из `.env.bak` через
+  `grep + >>` (значения не печатались в transcript). Сдвинул baseline
+  `last_activity_updated` с 16.05 на сегодня 12:00 МСК — чтобы bridge не
+  флудил TG 1058 старыми лидами, а обработал только сегодняшние (~50 шт).
+  Старые лиды до 17.05 если понадобятся → manual onboard через
+  `/internal/refresh-ig-topics` endpoint.
+- **Verify**: после `systemctl restart wa-tg-bridge` логи `ig-bridge: 2 линий,
+  бот-poll каждые 45 сек` + `last_activity_updated` начал двигаться (12:00 →
+  13:53 за 90 сек). Throttle Telegram (4с/topic) — норма при первом проходе.
+- **Что НЕ делать**: при disable какой-то фичи через удаление env — **обязательно**
+  записывать в REGRESSIONS.md почему и до какого момента отключена. Без этого
+  через неделю никто (включая меня) не помнит «зачем мы это сделали» и
+  фича медленно деградирует. Backup-файл `.env.bak-disable-X` сам по себе
+  не достаточен.
+
+---
+
 ## 2026-05-25 · IG comment outgoing — chat.id regex отстал от incoming формата
 
 - **sha**: `c6ea78d`
