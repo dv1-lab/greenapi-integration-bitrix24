@@ -4700,6 +4700,66 @@ export class Bitrix24Service extends BaseAdapter<
 			commentId: baseBody.comment ? String(baseBody.comment) : undefined,
 		});
 
+		// «!» из comment-чата → ответ ушёл клиенту в Direct, но B24 знает об этом
+		// только в текущей **comment** open-line. Когда клиент ответит — i2crm
+		// пришлёт нам Direct webhook и мы откроем отдельную Direct open-line,
+		// но история переписки будет развязана: оператор не увидит свой первый
+		// ответ в Direct-сессии.
+		// Делаем зеркало: создаём direct open-line с тем же текстом, с
+		// is_self_message=true чтобы B24 показал «это написал оператор».
+		// Бесконечного цикла нет — is_self_message=true и B24 не webhookает
+		// обратно (см. extra.is_self_message в widget mirror и i2crm incoming).
+		if (replyAsDirect && isComment) {
+			const portalDomain = webhook.auth?.domain;
+			const directLine = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+			if (portalDomain && directLine) {
+				const directUserKey = `i2crm_ig_${clientId}`;
+				// Имя клиента: вытащим из B24 контакта по UF_CRM_IG_CHAT_ID если есть.
+				// Иначе оставим username из i2crm-incoming context (последний known),
+				// или просто client_id (B24 нормально с числом, контакт-резолв доберёт).
+				let displayName: string = String(clientId);
+				try {
+					const cl: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", {
+						filter: { UF_CRM_IG_CHAT_ID: String(clientId) },
+						select: ["NAME", "UF_CRM_IG_USERNAME"],
+					});
+					if (Array.isArray(cl) && cl.length > 0) {
+						const u = cl[0].UF_CRM_IG_USERNAME?.toString().trim();
+						const n = cl[0].NAME?.toString().trim();
+						displayName = u || n || displayName;
+					}
+				} catch (e: any) {
+					this.logger.warn(`mirror-to-direct: failed to resolve displayName for ${clientId}: ${e.message}`);
+				}
+				try {
+					await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+						CONNECTOR: "social_connector",
+						LINE: directLine,
+						MESSAGES: [{
+							user: {
+								id: directUserKey,
+								name: displayName,
+								url: `https://instagram.com/${displayName}`,
+							},
+							message: {
+								id: `mirror_${externalMessageId || Date.now()}`,
+								date: Math.floor(Date.now() / 1000),
+								text,
+							},
+							chat: { id: directUserKey, name: displayName, url: null },
+							extra: { is_self_message: true },
+						}],
+					});
+					this.logger.info(
+						`mirror-to-direct: создана зеркальная Direct open-line ` +
+						`(client=${clientId}, line=${directLine})`,
+					);
+				} catch (e: any) {
+					this.logger.warn(`mirror-to-direct failed for client=${clientId}: ${e.message}`);
+				}
+			}
+		}
+
 		return {
 			success: true,
 			message: "Sent to i2crm",
