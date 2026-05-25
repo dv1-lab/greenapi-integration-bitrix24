@@ -439,7 +439,9 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		if (ctx.customerUuid) {
 			const dashUrl = this.configService.get<string>("DV_DASHBOARD_URL") || "https://dashboard.9wb.ru";
-			lines.push(`🧭 [URL=${dashUrl}/customer-360/${ctx.customerUuid}]Customer-360[/URL]`);
+			// DV Dashboard: страница клиента — /customer/<uuid>, не /customer-360/<uuid>
+			// (последний — индекс с cohorts/waiting, 404 на UUID).
+			lines.push(`🧭 [URL=${dashUrl}/customer/${ctx.customerUuid}]Customer-360[/URL]`);
 		}
 		if (ctx.channelLabel) {
 			lines.push(`[I]Канал: ${ctx.channelLabel}[/I]`);
@@ -537,22 +539,31 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 
 			// 3. operator.answer; если не сработал — fallback session.join.
+			// ВАЖНО: вызываем через USER-auth (authId оператора), а не через
+			// app-OAuth токен. App-OAuth attachит сессию к bot-user'у adapter'а
+			// (= «Технический Пользователь» B24), независимо от USER_ID в params.
+			// Чтобы B24 видел «оператор сам забрал диалог» — нужен его authId
+			// прямо в URL (?auth=<operatorAuthId>).
+			const callAsOperator = async (method: string, params: Record<string, any>) => {
+				const url = `https://${portalDomain}/rest/${method}?auth=${encodeURIComponent(operatorAuthId)}`;
+				const r = await axios.post(url, params, { timeout: 15000 });
+				if (r.data?.error) {
+					throw new Error(`B24 ${method}: ${r.data.error_description || r.data.error}`);
+				}
+				return r.data?.result;
+			};
 			try {
-				await this.callBitrix24Method(portalDomain, "imopenlines.operator.answer", {
-					CHAT_ID: chatId, USER_ID: operatorId,
-				});
-				this.logger.info(`autoTake[${trace}]: chat ${chatId} → operator ${operatorId} (userKey=${userKey})`);
+				await callAsOperator("imopenlines.operator.answer", { CHAT_ID: chatId, USER_ID: operatorId });
+				this.logger.info(`autoTake[${trace}]: chat ${chatId} → operator ${operatorId} (userKey=${userKey}) via user-auth`);
 				return { chatId, operatorId, ok: true };
 			} catch (e1: any) {
-				this.logger.warn(`autoTake[${trace}]: operator.answer failed: ${e1.message}, trying session.join`);
+				this.logger.warn(`autoTake[${trace}]: operator.answer (user-auth) failed: ${e1.message}, trying session.join`);
 				try {
-					await this.callBitrix24Method(portalDomain, "imopenlines.session.join", {
-						CHAT_ID: chatId,
-					});
-					this.logger.info(`autoTake[${trace}]: chat ${chatId} joined via session.join (userKey=${userKey})`);
+					await callAsOperator("imopenlines.session.join", { CHAT_ID: chatId });
+					this.logger.info(`autoTake[${trace}]: chat ${chatId} joined via session.join (userKey=${userKey}) via user-auth`);
 					return { chatId, operatorId, ok: true };
 				} catch (e2: any) {
-					this.logger.warn(`autoTake[${trace}]: session.join also failed: ${e2.message}`);
+					this.logger.warn(`autoTake[${trace}]: session.join (user-auth) also failed: ${e2.message}`);
 					return { chatId, operatorId, reason: "both methods failed" };
 				}
 			}
