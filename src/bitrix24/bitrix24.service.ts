@@ -1144,6 +1144,63 @@ export class Bitrix24Service extends BaseAdapter<
 		await this._eventsIngest(body);
 	}
 
+	/**
+	 * Customer-360: пишет событие изменения статуса доставки исходящего
+	 * сообщения (message_delivery_status). Используется в:
+	 *   1. handleI2crmOutgoing — status='sent' при успешном target/feedback,
+	 *      status='failed' если i2crm вернул error / transport упал.
+	 *   2. handleOutgoingMessageStatus (Green API) — status в
+	 *      ['sent','delivered','read'] от webhook'а Green API.
+	 *
+	 * На странице DV Dashboard /customer-360/outgoing-pending запрос
+	 * соединяет message_out события без последующего delivery_status —
+	 * это и есть «зависшие» исходящие, требующие внимания оператора.
+	 *
+	 * payload: { idMessage, status, error?, connector?, channel? }
+	 * source: bridge_wa/ig/tg/max или adapter (если connector не маппится)
+	 */
+	private async _emitMessageDeliveryEvent(opts: {
+		idMessage: string;
+		status: "sent" | "delivered" | "read" | "failed";
+		source: string;
+		channel: string;
+		b24ChatId?: string;
+		connector?: string;
+		customerUuid?: string;
+		error?: string;
+	}): Promise<void> {
+		const payload: Record<string, any> = {
+			idMessage: opts.idMessage,
+			status: opts.status,
+		};
+		if (opts.error) payload.error = opts.error;
+		if (opts.connector) payload.connector = opts.connector;
+		if (opts.b24ChatId) payload.b24ChatId = opts.b24ChatId;
+		const body: Record<string, any> = {
+			source: opts.source,
+			eventType: "message_delivery_status",
+			channel: opts.channel,
+			summary: `${opts.status}: ${opts.idMessage}${opts.error ? " — " + opts.error.slice(0, 100) : ""}`,
+			payload,
+		};
+		if (opts.customerUuid) body.customerUuid = opts.customerUuid;
+		await this._eventsIngest(body);
+	}
+
+	/**
+	 * connector → (source, channel) для Customer-360 events.
+	 * Используется в delivery-status emit'ах когда у нас connector_id
+	 * из outgoingMessage записи, и нужно нормализовать источник.
+	 */
+	private _sourceFromConnector(connector: string): { source: string; channel: string } {
+		const c = (connector || "").toLowerCase();
+		if (c.includes("whatsapp") || c.includes("wa_")) return { source: "bridge_wa", channel: "WA" };
+		if (c.includes("max")) return { source: "bridge_max", channel: "MAX" };
+		if (c.includes("telegram") || c === "tg" || c.includes("tg_")) return { source: "bridge_tg", channel: "TG" };
+		if (c.includes("instagram") || c.includes("ig_") || c === "i2crm") return { source: "bridge_ig", channel: "IG" };
+		return { source: "adapter", channel: connector || "" };
+	}
+
 	// Расширение медиа-файла: из имени, иначе по MIME, иначе .bin.
 	private _igMediaExt(fileName: string, mime: string): string {
 		const m = fileName.match(/\.([a-z0-9]{1,5})$/i);
@@ -5047,6 +5104,15 @@ export class Bitrix24Service extends BaseAdapter<
 						error: result.error,
 						data: result.data,
 					});
+					// Customer-360: delivery_status=failed для outgoing-pending ленты
+					void this._emitMessageDeliveryEvent({
+						idMessage: String(externalMessageId || (m as any)?.id || `i2crm-fail-${Date.now()}`),
+						status: "failed",
+						source: "bridge_ig",
+						channel: "IG",
+						connector: "i2crm",
+						error: typeof result.error === "string" ? result.error : "validation failed",
+					});
 					return { success: false, message: `i2crm: ${typeof result.error === "string" ? result.error : "validation failed"}` };
 				}
 				this.logger.info(`i2crm outgoing OK (part ${i + 1}/${parts.length})`, { result });
@@ -5054,6 +5120,15 @@ export class Bitrix24Service extends BaseAdapter<
 				externalMessageId = result?.data?.id || result?.data?.external_ids?.[0] || externalMessageId;
 			} catch (err: any) {
 				this.logger.error(`i2crm outgoing transport error: ${err.message}`);
+				// Customer-360: delivery_status=failed (transport error)
+				void this._emitMessageDeliveryEvent({
+					idMessage: String(externalMessageId || (m as any)?.id || `i2crm-tx-${Date.now()}`),
+					status: "failed",
+					source: "bridge_ig",
+					channel: "IG",
+					connector: "i2crm",
+					error: `transport: ${err.message}`.slice(0, 200),
+				});
 				return { success: false, message: `i2crm transport: ${err.message}` };
 			}
 		}
@@ -5070,6 +5145,20 @@ export class Bitrix24Service extends BaseAdapter<
 			mediaId: baseBody.media ? String(baseBody.media) : undefined,
 			commentId: baseBody.comment ? String(baseBody.comment) : undefined,
 		});
+		// Customer-360: delivery_status=sent сразу после успешного target/feedback.
+		// IG (через i2crm) не присылает webhook delivery confirmation для нашего
+		// outgoing — единственный сигнал успеха = response.error=false. Этого
+		// достаточно чтобы /customer-360/outgoing-pending не показывал сообщение
+		// как «зависшее».
+		if (externalMessageId) {
+			void this._emitMessageDeliveryEvent({
+				idMessage: String(externalMessageId),
+				status: "sent",
+				source: "bridge_ig",
+				channel: "IG",
+				connector: "i2crm",
+			});
+		}
 
 		// «!» из comment-чата → ответ ушёл клиенту в Direct, но B24 знает об этом
 		// только в текущей **comment** open-line. Когда клиент ответит — i2crm
@@ -5612,6 +5701,18 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.debug(
 				`Forwarded outgoing status ${status} for idMessage=${idMessage} → B24 chat_id=${entry.b24ChatId}`,
 			);
+			// Customer-360: emit delivery_status в customer_events для
+			// /customer-360/outgoing-pending ленты. source/channel выводим
+			// из connector_id (wa/max/tg/ig).
+			const sc = this._sourceFromConnector(entry.connector);
+			void this._emitMessageDeliveryEvent({
+				idMessage,
+				status: status as "sent" | "delivered" | "read",
+				source: sc.source,
+				channel: sc.channel,
+				connector: entry.connector,
+				b24ChatId: entry.b24ChatId,
+			});
 			// Когда дошло до read — удаляем (дальше Green API не шлёт).
 			if (status === "read") {
 				await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
