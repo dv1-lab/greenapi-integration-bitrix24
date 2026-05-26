@@ -97,6 +97,42 @@ function setupSwagger(app: any) {
 	const document = SwaggerModule.createDocument(app, config);
 	SwaggerModule.setup("api", app, document, {
 		swaggerOptions: { persistAuthorization: true },
+		customSiteTitle: "Social Connector API",
+		customCss: `
+			.swagger-logout-btn {
+				position: fixed;
+				top: 14px;
+				right: 16px;
+				z-index: 9999;
+				padding: 8px 14px;
+				background: #1a1a1a;
+				color: #f5f5f5;
+				border: 1px solid #2a2a2a;
+				border-radius: 6px;
+				cursor: pointer;
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+				font-size: 13px;
+				font-weight: 500;
+				box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+				transition: background 0.15s;
+			}
+			.swagger-logout-btn:hover { background: #2a2a2a; border-color: #3a3a3a; }
+			.swagger-logout-btn:active { transform: translateY(1px); }
+		`,
+		customJsStr: `
+			window.addEventListener("DOMContentLoaded", function() {
+				var btn = document.createElement("button");
+				btn.className = "swagger-logout-btn";
+				btn.type = "button";
+				btn.textContent = "Выйти";
+				btn.title = "Завершить сессию";
+				btn.onclick = function() {
+					fetch("/api/logout", { method: "POST", credentials: "same-origin" })
+						.finally(function() { window.location.href = "/api/login"; });
+				};
+				document.body.appendChild(btn);
+			});
+		`,
 	});
 }
 
