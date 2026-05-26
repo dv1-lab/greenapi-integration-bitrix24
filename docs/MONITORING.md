@@ -122,11 +122,11 @@ health-check: connector=true, 1 portals with 5 instances total
 
 | Что | Почему важно | Как мониторить (предложение) |
 |---|---|---|
-| **GreenAPI instance state=authorized** | Если WA-устройство deauth — все WA outgoing падают | adapter or bridge watchdog → push в @agent_dv_bot |
+| ~~**GreenAPI instance state=authorized**~~ | ~~Если WA-устройство deauth — все WA outgoing падают~~ | ✅ Готово (#60): B24HealthCheckService раз в час проверяет getStateInstance каждой инстанции, edge-triggered alert в @agent_dv_bot |
 | **B24 OAuth refresh_token валидность** | Истекает раз в год, без рефреша adapter теряет access | check через cron, алерт за 14 дней до expire |
 | **Adapter REST API latency** | Если медленный — клиенты в B24 видят «не доставлено» | prometheus / простой curl с timer |
 | **Adapter error rate** | Если >5% запросов с error — что-то ломается | log-aggregation + threshold |
-| **Customer-service /events/ingest** | Если падает — Customer-360 без событий | Healthchecks ping из cron-проверки |
+| ~~**Customer-service /events/ingest**~~ | ~~Если падает — Customer-360 без событий~~ | ✅ Готово (#61): `/usr/local/bin/customer-service-healthcheck.sh` cron */5 мин, edge-trigger после 2 fails подряд, alert в @agent_dv_bot |
 | **dv-dashboard reachable** | https://dashboard.9wb.ru недоступен | Uptime Kuma monitor (TODO) |
 | **MoySklad sync** | moy-sklad cron 04:35 — если падает, заказы не попадают в B24 | Healthchecks ping |
 | **whisper-server (transcribe)** | Если падает — звонки без транскриптов | systemd watchdog + алерт |
@@ -160,8 +160,8 @@ Emergency Access notification.
 
 | # | Что добавить | Приоритет |
 |---|---|---|
-| TODO | GreenAPI instance state alert (5 инстансов) → @agent_dv_bot | P0 |
-| TODO | Customer-service /events/ingest healthcheck cron | P0 |
+| ✅ Done 2026-05-26 (#60) | GreenAPI instance state alert (5 инстансов) → @agent_dv_bot | P0 |
+| ✅ Done 2026-05-26 (#61) | Customer-service /events/ingest healthcheck cron | P0 |
 | TODO | MoySklad sync healthcheck ping | P0 |
 | TODO | whisper-server watchdog → @agent_dv_bot | P1 |
 | TODO | Disk usage threshold алерт > 85% | P1 |
