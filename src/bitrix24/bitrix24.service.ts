@@ -3653,7 +3653,7 @@ export class Bitrix24Service extends BaseAdapter<
 				{
 					IMAGE: {
 						LINK: url,
-						WIDTH: 1080,
+						WIDTH: 810,
 						HEIGHT: 1080,
 					},
 				},
