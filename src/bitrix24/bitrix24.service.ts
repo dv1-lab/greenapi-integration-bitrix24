@@ -3641,17 +3641,20 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 
 		try {
-			// FILE attach даёт большое полноразмерное превью в B24-чате
-			// (раньше использовался RICH_LINK — preview-картинка была слишком
-			// маленькой, оператору сложно опознать пост-источник коммента).
-			// Подвох: og:image от IG hard-coded 640x640 cropped — это потолок
-			// без Graph API (см. memory ig_og_fetch_trick / b24_event_gap).
-			// FILE раскрывает доступные 640x640 на максимум пространства.
+			// IMAGE 1080×1080 — большой preview в B24-чате. Раньше пробовали
+			// RICH_LINK (preview ~150×150 — слишком мелко, оператор не
+			// опознавал пост) и FILE (рендерится как «Скачать» link БЕЗ
+			// preview вообще — ещё хуже). IMAGE с большими WIDTH/HEIGHT даёт
+			// крупный кликабельный thumbnail без download-overhead.
+			// Сам файл всегда 640×640 cropped (og:image hard limit Meta),
+			// B24 масштабирует до WIDTH×HEIGHT — пиксели не появятся, но
+			// physical размер preview на экране больше.
 			const attach = [
 				{
-					FILE: {
+					IMAGE: {
 						LINK: url,
-						NAME: "instagram_post.jpg",
+						WIDTH: 1080,
+						HEIGHT: 1080,
 					},
 				},
 			];
