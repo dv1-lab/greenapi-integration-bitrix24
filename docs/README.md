@@ -162,9 +162,11 @@ recovery, нужно знать на случай если меня нет
 
 → [`SEQUENCES.md`](./SEQUENCES.md) — sequence-диаграммы 5 критичных flow
 
+→ [`SLO.md`](./SLO.md) — технические SLO + error budget
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
-→ TODO: `SLO.md` (P1), `PERFORMANCE.md` (P2), `THREAT_MODEL.md` (P2)
+→ TODO: `PERFORMANCE.md` (P2), `THREAT_MODEL.md` (P2)
 
 ---
 
@@ -191,6 +193,7 @@ docs/
 ├── 👥 CUSTOMER360.md             — единая БД клиентов
 ├── 🗄 DATA_MODEL.md              — ERD всех таблиц (MySQL/PG/CH)
 ├── 🔀 SEQUENCES.md               — sequence-диаграммы 5 критичных flow
+├── 🎯 SLO.md                     — технические SLO + error budget
 ├── 📡 MONITORING.md              — что-кому-куда алертит
 ├── 🧪 TESTING.md                 — структура тестов
 │
