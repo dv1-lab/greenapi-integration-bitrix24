@@ -25,6 +25,7 @@ Healthchecks-Email-bridge или integration).
 | `мониторинг кликхауса` | `c0d41431` | каждые 5 мин | 5 мин | `clickhouse/healthcheck.sh` (curl 127.0.0.1:8123/ping) |
 | `dv-server-digest` | `409ae4a2` | 07:00 UTC (10:00 МСК) ежедневно | 1ч | `monitor-bot/daily_digest.py` |
 | `pervyi-begovoy-bitrix-sync` | `c370076d` | 04:30 UTC (07:30 МСК) ежедневно | 1ч | inline curl в crontab вокруг `sync_main.py` |
+| `moy-sklad sync` | `433b43d6` | 04:35 UTC (07:35 МСК) ежедневно | 1ч | inline curl `/start` + `/$?` вокруг `scripts/sync.py` |
 
 **Backup grace 2ч** — потому что restic при большом repo может занять ~30 мин;
 buffer на случай тормозов Я.Диска или CH-мерджей.
@@ -128,7 +129,7 @@ health-check: connector=true, 1 portals with 5 instances total
 | **Adapter error rate** | Если >5% запросов с error — что-то ломается | log-aggregation + threshold |
 | ~~**Customer-service /events/ingest**~~ | ~~Если падает — Customer-360 без событий~~ | ✅ Готово (#61): `/usr/local/bin/customer-service-healthcheck.sh` cron */5 мин, edge-trigger после 2 fails подряд, alert в @agent_dv_bot |
 | **dv-dashboard reachable** | https://dashboard.9wb.ru недоступен | Uptime Kuma monitor (TODO) |
-| **MoySklad sync** | moy-sklad cron 04:35 — если падает, заказы не попадают в B24 | Healthchecks ping |
+| ~~**MoySklad sync**~~ | ~~moy-sklad cron 04:35 — если падает, заказы не попадают в B24~~ | ✅ Уже было (#62): HC check «moy-sklad sync» UUID `433b43d6-...`, grace 1ч, status=up, last_ping 04:39 сегодня |
 | **whisper-server (transcribe)** | Если падает — звонки без транскриптов | systemd watchdog + алерт |
 | **Disk usage my-server** | При заполнении — все Docker контейнеры падают | monitor-bot daily, threshold > 85% → алерт |
 | **Bitwarden Premium subscription** | Без Premium Emergency Access не работает | manual reminder за 14 дней |
@@ -162,7 +163,7 @@ Emergency Access notification.
 |---|---|---|
 | ✅ Done 2026-05-26 (#60) | GreenAPI instance state alert (5 инстансов) → @agent_dv_bot | P0 |
 | ✅ Done 2026-05-26 (#61) | Customer-service /events/ingest healthcheck cron | P0 |
-| TODO | MoySklad sync healthcheck ping | P0 |
+| ✅ Уже было (audit 26.05 — #62) | MoySklad sync healthcheck ping (UUID 433b43d6-...) | P0 |
 | TODO | whisper-server watchdog → @agent_dv_bot | P1 |
 | TODO | Disk usage threshold алерт > 85% | P1 |
 | TODO | Adapter error rate dashboard panel + alert | P1 |
