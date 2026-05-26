@@ -8,6 +8,39 @@
 
 ---
 
+## 2026-05-26 · IG Comments плодили лиды — `user.id == chat.id` в imconnector.send.messages
+
+- **Симптом**: каждый IG-коммент клиента под новым постом создавал
+  **новый лид** в B24, даже если у клиента уже был открытый лид. Дмитрий
+  пересмотрел правило (ADR `2026-05-26-ig-comments-attach-to-open-entity`):
+  открытая сущность — приоритет, лишних лидов не плодить.
+- **Корень**: в `bitrix24.service.ts:handleI2crmIncoming` `user.id` и
+  `chat.id` были равны (`i2crm_ig_<c>_c<media>`). При каждом новом посте
+  user.id менялся → B24 считал что это **новый клиент** → создавал лид
+  через `CRM_CREATE=lead`. `CRM_FORWARD=Y` для повторных обращений
+  работал только когда совпадал и user.id и chat.id (т.е. для повторных
+  сообщений в той же сессии того же поста).
+- **Фикс** (sha c171402): разделить user.id и chat.id:
+  - `user.id = buildI2crmUserId(channel, clientId)` = `i2crm_ig_<c>`
+    (одинаковый для всех постов и каналов IG одного клиента)
+  - `chat.id = buildI2crmChatId(channel, clientId, mediaId)` =
+    `i2crm_ig_<c>_c<media>` для instcom, `i2crm_ig_<c>` для instdir
+- **Verify**: 201 тестов pass, build OK. На бою через
+  `imconnector.send.messages` с разделёнными id'шками B24 узнаёт того
+  же клиента по user.id, через `CRM_FORWARD=Y` находит открытый лид/сделку,
+  прикрепляет к нему новую сессию (без создания нового лида).
+- **Что НЕ повторять**:
+  - Не делать `user.id === chat.id` в `imconnector.send.messages`. Это
+    спрятанный edge case B24 OpenLines — `CRM_FORWARD=Y` срабатывает
+    только если user.id уже виден B24 в другой сессии того же клиента
+  - Не пытаться отключить `CRM_CREATE=lead` через `imopenlines.config.update`
+    — стандартное поведение Битрикса работает правильно при правильном
+    payload. Изначально я ошибочно предложил это в ADR черновике.
+  - При добавлении новых каналов с возможностью нескольких сессий per
+    клиент — сразу проектировать с разделением user.id/chat.id.
+
+---
+
 ## 2026-05-26 · Docker build падает после миграции на pnpm (axios/express не явные deps + Buffer/Blob TS error)
 
 - **Симптом**: при деплое #52 (Swagger UI) docker build падает с:
