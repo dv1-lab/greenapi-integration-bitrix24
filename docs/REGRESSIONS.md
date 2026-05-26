@@ -8,6 +8,38 @@
 
 ---
 
+## 2026-05-26 · Build залип на 4 часа — Docker Hub + Prisma CDN недоступны с my-server
+
+- **Симптом**: `docker compose up -d adapter --build --force-recreate` падает на
+  `FROM node:20-alpine` с `dial tcp: lookup registry-1.docker.io ... i/o timeout`
+  / `TLS handshake timeout`, и/или `pnpm prisma generate` падает с
+  `Error: aborted ECONNRESET`. Build пытался деплоить sha `ea77d2d` (task #69),
+  4 ретрая дали одну и ту же ошибку.
+- **Корень**: my-server в Стокгольме (hip.hosting). Маршрутизация hip.hosting
+  → Cloudflare CDN (за которым Docker Hub) и → Prisma binaries CDN
+  кратковременно деградировала на ~4 часа. Это **не РФ-блокировка** (сервер
+  в EU), не наш код, не Docker daemon — внешний инцидент.
+- **Фикс** (sha TBD):
+  - `Dockerfile`: `FROM node:20-alpine` → `FROM mirror.gcr.io/library/node:20-alpine`
+    (Google публичный pull-through cache Docker Hub — стабильнее)
+  - `Dockerfile`: retry-loop на `pnpm prisma generate` (3 попытки с backoff
+    15/30/45 сек) — закрывает transient ECONNRESET
+- **Регламент**: `docs/DEPLOY.md` создан с разделом «при недоступности CDN» —
+  список альтернативных зеркал (Amazon ECR Public, Alibaba), что НЕ делать
+  (не restart docker daemon — убьёт 10+ контейнеров на сервере).
+- **Memory**: `[[feedback-cdn-mirrors-default]]` — правило применять зеркала
+  по умолчанию во всех новых Dockerfile (расширить на остальные сервисы на
+  my-server отдельной задачей).
+- **Что НЕ делать**:
+  - НЕ менять `/etc/docker/daemon.json` `"registry-mirrors"` глобально —
+    требует `systemctl restart docker` → 502 у всех клиентов на 30-60 сек.
+  - НЕ ждать пока CDN оживёт — Дмитрий явно сказал «ждать когда что-то не
+    работает мне не нравится». Зеркала с первой минуты.
+- **Verify**: build с mirror.gcr.io прошёл за TBD сек (после фикса).
+- **Связано**: `docs/DEPLOY.md`, memory `[[feedback-cdn-mirrors-default]]`
+
+---
+
 ## 2026-05-26 · Конверсия лида теряет `UF_CRM_*_CHAT_ID` — chatId на контакт не переносится
 
 - **Симптом (потенциальный)**: после ручной конверсии лида в контакт в B24,
