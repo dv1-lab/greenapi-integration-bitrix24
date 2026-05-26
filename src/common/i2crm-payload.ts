@@ -46,13 +46,33 @@ export function validateI2crmIncoming(payload: any): I2crmValidationResult {
 }
 
 /**
- * A2-формат user.id для i2crm. Каждый пост (mediaId) для IG-comment
- * получает свою сессию → свой лид в B24. Для Direct (instdir) — один
- * userKey на клиента.
+ * user.id = **идентификатор клиента в B24**. Один и тот же для всех
+ * постов и каналов IG одного клиента (instdir + instcom). При совпадении
+ * user.id B24 узнаёт клиента и через `CRM_FORWARD=Y` прикрепляет новую
+ * сессию к **существующему открытому лиду/сделке** (если есть).
  *
- * См. PRODUCT_RULES.md §"chat.id префиксы" и REGRESSIONS.md A2.
+ * См. ADR `2026-05-26-ig-comments-attach-to-open-entity.md` и
+ * PRODUCT_RULES.md §2.1.
  */
-export function buildI2crmUserKey(
+export function buildI2crmUserId(
+	_channel: I2crmChannel,
+	clientId: string | number,
+): string {
+	return `i2crm_ig_${clientId}`;
+}
+
+/**
+ * chat.id = **идентификатор сессии в B24 OpenLine**. Для instcom — отдельный
+ * на каждый пост (mediaId), чтобы у каждого поста была своя сессия в линии 22.
+ * Для instdir — один на клиента.
+ *
+ * Совмещён с user.id: B24 узнаёт **клиента** по user.id, а **сессии** — по chat.id.
+ * Разные chat.id'ы для одного user.id порождают разные сессии, **все прикреплённые
+ * к одному лиду** клиента (через CRM_FORWARD).
+ *
+ * См. ADR `2026-05-26-ig-comments-attach-to-open-entity.md`.
+ */
+export function buildI2crmChatId(
 	channel: I2crmChannel,
 	clientId: string | number,
 	mediaId?: string | number | null,
@@ -61,6 +81,18 @@ export function buildI2crmUserKey(
 		return `i2crm_ig_${clientId}_c${mediaId}`;
 	}
 	return `i2crm_ig_${clientId}`;
+}
+
+/**
+ * @deprecated Используй buildI2crmUserId + buildI2crmChatId раздельно.
+ * Оставлено для обратной совместимости тестов до миграции.
+ */
+export function buildI2crmUserKey(
+	channel: I2crmChannel,
+	clientId: string | number,
+	mediaId?: string | number | null,
+): string {
+	return buildI2crmChatId(channel, clientId, mediaId);
 }
 
 /**

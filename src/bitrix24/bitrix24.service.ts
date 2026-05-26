@@ -27,7 +27,8 @@ import type { Instance, User } from "@prisma/client";
 import { mask } from "../common/mask";
 import {
 	validateI2crmIncoming,
-	buildI2crmUserKey,
+	buildI2crmUserId,
+	buildI2crmChatId,
 	envKeyForI2crmLine,
 	buildI2crmFinalText,
 	extractI2crmMediaFile,
@@ -3284,18 +3285,19 @@ export class Bitrix24Service extends BaseAdapter<
 		const quotedNote = !isComment ? formatI2crmQuoted(payload?.quoted_message) : "";
 		const finalText = buildI2crmFinalText({ channel, text, igPostUrl, quotedNote });
 
-		// A2: для instcom используем mediaId в составе chat/user.id — каждый
-		// пост получает свою сессию и свой лид B24. Для instdir один user.id
-		// на клиента (Direct один на клиента). Все лиды клиента (под разными
-		// постами) подвязываются к одному контакту через UF_CRM_IG_CHAT_ID и
-		// orphan-link / backfillIgUfFields.
+		// user.id и chat.id разделены (см. ADR 2026-05-26-ig-comments-attach-to-open-entity):
+		// - user.id одинаковый для всех постов и каналов IG клиента → B24 узнаёт «тот же
+		//   клиент» → CRM_FORWARD=Y прикрепляет сессию к существующему открытому лиду/сделке
+		// - chat.id разный per (клиент × пост) для instcom → отдельная сессия у каждого поста,
+		//   но прикреплена к одному лиду
 		const mediaIdForKey = isComment ? String(payload?.media_id || "") : "";
-		const userKey = buildI2crmUserKey(channel, clientId, mediaIdForKey);
+		const userId = buildI2crmUserId(channel, clientId);
+		const chatId = buildI2crmChatId(channel, clientId, mediaIdForKey);
 		const ts = datetime ? Math.floor(new Date(datetime).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
 		const messagePayload: any = {
 			user: {
-				id: userKey,
+				id: userId,
 				name: clientName,
 				url: username ? `https://instagram.com/${username}` : undefined,
 			},
@@ -3305,7 +3307,7 @@ export class Bitrix24Service extends BaseAdapter<
 				text: finalText,
 			},
 			chat: {
-				id: userKey,
+				id: chatId,
 				name: clientName,
 				// B24 рендерит chat.url как «Ссылка на исходный пост: <url>» в чате
 				// открытой линии. Это корректно только для IG-comment — есть реальный

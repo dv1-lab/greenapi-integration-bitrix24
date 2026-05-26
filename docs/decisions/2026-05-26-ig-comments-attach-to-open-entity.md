@@ -131,37 +131,58 @@ filter: {
   прийти в timeline, не в Open Line
 - Тесты `src/common/i2crm-payload.spec.ts` — обновить ожидания chat.id
 
+## Решение — простое, через стандартный B24
+
+**Не нужно отключать `CRM_CREATE` или писать сложный lookup-сервис.**
+
+Дмитрий 2026-05-26 указал что раньше работало стандартными средствами
+Битрикса. Перечитал код — нашёл причину: в нашем `handleI2crmIncoming`
+**`user.id` и `chat.id` равны** (оба = `i2crm_ig_<c>_c<media>`). B24
+видит «новый user.id» при каждом посте → думает «это новый клиент» →
+создаёт новый лид.
+
+**Фикс:** разделить `user.id` (= клиент) и `chat.id` (= сессия):
+
+```ts
+// БЫЛО
+user: { id: userKey, ... },   // = "i2crm_ig_<c>_c<media>"  ← разный per пост
+chat: { id: userKey, ... },   // = тот же
+
+// СТАЛО
+user: { id: `i2crm_ig_${clientId}`, ... },           // ← одинаковый для всех постов
+chat: { id: `i2crm_ig_${clientId}_c${mediaId}`, ... }, // ← разный per пост
+```
+
+Тогда B24 распознаёт:
+- **Тот же user.id** → тот же клиент в openline → CRM_FORWARD=Y находит
+  открытый лид/сделку
+- **Другой chat.id** → новая сессия (open line) → но прикрепляется
+  к существующему лиду (CRM_FORWARD)
+- Cross-deal duplication (коммент в timeline всех сделок) — это
+  стандартное поведение B24 при множестве открытых сделок у контакта
+
+То же для Direct: `user.id` = `i2crm_ig_<c>` (одинаковый с Comments).
+`chat.id` Direct = `i2crm_ig_<c>` (плоский). При `!`-префиксе создаём
+новый chat.id в Direct, но user.id остаётся — B24 узнаёт клиента.
+
 ## Статус
 
 - [x] Дмитрий зафиксировал правило (2026-05-26)
 - [x] PRODUCT_RULES.md обновлён
 - [x] ADR создан (этот документ)
-- [x] Ответы на open questions получены (см. секцию выше)
-- [ ] **Реализация в `handleI2crmIncoming`** — task #66:
-  - Перехват перед `imconnector.send.messages`
-  - Lookup открытых сделок (`crm.deal.list` + STAGE_SEMANTIC_ID=P)
-  - Lookup открытых лидов (`crm.lead.list` + STATUS_SEMANTIC_ID=P)
-  - Логика приоритета: сделка(и) → лид → новый лид
-  - **Сложная часть:** B24 при `imconnector.send.messages` всегда
-    создаёт лид через `CRM_CREATE=lead`. Нужно либо:
-    - (a) **disable CRM_CREATE** для линии 22 (через config) +
-      post-creation вручную через `crm.lead.add` если нужно;
-    - (b) использовать **`imopenlines.session.transfer`** для
-      перепривязки сессии после создания
-    - (c) **удалять auto-созданный лид** + перепривязывать сессию
-- [ ] **Реализация `!`-Direct** — `replyAsDirect` сейчас отправляет в
-  Direct без сессии в линии 18. Нужно: после `/target/feedback`
-  отправить `imconnector.send.messages` в линию 18 + auto-take этому
-  оператору через `imopenlines.session.operator.set`
-- [ ] **chat.id переосмыслить**: оставляем A2 формат
-  `i2crm_ig_<c>_c<media>` для каждого поста (новая сессия), но привязка
-  к лиду — через post-processing
-- [ ] **timeline.comment.add** во все открытые сделки клиента
-  (cross-deal duplication)
-- [ ] Обновление документации (INSTAGRAM_FLOW §6, SEQUENCES §3,
-  OPEN_LINE_LIFECYCLE)
-- [ ] Обновление тестов `i2crm-payload.spec.ts` и `bitrix24.service.spec.ts`
-- [ ] Тестирование на боевой Insta-инстансе с реальным клиентом
+- [x] Ответы на open questions получены
+- [x] **Корректное решение найдено** — разделение user.id / chat.id
+- [ ] **Реализация (task #66)** — минимальное изменение:
+  1. `src/common/i2crm-payload.ts`:
+     - Новая `buildI2crmUserId(channel, clientId)` → `i2crm_ig_<c>`
+     - `buildI2crmChatId(channel, clientId, mediaId)` → `i2crm_ig_<c>_c<media>`
+       (для instcom) или `i2crm_ig_<c>` (для instdir)
+  2. `bitrix24.service.ts:handleI2crmIncoming`: использовать оба
+     при формировании messagePayload
+  3. `handleI2crmOutgoing`: обновить regex chat.id parsing для нового
+     формата (поддержать и старый, и новый)
+  4. Тесты `i2crm-payload.spec.ts` — обновить ожидания
+  5. Деплой + verify на реальном комментарии
 
 ## Связано
 

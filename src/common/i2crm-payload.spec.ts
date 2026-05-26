@@ -1,6 +1,8 @@
 import {
 	validateI2crmIncoming,
 	buildI2crmUserKey,
+	buildI2crmUserId,
+	buildI2crmChatId,
 	envKeyForI2crmLine,
 	buildI2crmFinalText,
 	extractI2crmMediaFile,
@@ -114,6 +116,73 @@ describe("buildI2crmUserKey", () => {
 		const a = buildI2crmUserKey("instcom", "555", "post-a");
 		const b = buildI2crmUserKey("instcom", "555", "post-b");
 		expect(a).not.toBe(b);
+	});
+});
+
+// =====================================================================
+// buildI2crmUserId (новое — 2026-05-26 ADR, user.id = клиент)
+// =====================================================================
+describe("buildI2crmUserId", () => {
+	it("Direct — без media: один user.id на клиента", () => {
+		expect(buildI2crmUserId("instdir", "123")).toBe("i2crm_ig_123");
+	});
+
+	it("Comment — тоже без media: тот же user.id что и для Direct", () => {
+		expect(buildI2crmUserId("instcom", "123")).toBe("i2crm_ig_123");
+	});
+
+	it("Direct и Comment одного клиента — одинаковый user.id (B24 узнаёт того же клиента)", () => {
+		expect(buildI2crmUserId("instdir", "555")).toBe(
+			buildI2crmUserId("instcom", "555"),
+		);
+	});
+
+	it("number client_id принимается", () => {
+		expect(buildI2crmUserId("instdir", 999)).toBe("i2crm_ig_999");
+	});
+});
+
+// =====================================================================
+// buildI2crmChatId (новое — 2026-05-26 ADR, chat.id = сессия per пост)
+// =====================================================================
+describe("buildI2crmChatId", () => {
+	it("Direct: client_id без media (одна сессия Direct на клиента)", () => {
+		expect(buildI2crmChatId("instdir", "123")).toBe("i2crm_ig_123");
+	});
+
+	it("Direct: media_id игнорируется", () => {
+		expect(buildI2crmChatId("instdir", "123", "media999")).toBe("i2crm_ig_123");
+	});
+
+	it("Comment с media: отдельная сессия per пост", () => {
+		expect(buildI2crmChatId("instcom", "123", "post-a")).toBe(
+			"i2crm_ig_123_cpost-a",
+		);
+		expect(buildI2crmChatId("instcom", "123", "post-b")).toBe(
+			"i2crm_ig_123_cpost-b",
+		);
+	});
+
+	it("Comment без media (необычный случай) → fallback на просто клиент", () => {
+		expect(buildI2crmChatId("instcom", "123")).toBe("i2crm_ig_123");
+		expect(buildI2crmChatId("instcom", "123", null)).toBe("i2crm_ig_123");
+	});
+
+	it("разные посты одного клиента → разные chat.id (отдельные сессии)", () => {
+		const a = buildI2crmChatId("instcom", "555", "post-a");
+		const b = buildI2crmChatId("instcom", "555", "post-b");
+		expect(a).not.toBe(b);
+	});
+
+	it("ключевая инвариантность ADR — chat.id отличается, но user.id одинаков", () => {
+		const userIdA = buildI2crmUserId("instcom", "555");
+		const userIdB = buildI2crmUserId("instcom", "555");
+		const chatIdA = buildI2crmChatId("instcom", "555", "post-a");
+		const chatIdB = buildI2crmChatId("instcom", "555", "post-b");
+		expect(userIdA).toBe(userIdB); // один клиент
+		expect(chatIdA).not.toBe(chatIdB); // разные сессии
+		// B24 при таком payload узнаёт клиента (user.id) и через CRM_FORWARD
+		// прикрепляет новую сессию (chat.id) к существующему открытому лиду.
 	});
 });
 
