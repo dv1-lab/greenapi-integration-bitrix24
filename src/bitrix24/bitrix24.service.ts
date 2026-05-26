@@ -3641,19 +3641,23 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 
 		try {
+			// FILE attach даёт большое полноразмерное превью в B24-чате
+			// (раньше использовался RICH_LINK — preview-картинка была слишком
+			// маленькой, оператору сложно опознать пост-источник коммента).
+			// Подвох: og:image от IG hard-coded 640x640 cropped — это потолок
+			// без Graph API (см. memory ig_og_fetch_trick / b24_event_gap).
+			// FILE раскрывает доступные 640x640 на максимум пространства.
 			const attach = [
 				{
-					RICH_LINK: {
-						LINK: postUrl,
-						NAME: "Пост клиента в Instagram",
-						PREVIEW: url,
-						DESC: "Комментарий клиента к этому посту",
+					FILE: {
+						LINK: url,
+						NAME: "instagram_post.jpg",
 					},
 				},
 			];
 			await this.callBitrix24Method(portalDomain, "im.message.add", {
 				DIALOG_ID: `chat${b24ChatId}`,
-				MESSAGE: "🖼 Пост клиента",
+				MESSAGE: `🖼 Пост клиента: ${postUrl}`,
 				ATTACH: attach,
 				SYSTEM: "Y",
 			});
