@@ -8,6 +8,50 @@
 
 ---
 
+## 2026-05-26 · Orphan-лиды от native B24 OpenLine UI — `backfillSendLead` не дёргается
+
+- **Симптом**: менеджер пишет клиенту через native B24 OpenLine UI (например,
+  кнопкой в карточке клиента или из Контакт-Центра, не из нашего widget'а
+  Social Connector) → B24 создаёт лид с `TITLE = "<chat_id> - <CHANNEL>
+  <phone>"`, `CONTACT_ID = null`, `UF_CRM_*_CHAT_ID` пусто. Лид не привязан
+  к существующему контакту клиента, открытые сделки/лиды не учитываются.
+  Пример: лид [#361428](https://1begovoy.bitrix24.ru/crm/lead/details/361428/)
+  для Орлова Владислава, MAX-чат `32656502`.
+- **Корень**: `backfillSendLead` решает ту же задачу (CONTACT_ID +
+  UF_CRM_*_CHAT_ID + закрытие как «Дубликат» при openEntity), но вызывается
+  **только** из widget/send-пути в `bitrix24.service.ts:2454`. Для native
+  B24 UI наш adapter widget не дёргается — в логах ни одной строки
+  `[widget]`, `backfillSendLead`, `ensureOpenLeadForPhone`.
+- **Фикс** (sha TBD после деплоя): подписаться на `ONCRMLEADADD` (уже
+  подписан для Customer-360 sync) и в начале `handleB24CrmEvent` для
+  `entity=lead, action=added` запускать `_maybeLinkOrphanLead`:
+  - Проверка orphan-ности (нет CONTACT_ID + нет UF_CRM_*_CHAT_ID)
+  - Парс TITLE → chat.id + канал + phone
+  - Поиск контакта по UF_CRM_*_CHAT_ID, fallback по phone
+  - Если контакт найден → `crm.lead.update` с CONTACT_ID + UF + закрытие
+    как «Дубликат» если есть openEntity (симметрично backfillSendLead)
+  - Если контакт не найден → лог + оставить orphan (это реально новый клиент)
+- **Постфактум-починка**: `POST /webhooks/internal/relink-orphan-lead` с
+  `{"leadId": <ID>}` + `X-Hint-Secret`.
+- **Затронутые файлы**:
+  - `src/bitrix24/bitrix24.service.ts` — методы `_parseOrphanLeadTitle`,
+    `_findOpenEntityForContact`, `_maybeLinkOrphanLead`, `relinkOrphanLeadById`,
+    вызов в `handleB24CrmEvent`
+  - `src/webhooks/webhooks.controller.ts` — `POST /internal/relink-orphan-lead`
+- **Что пересломать рискованно**:
+  - Этот блок выполняется **до** Customer-360 sync — если внутри упадёт
+    с throw, sync не пройдёт. Поэтому весь вызов в try/catch с warn.
+  - Если `crm.lead.update` не идёмпотентен (повторный ONCRMLEADADD за тот же
+    лид) — фильтр `hasContact + hasChatIdUf` обрывает на «уже залинкован».
+- **Verify**: после деплоя — `POST /webhooks/internal/relink-orphan-lead`
+  с `{"leadId": 361428}` → ожидаем `linked: true`. Сутки наблюдения логов
+  `orphan-link lead`.
+- **Связано**: ADR `decisions/2026-05-26-orphan-lead-linker.md`,
+  PRODUCT_RULES.md §1.1, regression «IG Comments user.id == chat.id»
+  (симметрия — incoming side).
+
+---
+
 ## 2026-05-26 · IG Comments плодили лиды — `user.id == chat.id` в imconnector.send.messages
 
 - **Симптом**: каждый IG-коммент клиента под новым постом создавал

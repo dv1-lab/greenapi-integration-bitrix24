@@ -1391,6 +1391,22 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		if (!snap) return { ok: false, reason: "snapshot empty" };
 
+		// Orphan-lead linker (task #68 / ADR 2026-05-26-orphan-lead-linker):
+		// Когда менеджер пишет клиенту через native B24 OpenLine UI (не наш
+		// widget/send) — B24 создаёт лид без CONTACT_ID и без UF_CRM_*_CHAT_ID.
+		// Имя лида = chat.id мессенджера, к существующему контакту не привязано.
+		// Пример: лид #361428 — `32656502 - MAX 79584983354`, CONTACT_ID=null.
+		// `backfillSendLead` решает ту же проблему, но только для widget-пути.
+		// Здесь — приземляем orphan через ONCRMLEADADD. Errors внутри не должны
+		// сорвать дальнейший Customer-360 sync.
+		if (entity === "lead" && action === "added") {
+			try {
+				await this._maybeLinkOrphanLead(portalDomain, entityId, snap);
+			} catch (e: any) {
+				this.logger.warn(`orphan-link lead ${entityId} failed: ${e?.message || e}`);
+			}
+		}
+
 		// Резолвим customer
 		const phone = this._pickFirstPhone(snap);
 		const email = this._pickFirstEmail(snap);
@@ -2562,6 +2578,234 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		this.logger.warn(`backfillSendLead: no matching lead found after 6 attempts (userKey=${userKey}, chatId=${chatId})`);
 		return {};
+	}
+
+	// ===== Orphan-lead linker (task #68) =================================
+	// Используется только в ONCRMLEADADD path. Когда менеджер написал клиенту
+	// через native B24 OpenLine UI — B24 не знает про наши UF_CRM_*_CHAT_ID и
+	// создаёт лид без привязки к контакту. Сюда «достраиваем»: CONTACT_ID,
+	// UF_CRM_*_CHAT_ID, имя клиента, и если у клиента есть открытая
+	// сделка/лид — закрываем orphan как «Дубликат». Симметрично
+	// backfillSendLead, но входная точка — событие, не наш widget.
+
+	/** Маппинг канала из TITLE → UF-поле контакта. WhatsApp идёт по phone
+	 *  (своего UF_CRM_WA_CHAT_ID на портале 1begovoy.bitrix24.ru нет). */
+	private readonly orphanChannelChatIdUf: Record<string, string> = {
+		Telegram: "UF_CRM_TG_CHAT_ID",
+		MAX: "UF_CRM_MAX_CHAT_ID",
+		Instagram: "UF_CRM_IG_CHAT_ID",
+	};
+
+	/** Парс TITLE orphan-лида.
+	 *  Формат native B24: `<chat_id> - <CHANNEL> <phone?>` (например
+	 *  `32656502 - MAX 79584983354`). Возвращает null если pattern не подошёл —
+	 *  тогда orphan-link не запускается. */
+	private _parseOrphanLeadTitle(title: string): {
+		chatId: string;
+		channelLabel: "Telegram" | "MAX" | "Instagram" | "WhatsApp";
+		phoneFromTitle: string | null;
+	} | null {
+		if (!title) return null;
+		const t = title.trim();
+		// Уже-обработанные дубликаты не трогаем
+		if (t.startsWith("[Дубликат")) return null;
+		// chat_id может содержать буквы (sc_..., wa_..., tgbot_...)
+		const m = t.match(
+			/^([\w]+)\s*-\s*(MAX|Telegram|Instagram|WhatsApp|Whatsapp|TG|WA|IG)(?:\s+(\+?\d{6,16}))?/i,
+		);
+		if (!m) return null;
+		const [, chatId, rawChannel, rawPhone] = m;
+		const upper = rawChannel.toUpperCase();
+		let channelLabel: "Telegram" | "MAX" | "Instagram" | "WhatsApp";
+		if (upper === "MAX") channelLabel = "MAX";
+		else if (upper === "TELEGRAM" || upper === "TG") channelLabel = "Telegram";
+		else if (upper === "INSTAGRAM" || upper === "IG") channelLabel = "Instagram";
+		else channelLabel = "WhatsApp";
+		let phoneFromTitle: string | null = null;
+		if (rawPhone) {
+			const digits = rawPhone.replace(/\D/g, "");
+			if (digits.length >= 10) phoneFromTitle = "+" + digits;
+		}
+		return { chatId, channelLabel, phoneFromTitle };
+	}
+
+	/** Поиск открытой сущности у контакта: приоритет сделки, потом лиды.
+	 *  «Открытая» — CLOSED=N для сделок, STATUS_ID не в финальных для лидов.
+	 *  Себя в выдачу не возвращает — поиск идёт по CONTACT_ID, а сам orphan
+	 *  ещё без привязки. */
+	private async _findOpenEntityForContact(
+		portalDomain: string,
+		contactId: number,
+	): Promise<{ kind: "deal" | "lead"; id: number } | null> {
+		try {
+			const deals: any = await this.callBitrix24Method(
+				portalDomain,
+				"crm.deal.list",
+				{
+					filter: { CONTACT_ID: contactId, CLOSED: "N" },
+					select: ["ID"],
+					order: { DATE_CREATE: "DESC" },
+				},
+				undefined, 0, "customer360",
+			);
+			if (Array.isArray(deals) && deals.length > 0) {
+				return { kind: "deal", id: Number(deals[0].ID) };
+			}
+		} catch (e: any) {
+			this.logger.warn(`orphan-link deal.list contact=${contactId} failed: ${e?.message || e}`);
+		}
+		try {
+			const leads: any = await this.callBitrix24Method(
+				portalDomain,
+				"crm.lead.list",
+				{
+					filter: { CONTACT_ID: contactId, "!STATUS_ID": ["CONVERTED", "JUNK", "12"] },
+					select: ["ID"],
+					order: { DATE_CREATE: "DESC" },
+				},
+				undefined, 0, "customer360",
+			);
+			if (Array.isArray(leads) && leads.length > 0) {
+				return { kind: "lead", id: Number(leads[0].ID) };
+			}
+		} catch (e: any) {
+			this.logger.warn(`orphan-link lead.list contact=${contactId} failed: ${e?.message || e}`);
+		}
+		return null;
+	}
+
+	/** Если лид orphan (нет CONTACT_ID + нет UF_CRM_*_CHAT_ID) и TITLE
+	 *  парсится — пробует достроить связи. Возвращает структуру решения. */
+	async _maybeLinkOrphanLead(
+		portalDomain: string,
+		leadId: number,
+		snap: any,
+	): Promise<{ linked: boolean; reason?: string; contactId?: number; openEntity?: { kind: "deal" | "lead"; id: number } }> {
+		const hasContact = snap?.CONTACT_ID && Number(snap.CONTACT_ID) > 0;
+		const hasChatIdUf = ["UF_CRM_TG_CHAT_ID", "UF_CRM_MAX_CHAT_ID", "UF_CRM_IG_CHAT_ID"]
+			.some((f) => String(snap?.[f] || "").trim());
+		if (hasContact && hasChatIdUf) {
+			return { linked: false, reason: "lead already linked" };
+		}
+		if (hasContact && !hasChatIdUf) {
+			// Контакт есть, но UF не проставлен — обычная widget-creation
+			// (backfillSendLead это уже сделал). Не наш кейс.
+			return { linked: false, reason: "contact set, not orphan" };
+		}
+
+		const parsed = this._parseOrphanLeadTitle(String(snap?.TITLE || ""));
+		if (!parsed) return { linked: false, reason: "title pattern not matched" };
+		const { chatId, channelLabel, phoneFromTitle } = parsed;
+		const chatIdUf = this.orphanChannelChatIdUf[channelLabel];
+
+		// 1) Поиск контакта по UF_CRM_*_CHAT_ID
+		let contact: any = null;
+		if (chatIdUf) {
+			try {
+				const found: any = await this.callBitrix24Method(
+					portalDomain,
+					"crm.contact.list",
+					{
+						filter: { [`=${chatIdUf}`]: chatId },
+						select: ["ID", "NAME", "LAST_NAME"],
+					},
+					undefined, 0, "customer360",
+				);
+				if (Array.isArray(found) && found.length > 0) contact = found[0];
+			} catch (e: any) {
+				this.logger.warn(`orphan-link contact.list by ${chatIdUf}=${chatId} failed: ${e?.message || e}`);
+			}
+		}
+
+		// 2) Fallback по phone из TITLE (для WA — единственный путь)
+		if (!contact && phoneFromTitle) {
+			try {
+				const found: any = await this.callBitrix24Method(
+					portalDomain,
+					"crm.contact.list",
+					{
+						filter: { PHONE: phoneFromTitle },
+						select: ["ID", "NAME", "LAST_NAME"],
+					},
+					undefined, 0, "customer360",
+				);
+				if (Array.isArray(found) && found.length > 0) contact = found[0];
+			} catch (e: any) {
+				this.logger.warn(`orphan-link contact.list by phone=${phoneFromTitle} failed: ${e?.message || e}`);
+			}
+		}
+
+		if (!contact) {
+			this.logger.info(
+				`orphan-link lead=${leadId} channel=${channelLabel} chatId=${chatId} phone=${phoneFromTitle || "—"}: no existing contact, leaving as new client`,
+			);
+			return { linked: false, reason: "no existing contact" };
+		}
+
+		const contactId = Number(contact.ID);
+		const openEntity = await this._findOpenEntityForContact(portalDomain, contactId);
+
+		const updateFields: Record<string, any> = { CONTACT_ID: contactId };
+		if (chatIdUf && !snap[chatIdUf]) updateFields[chatIdUf] = chatId;
+		if (!snap.UF_CRM_NF_YM_CLIENT_ID) updateFields.UF_CRM_NF_YM_CLIENT_ID = "-";
+		if (phoneFromTitle && !(Array.isArray(snap.PHONE) && snap.PHONE.length > 0)) {
+			updateFields.PHONE = [{ VALUE: phoneFromTitle, VALUE_TYPE: "MOBILE" }];
+		}
+		// Имя в лиде: чаще = chat.id; если есть реальное у контакта — поправляем
+		const snapName = String(snap.NAME || "").trim();
+		if (contact.NAME && (!snapName || /^\+?\d+$/.test(snapName) || snapName === chatId)) {
+			updateFields.NAME = contact.NAME;
+			if (contact.LAST_NAME) updateFields.LAST_NAME = contact.LAST_NAME;
+		}
+		// Открытая сущность — закрываем orphan как «Дубликат» (STATUS_ID=12)
+		// и привязываем через UF_CRM_LEAD_ID на оригинал. Симметрично
+		// backfillSendLead.
+		if (openEntity) {
+			updateFields.STATUS_ID = "12";
+			if (openEntity.kind === "lead") {
+				updateFields.UF_CRM_LEAD_ID = openEntity.id;
+			}
+			const origTitle = String(snap.TITLE || "").trim();
+			const prefix = `[Дубликат → ${openEntity.kind} ${openEntity.id}]`;
+			if (!origTitle.startsWith("[Дубликат")) {
+				updateFields.TITLE = origTitle ? `${prefix} ${origTitle}` : prefix;
+			}
+		}
+
+		await this.callBitrix24Method(
+			portalDomain,
+			"crm.lead.update",
+			{ id: leadId, fields: updateFields },
+			undefined, 0, "customer360",
+		);
+		const action = openEntity
+			? `marked as duplicate of ${openEntity.kind} ${openEntity.id}`
+			: `CONTACT_ID=${contactId}`;
+		this.logger.info(
+			`orphan-link lead=${leadId} channel=${channelLabel} chatId=${chatId} → ${action} (${Object.keys(updateFields).join(",")})`,
+		);
+		return { linked: true, contactId, openEntity: openEntity || undefined };
+	}
+
+	/** Постфактум-обёртка над `_maybeLinkOrphanLead`. Сам резолвит portalDomain
+	 *  и читает snap лида. Используется REST-эндпоинтом /webhooks/internal/relink-orphan-lead
+	 *  для починки конкретных лидов (типа #361428). */
+	async relinkOrphanLeadById(
+		leadId: number,
+	): Promise<{ linked: boolean; reason?: string; contactId?: number; openEntity?: { kind: "deal" | "lead"; id: number } }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { linked: false, reason: "no authorized portal" };
+		let snap: any;
+		try {
+			snap = await this.callBitrix24Method(
+				portalDomain, "crm.lead.get", { id: leadId }, undefined, 0, "customer360",
+			);
+		} catch (e: any) {
+			return { linked: false, reason: `crm.lead.get failed: ${e?.message || e}` };
+		}
+		if (!snap) return { linked: false, reason: "lead not found" };
+		return this._maybeLinkOrphanLead(portalDomain, leadId, snap);
 	}
 
 	async sendToPlatform(message: Bitrix24PlatformMessage, instance: Instance & { user: User }): Promise<void> {

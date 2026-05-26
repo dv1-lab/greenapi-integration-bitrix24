@@ -549,6 +549,34 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: запустить orphan-lead linker на конкретном лиде.
+	// Используется для постфактум-починки лидов созданных через native
+	// B24 OpenLine UI (см. task #68 / ADR 2026-05-26-orphan-lead-linker).
+	// Сам код тот же что в ONCRMLEADADD path, но входная точка — REST.
+	// Auth: X-Hint-Secret.
+	@Post("internal/relink-orphan-lead")
+	@HttpCode(HttpStatus.OK)
+	async relinkOrphanLead(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const leadId = Number((req.body || {}).leadId);
+		if (!leadId) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "leadId required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.relinkOrphanLeadById(leadId);
+			res.json({ leadId, ...result });
+		} catch (error: any) {
+			this.logger.error(`relink-orphan-lead failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: одноразово регистрирует все CRM event.bind через
 	// OAuth-токен adapter'а. Идемпотентно. Auth: X-Hint-Secret.
 	@Post("internal/register-b24-events")
