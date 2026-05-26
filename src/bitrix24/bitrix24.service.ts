@@ -1300,6 +1300,7 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const events = [
 			"ONCRMLEADADD", "ONCRMLEADUPDATE",
+			"ONCRMLEADCONVERT",
 			"ONCRMCONTACTADD", "ONCRMCONTACTUPDATE",
 			"ONCRMDEALADD", "ONCRMDEALUPDATE",
 		];
@@ -1380,6 +1381,24 @@ export class Bitrix24Service extends BaseAdapter<
 		else if (ev.startsWith("ONCRMCONTACT")) entity = "contact";
 		else if (ev.startsWith("ONCRMDEAL")) entity = "deal";
 		else return { ok: false, reason: `unknown event ${ev}` };
+
+		// ONCRMLEADCONVERT — отдельная ветка (task #69). B24 шлёт это событие
+		// при конверсии лида в контакт/сделку/компанию. Нам нужно перенести
+		// UF_CRM_TG/MAX/IG_CHAT_ID с лида на созданный/привязанный контакт —
+		// иначе chatId «теряется» после конверсии и при следующем входящем
+		// контакт по UF не находится → плодятся дубли. Customer-360 KBD-лента
+		// получит обновление через сопутствующий ONCRMLEADUPDATE (B24 шлёт
+		// его при изменении STATUS_ID=CONVERTED).
+		if (ev === "ONCRMLEADCONVERT") {
+			try {
+				const result = await this._propagateChatIdsOnConvert(portalDomain, entityId);
+				return { ok: true, reason: result.reason || `convert: ${result.action || "no-op"}` };
+			} catch (e: any) {
+				this.logger.warn(`convert propagate failed lead=${entityId}: ${e?.message || e}`);
+				return { ok: false, reason: `convert failed: ${e?.message || e}` };
+			}
+		}
+
 		action = ev.endsWith("ADD") ? "added" : "updated";
 
 		// Снимок entity для phone/email/title/stage
@@ -2810,6 +2829,87 @@ export class Bitrix24Service extends BaseAdapter<
 			`orphan-link lead=${leadId} channel=${channelLabel} chatId=${chatId} → ${action} (${Object.keys(updateFields).join(",")})`,
 		);
 		return { linked: true, contactId, openEntity: openEntity || undefined };
+	}
+
+	// ===== ONCRMLEADCONVERT propagator (task #69) =========================
+	// При конверсии лида в контакт B24 сам контакт UF не наследует —
+	// поэтому копируем UF_CRM_TG/MAX/IG_CHAT_ID с лида на новый контакт
+	// если соответствующее поле на контакте пустое.
+
+	/** Переносит chat-id поля с лида (после конверсии) на привязанный контакт.
+	 *  - Читает свежий snap лида.
+	 *  - Если у лида нет CONTACT_ID → нечего обновлять (лид сконвертился в
+	 *    сделку/компанию без контакта, или ещё не привязался).
+	 *  - Для каждого из 3 UF (TG/MAX/IG): если на лиде значение есть, а на
+	 *    контакте пусто — `crm.contact.update`.
+	 *  - Идемпотентно: повторный CONVERT не перетирает существующее значение
+	 *    на контакте. */
+	async _propagateChatIdsOnConvert(
+		portalDomain: string,
+		leadId: number,
+	): Promise<{ action: "propagated" | "no-op"; contactId?: number; copied?: string[]; reason?: string }> {
+		const leadSnap: any = await this.callBitrix24Method(
+			portalDomain, "crm.lead.get",
+			{ id: leadId }, undefined, 0, "customer360",
+		);
+		if (!leadSnap) return { action: "no-op", reason: "lead not found" };
+
+		const contactId = Number(leadSnap.CONTACT_ID || 0);
+		if (!contactId) {
+			this.logger.info(`convert lead=${leadId}: no CONTACT_ID, nothing to propagate`);
+			return { action: "no-op", reason: "lead has no CONTACT_ID" };
+		}
+
+		const ufFields = ["UF_CRM_TG_CHAT_ID", "UF_CRM_MAX_CHAT_ID", "UF_CRM_IG_CHAT_ID"];
+		const leadValues: Record<string, string> = {};
+		for (const f of ufFields) {
+			const v = String(leadSnap[f] || "").trim();
+			if (v) leadValues[f] = v;
+		}
+		if (Object.keys(leadValues).length === 0) {
+			return { action: "no-op", contactId, reason: "lead has no chat-id UF set" };
+		}
+
+		const contactSnap: any = await this.callBitrix24Method(
+			portalDomain, "crm.contact.get",
+			{ id: contactId }, undefined, 0, "customer360",
+		);
+		if (!contactSnap) {
+			this.logger.warn(`convert lead=${leadId}: contact ${contactId} not found`);
+			return { action: "no-op", contactId, reason: "contact not found" };
+		}
+
+		const fieldsToUpdate: Record<string, any> = {};
+		const copied: string[] = [];
+		for (const [f, v] of Object.entries(leadValues)) {
+			const existing = String(contactSnap[f] || "").trim();
+			if (!existing) {
+				fieldsToUpdate[f] = v;
+				copied.push(`${f}=${v}`);
+			}
+		}
+		if (Object.keys(fieldsToUpdate).length === 0) {
+			this.logger.info(`convert lead=${leadId} → contact=${contactId}: all UF already set, idempotent`);
+			return { action: "no-op", contactId, reason: "contact UF already set" };
+		}
+
+		await this.callBitrix24Method(
+			portalDomain, "crm.contact.update",
+			{ id: contactId, fields: fieldsToUpdate }, undefined, 0, "customer360",
+		);
+		this.logger.info(`convert lead=${leadId} → contact=${contactId}: propagated ${copied.join(", ")}`);
+		return { action: "propagated", contactId, copied };
+	}
+
+	/** Постфактум-обёртка для REST: вручную запустить propagate для конкретного
+	 *  лида (полезно для починки кейсов произошедших до деплоя listener'а). */
+	async propagateChatIdsByLeadId(
+		leadId: number,
+	): Promise<{ action: "propagated" | "no-op"; contactId?: number; copied?: string[]; reason?: string }> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { action: "no-op", reason: "no authorized portal" };
+		return this._propagateChatIdsOnConvert(portalDomain, leadId);
 	}
 
 	/** Постфактум-обёртка над `_maybeLinkOrphanLead`. Сам резолвит portalDomain

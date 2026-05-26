@@ -577,6 +577,33 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: постфактум-перенос UF_CRM_*_CHAT_ID с уже
+	// сконвертированного лида на привязанный контакт (task #69 / ADR
+	// 2026-05-26-convert-propagate-chat-ids). Используется для починки
+	// кейсов произошедших до деплоя listener'а. Auth: X-Hint-Secret.
+	@Post("internal/propagate-chat-ids")
+	@HttpCode(HttpStatus.OK)
+	async propagateChatIds(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const leadId = Number((req.body || {}).leadId);
+		if (!leadId) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "leadId required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.propagateChatIdsByLeadId(leadId);
+			res.json({ leadId, ...result });
+		} catch (error: any) {
+			this.logger.error(`propagate-chat-ids failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: одноразово регистрирует все CRM event.bind через
 	// OAuth-токен adapter'а. Идемпотентно. Auth: X-Hint-Secret.
 	@Post("internal/register-b24-events")

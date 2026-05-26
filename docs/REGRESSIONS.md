@@ -8,6 +8,49 @@
 
 ---
 
+## 2026-05-26 · Конверсия лида теряет `UF_CRM_*_CHAT_ID` — chatId на контакт не переносится
+
+- **Симптом (потенциальный)**: после ручной конверсии лида в контакт в B24,
+  на новом контакте `UF_CRM_TG_CHAT_ID` / `UF_CRM_MAX_CHAT_ID` /
+  `UF_CRM_IG_CHAT_ID` пусты, хотя на лиде они были заполнены. Следующее
+  входящее в TG/MAX/IG не находит контакт по UF → создаётся дубль контакта
+  или новый orphan-лид.
+- **Корень**: B24 при конверсии лида в контакт **не наследует** кастомные
+  UF поля — стандарт платформы. `backfillSendLead` и `_maybeLinkOrphanLead`
+  ставят UF на лиде, не на контакте (контакт обновляется только в
+  `ensureLeadForPhone` если контакт уже существовал до отправки).
+- **Фикс** (sha TBD): listener на `ONCRMLEADCONVERT` через `event.bind`.
+  В `handleB24CrmEvent` отдельная ветка для `ev === "ONCRMLEADCONVERT"` →
+  `_propagateChatIdsOnConvert`:
+  - `crm.lead.get` → читаем CONTACT_ID + UF лида
+  - `crm.contact.get` → читаем какие UF уже стоят на контакте
+  - Для каждого UF: если на лиде есть И на контакте пусто → дописываем
+  - Идемпотентно (повторный CONVERT не перетирает существующее)
+- **Постфактум-починка**: `POST /webhooks/internal/propagate-chat-ids` с
+  `{"leadId": N}` + `X-Hint-Secret`.
+- **Затронутые файлы**:
+  - `src/bitrix24/bitrix24.service.ts` — методы `_propagateChatIdsOnConvert`,
+    `propagateChatIdsByLeadId`, новая ветка в `handleB24CrmEvent`, добавлен
+    `ONCRMLEADCONVERT` в `registerB24CrmEvents` events list
+  - `src/webhooks/webhooks.controller.ts` — `POST /internal/propagate-chat-ids`
+- **Что пересломать рискованно**:
+  - **Не перетирать** значение на контакте если оно уже стоит — наш фикс
+    не авторитетнее ручного merge.
+  - **Не подписываться на ONCRMCONTACTADD** как альтернатива — контакт
+    может быть создан без конверсии (вручную операторами), нечего переносить.
+  - После деплоя обязательно вызвать `POST /internal/register-b24-events`
+    чтобы новый `ONCRMLEADCONVERT` забиндился на портале.
+- **Verify**: ловим первую реальную конверсию в логах adapter (`convert
+  lead=... → contact=...: propagated UF_CRM_*_CHAT_ID=...`).
+- **Затрагивает каналы**: TG (4100621194, 4100624465), MAX (3100621187),
+  Instagram (i2crm), оба TG-бота. WhatsApp **не затронут** — phone B24
+  наследует автоматически.
+- **Связано**: ADR `decisions/2026-05-26-convert-propagate-chat-ids.md`,
+  ADR `decisions/2026-05-26-orphan-lead-linker.md` (родственный listener
+  для ONCRMLEADADD).
+
+---
+
 ## 2026-05-26 · Orphan-лиды от native B24 OpenLine UI — `backfillSendLead` не дёргается
 
 - **Симптом**: менеджер пишет клиенту через native B24 OpenLine UI (например,
