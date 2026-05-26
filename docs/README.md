@@ -172,6 +172,14 @@ recovery, нужно знать на случай если меня нет
 
 → [`PERFORMANCE.md`](./PERFORMANCE.md) — latency/error rate metrics + /health/metrics
 
+→ [`legal/152-FZ.md`](./legal/152-FZ.md) — обработка ПД (152-ФЗ + GDPR compliance draft)
+
+→ [`legal/SLA_TEMPLATE.md`](./legal/SLA_TEMPLATE.md) — SLA шаблон для партнёров
+
+→ [`DEVELOPER_PORTAL.md`](./DEVELOPER_PORTAL.md) — Public API для внешних разработчиков
+
+→ [`STATUS_PAGE.md`](./STATUS_PAGE.md) — status.9wb.ru через Uptime Kuma
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
 → TODO: `PERFORMANCE.md` (P2)
@@ -205,7 +213,13 @@ docs/
 ├── 📡 MONITORING.md              — что-кому-куда алертит
 ├── 🌐 OPENAPI.md                 — Swagger UI / OpenAPI spec
 ├── ⚡ PERFORMANCE.md              — latency/error metrics
+├── 🌍 DEVELOPER_PORTAL.md        — Public API для партнёров (draft)
+├── 🔋 STATUS_PAGE.md             — status.9wb.ru архитектура
 ├── 🧪 TESTING.md                 — структура тестов
+│
+├── ⚖️ legal/
+│   ├── 152-FZ.md                — обработка ПД (152-ФЗ + GDPR)
+│   └── SLA_TEMPLATE.md          — SLA для партнёров
 │
 ├── 💡 decisions/                 — ADR
 │   ├── README.md                   формат + правила
