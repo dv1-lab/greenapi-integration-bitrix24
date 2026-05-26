@@ -151,6 +151,34 @@ adapter превращает webhook в сообщение открытой ли
    `is_self_message`. **Только MAX/Telegram** (WA — путь `outgoingAPIMessage…`).
 4. **Статусы** — `outgoingMessageStatus` → `imconnector.send.status.delivery`.
 
+### 6.1. Резолв `phone → chatId` в `widget/send` для TG/MAX
+
+WA шлёт по `<phone>@c.us` напрямую — phone и есть идентификатор. Для **TG/MAX**
+адаптер не знает chatId заранее (мессенджеры скрывают phone клиента). В
+`widget.controller.ts` четыре приоритета резолва — берётся первый что сработал:
+
+| # | Источник | Когда используется | Что делает |
+|---|---|---|---|
+| 1 | `chatId` от фронта | Виджет нашёл chatId в B24 open-line привязке (повторная отправка тому же клиенту, у которого уже была переписка) | Используем напрямую, плюс `UPSERT` в локальный кеш `maxContact` (для будущих отправок этого же phone) |
+| 2 | `@username` от оператора | Оператор знает Telegram/MAX-ник клиента, ввёл в виджет | `chatId = <username>@c.us` — Green API принимает оба shard'а. Обходит phone-privacy клиента |
+| 3 | Локальный кеш `maxContact` | Phone уже резолвился раньше (приоритет 1 или 4) | `SELECT chatId FROM maxContact WHERE idInstance=? AND phone=?` |
+| 4 | `CheckAccount` у Green API | Холодный phone, никогда не отправляли, нет username | `POST /CheckAccount` с phoneNumber. Резолвит **только** если phone в адресной книге аккаунта магазина ИЛИ клиент в privacy «Кто может найти меня по номеру» = Все. Если ОК → сохраняем в `maxContact` и шлём. Если 404 → пользователю hint «добавь номер в адресную книгу аккаунта <number>» |
+
+После успешной отправки `mirrorToBitrix` дописывает `UF_CRM_TG_CHAT_ID` /
+`UF_CRM_MAX_CHAT_ID` в **B24-карточку контакта** клиента — следующая отправка
+с фронта уже подхватит chatId по приоритету 1 (виджет читает UF из B24).
+
+**Типовые сценарии:**
+
+- **Был входящий → отвечаем через виджет**: приоритет 1, chatId уже в B24.
+- **Холодный лид с сайта, phone есть, клиент в нашей адресной книге**: приоритет 4, CheckAccount резолвит, кешируется.
+- **Холодный лид, phone не в адресной книге, без username**: приоритет 4 даёт 404 — оператор видит hint про добавление номера в аккаунт магазина либо вводит `@username`.
+- **Massовая загрузка контактов при подключении нового инстанса** — отдельная задача (#64): нужен `addContact` от Green API, сейчас он 404. Workaround — ручной импорт через телефон/Telegram Web. См. memory `[[greenapi-addcontact-pending]]`.
+
+`maxContact` (название историческое, таблица одна на оба провайдера) — таблица
+в Prisma schema adapter'а, ключ `(idInstance, phone)` → `chatId`. Сбрасывается
+только при ротации MySQL volume.
+
 ---
 
 ## 7. wa-tg-bridge
