@@ -375,3 +375,38 @@ docker logs source-adapter-1 --since 30m 2>&1 | grep -iE "i2crm|target/feedback|
 imconnector.status CONNECTOR=social_connector LINE=18   (или 22)
 → должно быть CONFIGURED:true, STATUS:true
 ```
+
+---
+
+## 12. Режим подключения i2crm: Прямой / Официальный / Гибридный
+
+Уточнено i2crm support 2026-05-26 (Бахром Масаидов, ответ на задачи #32+#40).
+
+| Режим | Транспорт | Reply native | Media URL отдельно |
+|---|---|---|---|
+| **Прямой** | Cookies / private IG API | ✅ Через `message_id=<external_id>` в `/target/feedback` | TBD |
+| **Официальный** ← **мы здесь** | Meta Messenger Platform / IG Messaging API (бизнес-аккаунт) | ❌ Только text без mention | ❌ Только URL поста в `src`, без media URL |
+| **Гибридный** | Mix | ❌ Только text без mention | TBD |
+
+**Что это значит для кода:**
+
+- **`handleI2crmOutgoing` IG-Comment** (reply на коммент клиента) — работает
+  через `/target/feedback` `type=comment` + `comment_id`. **Не зависит от
+  режима**, потому что reply на коммент — это коммент на коммент в треде,
+  не Direct message reply.
+
+- **`handleI2crmOutgoing` IG-Direct reply** на конкретное сообщение — на
+  Официальном режиме **невозможно** (limitation Meta, не i2crm). Митigация:
+  `formatI2crmQuoted` в `src/common/i2crm-payload.ts` — добавляет в текст
+  префикс «↩️ В ответ на ...» (см. также memory `[[ig_operator_reply_cheatsheet]]`).
+
+- **Превью поста** (RICH_LINK / pinned thumb в B24-чате) — получаем через
+  `og:image` scraping с UA `facebookexternalhit` (см. `src/common/instagram-og.ts`,
+  memory `[[ig_og_fetch_trick]]`). Это даёт 640×640 cropped версию. Для
+  оригинала 1080×1080 нужен FB Graph API (#39, заблокирован app review).
+
+**Feature requests к i2crm 26.05.2026** (зафиксированы Бахромом, ETA нет):
+1. Отдельная выгрузка `media_url` (URL изображения/видео поста) при
+   incoming comment'е (сейчас только `src` = URL поста)
+2. Проксирование `reply_to.mid` через Public API → Meta Graph API
+   (если Meta technically разрешит для Official mode)
