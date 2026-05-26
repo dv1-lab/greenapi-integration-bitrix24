@@ -2698,7 +2698,15 @@ export class Bitrix24Service extends BaseAdapter<
 		const { chatId, channelLabel, phoneFromTitle } = parsed;
 		const chatIdUf = this.orphanChannelChatIdUf[channelLabel];
 
-		// 1) Поиск контакта по UF_CRM_*_CHAT_ID
+		// 1) Поиск контакта по UF_CRM_*_CHAT_ID.
+		//
+		// Боевая проверка #361428 26.05: на портале 1begovoy.bitrix24.ru
+		// встречаются legacy-коллизии — несколько контактов с одинаковым
+		// UF_CRM_MAX_CHAT_ID (видимо, marker массово проставлялся ранее).
+		// Без защиты от коллизии слепое `[0]` могло привязать orphan
+		// к чужому клиенту. Поэтому: сортируем DESC по ID (свежий вверху),
+		// если найдено >1 — это коллизия, не доверяем UF, переходим
+		// к phone-fallback. Лог WARN для аналитики.
 		let contact: any = null;
 		if (chatIdUf) {
 			try {
@@ -2708,16 +2716,26 @@ export class Bitrix24Service extends BaseAdapter<
 					{
 						filter: { [`=${chatIdUf}`]: chatId },
 						select: ["ID", "NAME", "LAST_NAME"],
+						order: { ID: "DESC" },
 					},
 					undefined, 0, "customer360",
 				);
-				if (Array.isArray(found) && found.length > 0) contact = found[0];
+				if (Array.isArray(found) && found.length === 1) {
+					contact = found[0];
+				} else if (Array.isArray(found) && found.length > 1) {
+					this.logger.warn(
+						`orphan-link collision: ${found.length} contacts share ${chatIdUf}=${chatId}, falling back to phone`,
+					);
+				}
 			} catch (e: any) {
 				this.logger.warn(`orphan-link contact.list by ${chatIdUf}=${chatId} failed: ${e?.message || e}`);
 			}
 		}
 
-		// 2) Fallback по phone из TITLE (для WA — единственный путь)
+		// 2) Fallback по phone из TITLE (для WA — единственный путь).
+		// На phone полагаемся только если ровно один контакт. >1 = коллизия
+		// (два клиента с одним номером — кто-то ошибся при заведении),
+		// без human-judgement не угадаем нужный.
 		if (!contact && phoneFromTitle) {
 			try {
 				const found: any = await this.callBitrix24Method(
@@ -2726,10 +2744,17 @@ export class Bitrix24Service extends BaseAdapter<
 					{
 						filter: { PHONE: phoneFromTitle },
 						select: ["ID", "NAME", "LAST_NAME"],
+						order: { ID: "DESC" },
 					},
 					undefined, 0, "customer360",
 				);
-				if (Array.isArray(found) && found.length > 0) contact = found[0];
+				if (Array.isArray(found) && found.length === 1) {
+					contact = found[0];
+				} else if (Array.isArray(found) && found.length > 1) {
+					this.logger.warn(
+						`orphan-link collision: ${found.length} contacts share phone=${phoneFromTitle}, leaving lead orphan`,
+					);
+				}
 			} catch (e: any) {
 				this.logger.warn(`orphan-link contact.list by phone=${phoneFromTitle} failed: ${e?.message || e}`);
 			}
