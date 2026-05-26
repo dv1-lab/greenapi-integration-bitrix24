@@ -65,6 +65,19 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. Н
 5. **Inbound webhook B24** (`BITRIX_WEBHOOK_URL` в `.env`) — **legacy**, кодом
    не используется. Не добавлять новые вызовы через него.
 
+6. **PNPM**, не npm. `package-lock.json` удалён 2026-05-26, lockfile = `pnpm-lock.yaml`.
+   `packageManager` pinned на `pnpm@10.33.2`. Dockerfile использует pnpm
+   `--frozen-lockfile`. **Любые transitive imports должны быть в `dependencies`**
+   — pnpm strict mode не hoist'ит. См. REGRESSIONS 2026-05-26.
+
+7. **Swagger UI** на `/api`: env `SWAGGER_USER` + `SWAGGER_PASSWORD` →
+   login-форма + cookie-сессия 30 дней. **Без env Swagger выключен**
+   (security-safe default). См. `docs/OPENAPI.md`.
+
+8. **Performance metrics** на `/health/metrics`: env `METRICS_TOKEN` →
+   header `X-Metrics-Token`. Возвращает p50/p95/p99/error rate per endpoint.
+   См. `docs/PERFORMANCE.md`.
+
 ## Деплой
 
 ```bash

@@ -8,6 +8,35 @@
 
 ---
 
+## 2026-05-26 · Docker build падает после миграции на pnpm (axios/express не явные deps + Buffer/Blob TS error)
+
+- **Симптом**: при деплое #52 (Swagger UI) docker build падает с:
+  - `Cannot find module 'axios'` в 5 файлах (oauth-callback, oauth, widget, webhooks, bitrix24.service)
+  - `Type 'Buffer<ArrayBufferLike>' is not assignable to type 'BlobPart'` в `bitrix24.service.ts:2825`
+- **Корень**:
+  1. Pnpm strict mode не hoist'ит transitive deps. NPM (старый Dockerfile)
+     hoist'ил `axios` и `express` как side-effect от `@green-api/...` →
+     импорты работали без явной dep в `package.json`. После миграции на
+     pnpm — раскрыто.
+  2. `@types/node` v22 сделал `Buffer<ArrayBufferLike>` (может быть
+     SharedArrayBuffer), Blob constructor требует `ArrayBufferView<ArrayBuffer>`.
+     Прошлые prod builds проходили на старых types — после `pnpm install` свежие.
+- **Фикс** (sha `dc82a8b`, `f6619aa`):
+  - Добавлены явные `axios@^1.16.1`, `express@^5.2.1` в dependencies
+  - `new Blob([buffer])` → `new Blob([new Uint8Array(buffer)])` (1 строка)
+    — Uint8Array шарит underlying memory, не копирует
+- **Verify**: `pnpm run build` локально без ошибок, docker build на сервере
+  прошёл, adapter работает с Swagger UI на `https://social.9wb.ru/api`.
+- **Что НЕ повторять**:
+  - При миграции `npm → pnpm` **всегда** аудит `node_modules` vs `package.json`:
+    `grep -rhoE 'from "[a-z@][^.][^"]*"' src/ | sort -u` → сверить.
+  - **Один lockfile** в репо. Если есть и `package-lock.json` и
+    `pnpm-lock.yaml` — один из них устаревает молча.
+  - При апгрейде `@types/node` major version — проверять Blob/Buffer и
+    другие nodeJS-Web типы.
+
+---
+
 ## 2026-05-26 · MySQL ротация: heredoc `<<'BASH'` не интерполирует переменные
 
 - **Симптом**: при ротации MySQL adapter password (task #26) — после
