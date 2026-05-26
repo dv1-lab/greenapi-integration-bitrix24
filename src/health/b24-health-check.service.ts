@@ -10,12 +10,15 @@ import { AlertsService } from "./alerts.service";
 //   1) social_connector присутствует в imconnector.list;
 //   2) на каждой Instance.bitrixLine коннектор CONFIGURED+STATUS = true;
 //   3) у каждого User есть хотя бы один Instance в БД (иначе outgoing мёртв).
+//   4) state каждой Green API Instance — должен быть "authorized"
+//      (#60: deauth WA-устройства → outgoing молча падает).
 //
 // Алерт — edge-triggered: один раз при появлении проблемы и один раз при
 // восстановлении. Ключи в `_alerted` совместимы с wa-tg-bridge моделью:
 //   - "register:<portal>" — коннектор пропал из портала
 //   - "line:<portal>:<line>" — линия не CONFIGURED/STATUS
 //   - "instances:<portal>" — пусто Instance'ов в БД для портала
+//   - "state:<idInstance>" — Green API state != authorized
 const CONNECTOR_ID = "social_connector";
 const HEALTH_INTERVAL_MS = 60 * 60 * 1000; // раз в час
 const FIRST_CHECK_DELAY_MS = 20 * 1000;     // 20с после startup
@@ -84,6 +87,10 @@ export class B24HealthCheckService implements OnModuleInit, OnModuleDestroy {
 		return `instances:${portal}`;
 	}
 
+	private _stateKey(idInstance: number | bigint): string {
+		return `state:${idInstance}`;
+	}
+
 	/** Возвращает количество Instance'ов у портала (для итогового лога). */
 	private async _checkOnePortal(user: { id: string; portalDomain: string }): Promise<number> {
 		const portal = user.portalDomain;
@@ -129,9 +136,15 @@ export class B24HealthCheckService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		// 3) Проверка status на каждой Instance.bitrixLine (задача 1, часть 2).
+		// apiTokenInstance нужен для задачи 4 (проверка state каждой инстанции).
 		const lined = await this.prisma.instance.findMany({
 			where: { userId: user.id, NOT: { bitrixLine: null } },
-			select: { idInstance: true, bitrixLine: true, settings: true },
+			select: {
+				idInstance: true,
+				apiTokenInstance: true,
+				bitrixLine: true,
+				settings: true,
+			},
 		});
 		for (const inst of lined) {
 			if (inst.bitrixLine == null) continue;
@@ -180,6 +193,55 @@ export class B24HealthCheckService implements OnModuleInit, OnModuleDestroy {
 			} else if (healthy && this._alerted.has(lineKey)) {
 				this._alerted.delete(lineKey);
 				await this.alerts.send(`✅ линия B24 #${line} (${label}, portal ${portal}) снова активна`);
+			}
+
+			// 4) Проверка GreenAPI instance state — авторизована ли инстанция
+			// (deauth WA-устройства → outgoing молча падают, см. #60).
+			// State значения: notAuthorized | authorized | yellowCard | blocked | starting
+			// Алертим на ВСЕ ≠ authorized. starting — норма короткое время, но
+			// если осталось starting на ≥ 1 час между check'ами — реальная проблема.
+			const stateKey = this._stateKey(inst.idInstance);
+			let stateValue: string | null = null;
+			try {
+				const client = this.bitrix24.createGreenApiClient({
+					idInstance: inst.idInstance,
+					apiTokenInstance: inst.apiTokenInstance,
+				});
+				const stateResp = await client.getStateInstance();
+				stateValue = String(stateResp?.stateInstance || "unknown");
+			} catch (e: any) {
+				// getStateInstance может упасть если token истёк или Green API
+				// недоступен. Это сам по себе сигнал проблемы.
+				if (!this._alerted.has(stateKey)) {
+					this._alerted.add(stateKey);
+					await this.alerts.send(
+						`🚨 GreenAPI getStateInstance failed для ${label} ` +
+						`(idInstance=${inst.idInstance}): ${e?.message || e}. ` +
+						`Возможно токен инстанции истёк или Green API недоступен. ` +
+						`Runbook: проверить console.green-api.com и .env apiTokenInstance.`,
+					);
+				}
+				continue;
+			}
+			if (stateValue !== "authorized" && !this._alerted.has(stateKey)) {
+				this._alerted.add(stateKey);
+				const stateEmoji = stateValue === "blocked" ? "⛔"
+					: stateValue === "yellowCard" ? "🟡"
+					: stateValue === "notAuthorized" ? "🔓"
+					: stateValue === "starting" ? "🟦"
+					: "❓";
+				await this.alerts.send(
+					`🚨 ${stateEmoji} GreenAPI ${label} (idInstance=${inst.idInstance}, ` +
+					`line #${line}, portal ${portal}): state=${stateValue}. ` +
+					`Outgoing через этот instance НЕ работает. ` +
+					`Runbook: открыть console.green-api.com → ${inst.idInstance}, ` +
+					`перепривязать устройство (re-scan QR для WA) или продлить подписку.`,
+				);
+			} else if (stateValue === "authorized" && this._alerted.has(stateKey)) {
+				this._alerted.delete(stateKey);
+				await this.alerts.send(
+					`✅ GreenAPI ${label} (idInstance=${inst.idInstance}) снова authorized — outgoing восстановлен`,
+				);
 			}
 		}
 
