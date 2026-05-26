@@ -7,6 +7,7 @@ import { GreenApiWebhook, GreenApiLogger } from "@green-api/greenapi-integration
 import { Bitrix24WebhookDto } from "../bitrix24/dto/bitrix24-webhook.dto";
 import { Bitrix24WebhookGuard } from "./guards/bitrix24-webhook.guard";
 import { PrismaService } from "../prisma/prisma.service";
+import { ApiTags, ApiOperation, ApiExcludeEndpoint } from "@nestjs/swagger";
 
 // i2crm посылает client_id, message_id, external_id и пр. как 64-bit integers
 // (могут быть > 2^53). JSON.parse в Node превращает их в Number и теряет
@@ -19,6 +20,7 @@ function safeJsonParse(rawText: string): any {
 	return JSON.parse(safe);
 }
 
+@ApiTags("webhooks")
 @Controller("webhooks")
 export class WebhooksController {
 	private readonly logger = GreenApiLogger.getInstance(WebhooksController.name);
@@ -32,6 +34,14 @@ export class WebhooksController {
 
 	@Post("green-api")
 	@HttpCode(HttpStatus.OK)
+	@ApiOperation({
+		summary: "Green API webhook ingestion",
+		description:
+			"Главный webhook от Green API: incomingMessageReceived, outgoingMessageStatus, " +
+			"stateInstanceChanged, и др. Обрабатывает все 5 WA/MAX/TG-bot инстансов. " +
+			"Outgoing-status (sent/delivered/read) проксируется в B24 как часики. " +
+			"См. SEQUENCES.md #1.",
+	})
 	async handleGreenApiWebhook(@Body() webhook: GreenApiWebhook, @Res() res: Response): Promise<void> {
 		this.logger.debug(`Green API webhook received: ${webhook.typeWebhook}`);
 
@@ -95,6 +105,13 @@ export class WebhooksController {
 
 	@Post("i2crm")
 	@HttpCode(HttpStatus.OK)
+	@ApiOperation({
+		summary: "i2crm webhook (Instagram Direct + Comments)",
+		description:
+			"Incoming events от i2crm Public API: channel ∈ {instdir, instcom}. " +
+			"Раздаёт в handleI2crmIncoming (см. SEQUENCES.md #3). Использует raw " +
+			"JSON parser для сохранения 64-bit IDs клиентов IG (BigInt fields).",
+	})
 	async handleI2crmWebhook(@Req() req: Request, @Res() res: Response): Promise<void> {
 		// Используем raw body (saved by express.json verify в main.ts) — парсим
 		// числовые ID-поля как строки чтобы не терять последние цифры на
@@ -137,6 +154,12 @@ export class WebhooksController {
 
 	@Post("telegram-bot")
 	@HttpCode(HttpStatus.OK)
+	@ApiOperation({
+		summary: "Telegram bot webhook (legacy single-instance)",
+		description:
+			"Legacy endpoint для @begovoy_bot до multi-instance. Для multi-instance " +
+			"используется /webhooks/telegram-bot/:name (одна линия = один бот).",
+	})
 	async handleTelegramBotWebhook(@Req() req: Request, @Res() res: Response): Promise<void> {
 		await this._tgBotWebhook(req, res, "begovoy");
 	}
@@ -170,6 +193,14 @@ export class WebhooksController {
 
 	@Post("bitrix24")
 	@UseGuards(Bitrix24WebhookGuard)
+	@ApiOperation({
+		summary: "Bitrix24 webhook (events + connector messages)",
+		description:
+			"Webhook от B24: ONIMCONNECTORMESSAGEADD (outgoing от оператора → клиенту), " +
+			"ONIMCONNECTORSTATUSDELETE, ONAPPUNINSTALL, и др. Также принимает SAVE " +
+			"от placement SETTING_CONNECTOR (сохранение настроек инстанса). Защищён " +
+			"Bitrix24WebhookGuard (проверяет applicationToken).",
+	})
 	async handleBitrix24ConnectorWebhook(@Body() body: Bitrix24WebhookDto, @Res() res: Response): Promise<void> {
 		this.logger.debug(`Bitrix24 webhook received`, body);
 

@@ -2,6 +2,7 @@ import { Controller, Post, Body, Res, HttpStatus, Head, Query } from "@nestjs/co
 import { Response } from "express";
 import { PrismaService } from "../prisma/prisma.service";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
+import { ApiTags } from "@nestjs/swagger";
 
 /**
  * OAuth install handler для **второго** B24-приложения — `customer-360-bridge`.
@@ -43,6 +44,7 @@ import { GreenApiLogger } from "@green-api/greenapi-integration";
  * До п. 4 callBitrix24Method(appKind='customer360') делает graceful fallback
  * на social_connector — Customer-360 продолжает работать на одном app.
  */
+@ApiTags("oauth")
 @Controller("oauth/customer360")
 export class Customer360OAuthController {
 	private readonly logger = GreenApiLogger.getInstance(Customer360OAuthController.name);

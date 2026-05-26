@@ -1,6 +1,10 @@
 import { All, Controller, Req, Res } from "@nestjs/common";
 import { Response, Request } from "express";
+import { ApiExcludeController } from "@nestjs/swagger";
 
+// HTML landing page для B24-placement / CRM-карточек — не REST API,
+// поэтому скрыт из Swagger UI.
+@ApiExcludeController()
 @Controller()
 export class AppController {
 	private getTranslations(language: string) {

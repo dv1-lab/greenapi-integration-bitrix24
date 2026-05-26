@@ -168,6 +168,8 @@ recovery, нужно знать на случай если меня нет
 
 → [`SECURITY/ACCESS.md`](./SECURITY/ACCESS.md) — access control matrix
 
+→ [`OPENAPI.md`](./OPENAPI.md) — Swagger UI / OpenAPI 3.1 spec
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
 → TODO: `PERFORMANCE.md` (P2)
@@ -199,6 +201,7 @@ docs/
 ├── 🔀 SEQUENCES.md               — sequence-диаграммы 5 критичных flow
 ├── 🎯 SLO.md                     — технические SLO + error budget
 ├── 📡 MONITORING.md              — что-кому-куда алертит
+├── 🌐 OPENAPI.md                 — Swagger UI / OpenAPI spec
 ├── 🧪 TESTING.md                 — структура тестов
 │
 ├── 💡 decisions/                 — ADR

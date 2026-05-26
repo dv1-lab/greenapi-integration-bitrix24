@@ -3,10 +3,12 @@ import { Response } from "express";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
+import { ApiTags, ApiOperation, ApiResponse } from "@nestjs/swagger";
 import axios from "axios";
 import { Bitrix24InstallDto } from "./dto/bitrix24-oauth.dto";
 import { BitrixInstallQuery } from "../types";
 
+@ApiTags("oauth")
 @Controller("oauth")
 export class OAuthController {
 	private readonly logger = GreenApiLogger.getInstance(OAuthController.name);
@@ -17,11 +19,24 @@ export class OAuthController {
 	) {}
 
 	@Head("install")
+	@ApiOperation({ summary: "Health-probe для B24 install URL (HEAD)" })
 	async installHead(@Res() res: Response) {
 		res.status(200).send();
 	}
 
 	@Post("install")
+	@ApiOperation({
+		summary: "B24 OAuth install + connector registration",
+		description:
+			"Вызывается B24 при установке приложения. Создаёт User в БД с " +
+			"OAuth-токеном, регистрирует social_connector через imconnector.register, " +
+			"привязывает 14 placement'ов (CRM-карточки + LEFT_MENU + SETTING_CONNECTOR), " +
+			"подписывается на ONIMCONNECTORMESSAGEADD и др. webhook'и. " +
+			"Также обрабатывает PLACEMENT=SETTING_CONNECTOR — рендерит UI настройки инстанса.",
+	})
+	@ApiResponse({ status: 201, description: "HTML installation success page" })
+	@ApiResponse({ status: 400, description: "Missing AUTH_ID / DOMAIN" })
+	@ApiResponse({ status: 500, description: "Connector registration failed" })
 	async install(
 		@Body() body: Bitrix24InstallDto,
 		@Query() query: BitrixInstallQuery,

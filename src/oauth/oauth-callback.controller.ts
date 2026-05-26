@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { Response } from "express";
 import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
+import { ApiTags } from "@nestjs/swagger";
 
 /**
  * GET /oauth/callback — кастомный OAuth redirect endpoint.
@@ -12,6 +13,7 @@ import { PrismaService } from "../prisma/prisma.service";
  * добавляем явный OAuth Authorization Code flow: пользователь идёт по /oauth/authorize,
  * B24 редиректит сюда с ?code=... — обмениваем на access/refresh, кладём в БД.
  */
+@ApiTags("oauth")
 @Controller("oauth")
 export class OAuthCallbackController {
 	constructor(

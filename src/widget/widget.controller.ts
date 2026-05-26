@@ -7,6 +7,7 @@ import { Bitrix24Service } from "../bitrix24/bitrix24.service";
 import { mask } from "../common/mask";
 import { greenApiUrl } from "../common/green-api-url";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
+import { ApiTags } from "@nestjs/swagger";
 
 // Авторизация для widget endpoints. Сервис доступен публично через
 // https://social.9wb.ru (Caddy reverse_proxy), поэтому любой может POST
@@ -62,6 +63,7 @@ function assertWidgetAuth(
 	}
 }
 
+@ApiTags("widget")
 @Controller("widget")
 export class WidgetController {
 	private readonly logger = GreenApiLogger.getInstance(WidgetController.name);

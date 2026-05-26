@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Res, HttpStatus } from "@nestjs/common";
 import { Response } from "express";
 import { MediaCacheService } from "./media-cache.service";
+import { ApiTags, ApiOperation } from "@nestjs/swagger";
 
 /**
  * Отдаёт B24 проксированное медиа. Adapter скачивает входящий файл из
@@ -9,11 +10,18 @@ import { MediaCacheService } from "./media-cache.service";
  * B24 тянет без проблем. Публичный (без авторизации) — B24 ходит без
  * токена; id случайный 128-битный, медиа живёт 30 минут.
  */
+@ApiTags("media")
 @Controller("media")
 export class MediaController {
 	constructor(private readonly mediaCache: MediaCacheService) {}
 
 	@Get(":file")
+	@ApiOperation({
+		summary: "Отдача проксированного медиа для B24",
+		description:
+			"B24 не может скачать медиа из Green API напрямую (Telegram/MAX-шарды). " +
+			"Adapter скачивает файл, кладёт в кэш на 30 мин, отдаёт через эту ручку.",
+	})
 	serve(@Param("file") file: string, @Res() res: Response): void {
 		const id = file.replace(/\.[^.]+$/, "");
 		const item = this.mediaCache.get(id);
