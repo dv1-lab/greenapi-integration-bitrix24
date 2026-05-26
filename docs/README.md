@@ -164,9 +164,13 @@ recovery, нужно знать на случай если меня нет
 
 → [`SLO.md`](./SLO.md) — технические SLO + error budget
 
+→ [`SECURITY/THREAT_MODEL.md`](./SECURITY/THREAT_MODEL.md) — STRIDE-анализ угроз
+
+→ [`SECURITY/ACCESS.md`](./SECURITY/ACCESS.md) — access control matrix
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
-→ TODO: `PERFORMANCE.md` (P2), `THREAT_MODEL.md` (P2)
+→ TODO: `PERFORMANCE.md` (P2)
 
 ---
 
