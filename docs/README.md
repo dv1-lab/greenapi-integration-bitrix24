@@ -160,6 +160,8 @@ recovery, нужно знать на случай если меня нет
 
 → [`DATA_MODEL.md`](./DATA_MODEL.md) — ERD всех таблиц (MySQL/PG/CH)
 
+→ [`SEQUENCES.md`](./SEQUENCES.md) — sequence-диаграммы 5 критичных flow
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
 → TODO: `SLO.md` (P1), `PERFORMANCE.md` (P2), `THREAT_MODEL.md` (P2)
@@ -188,6 +190,7 @@ docs/
 ├── 📨 GREENAPI_CHANNELS.md       — Green API каналы
 ├── 👥 CUSTOMER360.md             — единая БД клиентов
 ├── 🗄 DATA_MODEL.md              — ERD всех таблиц (MySQL/PG/CH)
+├── 🔀 SEQUENCES.md               — sequence-диаграммы 5 критичных flow
 ├── 📡 MONITORING.md              — что-кому-куда алертит
 ├── 🧪 TESTING.md                 — структура тестов
 │
