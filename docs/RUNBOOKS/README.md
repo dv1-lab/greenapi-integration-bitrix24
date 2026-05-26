@@ -15,14 +15,25 @@
 
 ## Текущий список runbooks
 
+**Регулярные операции:**
 - [`add-new-open-line.md`](./add-new-open-line.md) — Добавить новую
   open-line линию (новый WA-номер, TG-shard и т.д.)
 - [`rotate-greenapi-token.md`](./rotate-greenapi-token.md) — Ротация
   Green API instance token
-- [`backfill-tg-customer360.md`](./backfill-tg-customer360.md) — Backfill
-  слияния sole-TG UUIDs с B24-side
+- [`backfill-tg-customer360.md`](./backfill-tg-customer360.md) — Еженедельный
+  backfill слияния sole-TG UUIDs с B24-side
+- [`save-session.md`](./save-session.md) — Закрытие сессии работы по
+  `/save` протоколу (зафиксировать всё что сделано)
+
+**Деплои:**
 - [`deploy-adapter.md`](./deploy-adapter.md) — Деплой adapter'а с pull+build
 - [`deploy-bridge.md`](./deploy-bridge.md) — Деплой wa-tg-bridge
 - [`deploy-dashboard.md`](./deploy-dashboard.md) — Деплой dv-dashboard
+
+**Инциденты:**
+- [`incident-response.md`](./incident-response.md) — Реагирование на
+  инцидент (триаж + 5 типичных классов)
 - [`restart-frozen-line.md`](./restart-frozen-line.md) — Что делать
   если open-line не отвечает на incoming
+- [`secret-leak-recovery.md`](./secret-leak-recovery.md) — Утёк секрет
+  в git/transcript — что делать
