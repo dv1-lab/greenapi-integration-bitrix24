@@ -8,17 +8,24 @@
 
 ---
 
-## 2026-05-26 · Build залип на 4 часа — Docker Hub + Prisma CDN недоступны с my-server
+## 2026-05-26 · Build залип на 5+ часов — DDoS-атака на hip.hosting
 
 - **Симптом**: `docker compose up -d adapter --build --force-recreate` падает на
   `FROM node:20-alpine` с `dial tcp: lookup registry-1.docker.io ... i/o timeout`
   / `TLS handshake timeout`, и/или `pnpm prisma generate` падает с
   `Error: aborted ECONNRESET`. Build пытался деплоить sha `ea77d2d` (task #69),
-  4 ретрая дали одну и ту же ошибку.
-- **Корень**: my-server в Стокгольме (hip.hosting). Маршрутизация hip.hosting
-  → Cloudflare CDN (за которым Docker Hub) и → Prisma binaries CDN
-  кратковременно деградировала на ~4 часа. Это **не РФ-блокировка** (сервер
-  в EU), не наш код, не Docker daemon — внешний инцидент.
+  множественные ретраи дали одну и ту же ошибку. Затем SSH к my-server тоже
+  начал давать banner timeout, потом `social.9wb.ru` (наш публичный URL)
+  стал отдавать HTTP 000 (curl timeout), ЛК hip.hosting тоже лёг.
+- **Корень**: **DDoS-атака на hip.hosting** (объявили в TG канале @hiphosting
+  26.05.2026 в 22:47 МСК: «Может наблюдаться недоступность, предположительно
+  связано с DDoS атакой. Работаем над исправлением.»). Атака деградировала
+  сеть провайдера в Стокгольме — пакеты к/от my-server терялись, DNS
+  resolver на сервере не отвечал, SSH banner timeout, входящий трафик к
+  публичным сайтам не доходил. Это **не наш код**, **не Docker Hub**,
+  **не Prisma CDN**, **не маршрутизация Cloudflare** — это атака на
+  провайдера. Изначально я думал на сетевую деградацию маршрутизации,
+  оказалось хуже.
 - **Фикс** (sha TBD):
   - `Dockerfile`: `FROM node:20-alpine` → `FROM mirror.gcr.io/library/node:20-alpine`
     (Google публичный pull-through cache Docker Hub — стабильнее)
@@ -35,8 +42,19 @@
     требует `systemctl restart docker` → 502 у всех клиентов на 30-60 сек.
   - НЕ ждать пока CDN оживёт — Дмитрий явно сказал «ждать когда что-то не
     работает мне не нравится». Зеркала с первой минуты.
-- **Verify**: build с mirror.gcr.io прошёл за TBD сек (после фикса).
-- **Связано**: `docs/DEPLOY.md`, memory `[[feedback-cdn-mirrors-default]]`
+- **Что зафиксы НЕ решали**: mirror.gcr.io и retry-loop полезны для нормальных
+  сетевых деградаций (transient ECONNRESET), но **не для DDoS** — когда сам
+  канал к серверу не работает, обходные пути снаружи не помогают. Эти
+  инфра-улучшения остаются в коде как **defense in depth** для будущих
+  обычных проблем с CDN.
+- **Что НЕ делать**: НЕ паниковать и НЕ переезжать на новый VPS при первом
+  же ECONNRESET. Проверять: (а) status hip.hosting (`@hiphosting` Telegram),
+  (б) `curl -m 5 https://hip.hosting/` снаружи — если их сайт жив и ЛК нет,
+  скорее всего DDoS. Ждать восстановления.
+- **Verify**: deploy не успел пройти — сеть лежит до сих пор (на момент
+  записи). Wakeup автоматически перепробует через ~1 час.
+- **Связано**: `docs/DEPLOY.md`, memory `[[feedback-cdn-mirrors-default]]`,
+  memory `[[remote_server]]`
 
 ---
 
