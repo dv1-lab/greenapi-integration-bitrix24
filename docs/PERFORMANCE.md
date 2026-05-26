@@ -75,29 +75,28 @@ ssh my-server 'curl -s -H "X-Metrics-Token: $METRICS_TOKEN" \
   > /home/dv/perf-baseline/$(date +\%Y-\%m-\%d).json
 ```
 
-(TODO: создать cron на сервере — пока этого нет.)
+**С 2026-05-26: cron установлен на my-server**:
+- `/usr/local/bin/perf-baseline-snapshot.sh` (скрипт в репо `scripts/perf-baseline-snapshot.sh`)
+- `/etc/cron.d/perf-baseline-snapshot`: `0 3 * * * dv ...`
+- `/home/dv/perf-baseline/YYYY-MM-DD.json` — retention 30 дней
 
 ---
 
-## 🎯 Baseline цифры (placeholder)
+## 🎯 Baseline цифры (первый snapshot 2026-05-26)
 
-Заполнить **после** деплоя `PerformanceInterceptor` + сбора 24-часового
-seed-периода. Сейчас числа в `SLO.md` — subjective оценки.
+Первый seed-снимок: 174 запроса за 19 мин uptime, **0 errors**.
 
-| Endpoint | Запросов/24ч | p50 (мс) | p95 (мс) | p99 (мс) | Error rate |
-|---|---|---|---|---|---|
-| `POST /webhooks/green-api` | TBD | TBD | TBD | TBD | TBD |
-| `POST /webhooks/i2crm` | TBD | TBD | TBD | TBD | TBD |
-| `POST /webhooks/bitrix24` | TBD | TBD | TBD | TBD | TBD |
-| `POST /webhooks/telegram-bot/*` | TBD | TBD | TBD | TBD | TBD |
-| `POST /widget/send` | TBD | TBD | TBD | TBD | TBD |
-| `POST /widget/check-account` | TBD | TBD | TBD | TBD | TBD |
-| `GET /widget/instances` | TBD | TBD | TBD | TBD | TBD |
-| `GET /media/:file` | TBD | TBD | TBD | TBD | TBD |
-| `POST /webhooks/internal/*` | TBD | TBD | TBD | TBD | TBD |
+Полная таблица per-endpoint — см. [`SLO.md`](./SLO.md) раздел «Baseline».
 
-После первой недели deployment Дмитрию (или мне в следующей сессии) —
-обновить эту таблицу реальными числами.
+**Ключевые наблюдения:**
+- 🟢 Быстрые: `GET /` (B24 placement landing, 7 ms p95), `GET /widget/instances` (4 ms)
+- 🟡 B24 round-trip ограничено: `webhooks/b24-event` 635 ms p95, `green-api` 1192 ms p95
+- 🔴 **Медленный hotpath**: `POST /webhooks/bitrix24` 6293 ms p95, 8311 ms p99 —
+  ONIMCONNECTORMESSAGEADD handler делает chain B24 → i2crm/Green API → customer-360 sequentially.
+  Кандидат на parallel-оптимизацию.
+- 🔴 `POST /webhooks/i2crm` 1441 ms p50 — медиан выше 1с. Внутри 4+ network calls.
+
+После недельной набёрки — заменить snapshot и заполнить SLO формальными цифрами.
 
 ---
 

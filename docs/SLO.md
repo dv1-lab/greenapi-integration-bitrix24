@@ -13,6 +13,43 @@ Last reviewed: 2026-05-26 (task #49).
 
 ---
 
+## 📈 Baseline (первый seed-снимок 2026-05-26 11:29 UTC, 19 мин uptime)
+
+**Источник:** `/health/metrics` после `f254590` deploy + 19 мин нормальной нагрузки.
+174 запроса, **0 errors (0.00% error rate)** глобально.
+
+| Endpoint | Req | p50 | p95 | p99 | err |
+|---|---:|---:|---:|---:|---:|
+| `POST /webhooks/b24-event` | 80 | 266 ms | **635 ms** | 852 ms | 0% |
+| `GET /` (B24 placement landing) | 38 | 2 ms | 7 ms | 12 ms | 0% |
+| `POST /webhooks/green-api` | 13 | 232 ms | **1192 ms** | 1238 ms | 0% |
+| `POST /webhooks/bitrix24` | 8 | 601 ms | **6293 ms** ⚠️ | 8311 ms | 0% |
+| `POST /webhooks/internal/contact-name` | 7 | 274 ms | 1297 ms | 1562 ms | 0% |
+| `POST /webhooks/i2crm` | 5 | 1441 ms | 1865 ms | 1877 ms | 0% |
+| `POST /widget/send-first` | 3 | 3 ms | 3 ms | 3 ms | 0% |
+| `GET /widget/instances` | 3 | 4 ms | 4 ms | 4 ms | 0% |
+| `POST /webhooks/telegram-bot` | 3 | 944 ms | 3824 ms | 4080 ms | 0% |
+
+**Наблюдения для action:**
+- 🟢 `GET /` (placement landing) — 7 ms p95: отлично
+- 🟡 `POST /webhooks/b24-event` (635 ms p95) и `green-api` (1192 ms p95) —
+  доминируются B24 imconnector.send round-trip. SLO «<2 сек» соблюдается, но
+  редкие outliers >1 сек видно (см. p99).
+- 🔴 `POST /webhooks/bitrix24` (6293 ms p95, 8311 ms p99) — серьёзно медленно.
+  Этот endpoint handle'ит ONIMCONNECTORMESSAGEADD от B24, делает chain
+  i2crm /target/feedback или Green API /sendMessage + customer-360 update.
+  Нужен deeper analysis: hotpath profiling, возможна оптимизация (parallel
+  Customer-360 + outgoing).
+- 🔴 `POST /webhooks/i2crm` (1441 ms p50) — даже медиан выше 1 сек.
+  Внутри: I2crmEventLog upsert + ensureLead + imconnector.send.messages +
+  tg-mirror. Каждый шаг — сетевой round-trip.
+
+Следующий snapshot — 03:00 UTC ежедневно через cron
+`/usr/local/bin/perf-baseline-snapshot.sh` → `/home/dv/perf-baseline/`.
+Retention 30 дней.
+
+---
+
 ## 📊 Главные SLO
 
 | Сервис | SLI | SLO | Error budget / месяц |
