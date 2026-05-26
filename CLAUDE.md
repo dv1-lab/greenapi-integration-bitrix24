@@ -8,8 +8,21 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. Н
 
 ## ⚠️ Обязательное чтение перед любой правкой
 
+**ПЕРВЫМ ДЕЛОМ** — всегда [`docs/PRODUCT_RULES.md`](./docs/PRODUCT_RULES.md).
+Это single source of truth для **продуктовых** правил Дмитрия (когда
+создавать лид, что в TG-зеркале, как обрабатывать дубли). Раньше
+эти правила существовали устно и каждая сессия повторяла «почему так?» —
+теперь нет, читай файл, не догадывайся.
+
+**Прежде чем менять настройки B24 / open-lines / Green API инстансов** —
+обязательно посмотри [`docs/PRODUCT_RULES.md`](./docs/PRODUCT_RULES.md)
+соответствующий раздел. Если правила нет — спросить Дмитрия, добавить
+в PRODUCT_RULES + создать ADR в `docs/decisions/`, и только тогда
+применить настройку. **Не догадываться.**
+
 | Что трогаешь | Что обязательно прочитать |
 |---|---|
+| **Любые продуктовые решения** (лиды, сделки, поведение open-lines, что в зеркало шлём) | [`docs/PRODUCT_RULES.md`](./docs/PRODUCT_RULES.md) — **single source of truth** |
 | `widget.controller.ts`, `handleI2crmIncoming/Outgoing`, `handleOutgoing*`, `mirrorToBitrix` | [`docs/OPEN_LINE_LIFECYCLE.md`](./docs/OPEN_LINE_LIFECYCLE.md) + [`docs/REGRESSIONS.md`](./docs/REGRESSIONS.md) + [`docs/CHECKLIST_WIDGET.md`](./docs/CHECKLIST_WIDGET.md) |
 | **Зеркала клиента** (TG-bot mirror, i2crm-tg-mirror, wa-tg-bridge bridge.py) — карточки, заголовки тем, подписи | [`docs/CLIENT_CARD_STANDARD.md`](./docs/CLIENT_CARD_STANDARD.md) — **обязательный единый стандарт**, любое отклонение = регрессия |
 | Любые `chat.id` / префиксы / каналы | те же 3 файла |
@@ -18,6 +31,7 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. Н
 | Customer-360, KBD, event log | [`docs/CUSTOMER360.md`](./docs/CUSTOMER360.md) |
 | Зеркала клиентов (карточки) | [`docs/ARCHITECTURE.md §7.5`](./docs/ARCHITECTURE.md) |
 | Общая картина | [`docs/SOCIAL_CONNECTOR.md`](./docs/SOCIAL_CONNECTOR.md) |
+| **Почему так?** на любое архитектурное решение | [`docs/decisions/`](./docs/decisions/) — ADR с обоснованием |
 
 **Если правишь widget или открытые линии — не пропусти REGRESSIONS.md.** Класс
 проблемы «не подтягивается open-line / дубль chat-user» повторялся 5+ раз за
