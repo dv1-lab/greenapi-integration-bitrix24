@@ -8,6 +8,59 @@
 
 ---
 
+## 2026-05-26 · MySQL ротация: heredoc `<<'BASH'` не интерполирует переменные
+
+- **Симптом**: при ротации MySQL adapter password (task #26) — после
+  ALTER USER + restart adapter Prisma не подключается:
+  `Authentication failed against database server, the provided database
+  credentials for adapter are not valid`. При этом `mysql -u adapter`
+  напрямую с новым pwd **работает**.
+- **Корень**: heredoc с одинарными кавычками `<<'BASH'` сохраняет
+  переменные **литерально**, не интерполирует. В скрипте:
+  ```bash
+  cat > /tmp/rotate.sh <<'BASH'
+  NEW_PWD=$(openssl rand -hex 24)
+  docker exec mysql -u root -e "ALTER USER root IDENTIFIED BY '$NEW_PWD'"
+  BASH
+  ```
+  Когда **bash на сервере** выполняет скрипт — `$NEW_PWD` интерполируется
+  bash'ем. Но **в Python heredoc inside**:
+  ```python
+  content = re.sub(r"...", lambda m: m.group(1) + '$NEW_PWD' + ...)
+  ```
+  `'$NEW_PWD'` в Python — это **литеральная строка** «$NEW_PWD».
+  В .env записалось `mysql://adapter:$NEW_PWD@db:3306/adapter` (буквально
+  с долларом). Prisma НЕ парсит URL с `$` → fails.
+- **Восстановление**: новый MySQL pwd (поскольку openssl уже сгенерировал
+  и **значение потеряно**) — невозможно восстановить через ALTER USER
+  (требует знание текущего pwd). Решение: **temporary mysqld container
+  с `--init-file`** который ALTER USER root и adapter на **новый известный**
+  pwd. Сохранён в `/home/dv/.mysql-adapter-pwd` (chmod 600).
+- **Фикс sha** — task #26 завершён, ротация выполнена через temp-mysqld:
+  ```bash
+  docker run -d --name mysql-reset-temp --rm \
+    -v $MYSQL_VOLUME:/var/lib/mysql \
+    -v $INIT_FILE:/init.sql:ro \
+    -e MYSQL_ROOT_PASSWORD=will-be-overridden \
+    mysql:8.0 mysqld --init-file=/init.sql
+  ```
+- **Что НЕ делать**:
+  - **Никогда** не использовать `<<'TAG'` (с кавычками) для скриптов
+    с интерполяцией переменных. Использовать `<<TAG` (без кавычек).
+  - **Или** делать инлайн bash блоки вместо heredoc на сервере.
+  - **Сохранять** сгенерированные секреты в файл **сразу** перед использованием
+    (`/home/dv/.mysql-adapter-pwd`) — на случай если в env что-то сломается.
+  - **MySQL Docker** имеет специфику: `MYSQL_ROOT_PASSWORD` env при
+    re-create контейнера **игнорируется** если volume не пустой. Только
+    `--init-file` способ обновить, или `--skip-grant-tables`.
+  - **Prisma URL-encoding** ломается на спецсимволах в pwd: `+`, `/`, `=`, `$`.
+    Использовать только `openssl rand -hex N` (alphanumeric) или явно
+    URL-encode при записи в DATABASE_URL.
+
+См. memory `[[feedback_heredoc_var_interpolation]]`.
+
+---
+
 ## 2026-05-26 · dv-dashboard customer page: merged UUID показывал пустую страницу
 
 - **Симптом**: открываешь `/customer/<source_uuid>` для merged-клиента →
