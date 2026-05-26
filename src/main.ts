@@ -6,7 +6,7 @@ import helmet from "helmet";
 import { urlencoded, json } from "express";
 import { mask, maskString } from "./common/mask";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
-import type { Request, Response, NextFunction } from "express";
+import { createSwaggerAuthMiddleware } from "./swagger/swagger-auth.middleware";
 
 declare global {
 	namespace PrismaJson {
@@ -74,18 +74,12 @@ function setupSwagger(app: any) {
 		return;
 	}
 
-	// Простой Basic Auth middleware на /api и /api-json.
-	const basicAuth = (req: Request, res: Response, next: NextFunction) => {
-		const header = req.headers.authorization || "";
-		const expected = "Basic " + Buffer.from(`${swaggerUser}:${swaggerPassword}`).toString("base64");
-		if (header !== expected) {
-			res.setHeader("WWW-Authenticate", 'Basic realm="Swagger"');
-			res.status(401).send("Authentication required");
-			return;
-		}
-		next();
-	};
-	app.use(["/api", "/api-json"], basicAuth);
+	// Cookie-сессия для Swagger UI: login-форма /api/login, сессия в HttpOnly cookie
+	// (Secure+SameSite=Lax+HMAC-signed), срок 30 дней. См. swagger/swagger-auth.middleware.ts.
+	app.use(createSwaggerAuthMiddleware({
+		user: swaggerUser,
+		password: swaggerPassword,
+	}));
 
 	const config = new DocumentBuilder()
 		.setTitle("Social Connector adapter")
