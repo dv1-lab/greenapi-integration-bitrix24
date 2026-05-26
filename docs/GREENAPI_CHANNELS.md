@@ -233,3 +233,38 @@ B24 (`imconnector.send.messages` с `files[]`) скачивает файл по 
 | `src/widget/widget.controller.ts` | виджет «написать первым», `mirrorToBitrix` |
 | wa-tg-bridge `bridge.py` | приём webhook'ов, TG-зеркало, форвард |
 | wa-tg-bridge `greenapi.py` | Green API клиент, настройки инстансов |
+
+---
+
+## 11. Известные ограничения Green API per канал
+
+Уточнено support Green API 2026-05-26 (Petr) на запрос про addContact.
+
+| Endpoint | WhatsApp | Telegram | MAX |
+|---|---|---|---|
+| `/sendMessage` | ✅ | ✅ | ✅ |
+| `/checkAccount` (есть ли регистрация) | ✅ полный | ⚠️ ограничен — без addContact знает не всех | ⚠️ ограничен |
+| `/addContact` (добавить номер в адресную книгу инстанса) | ✅ работает | ❌ **404 Not Found** | ❌ **404 Not Found** |
+| `/getContacts` (получить адресную книгу) | ✅ | ✅ читает | ✅ читает |
+
+**Что это значит для виджета «написать первым»:**
+
+- В **WhatsApp** — индикация «номер в WA / не в WA» работает корректно.
+- В **Telegram** через Green API — `checkAccount` иногда возвращает «не
+  знаю», даже если у клиента есть TG. Поэтому в виджете для TG индикатор
+  менее надёжный.
+- В **MAX** — то же самое.
+
+**Workaround сейчас**: вручную добавлять номера через телефон, где запущен
+Green API instance (физическое устройство). Не масштабируется для тысяч
+контактов из B24.
+
+**Запрос зафиксирован у Green API** (отслеживание — задача #64):
+- TG: https://github.com/green-api/telegram-issues/issues/21
+- MAX: https://github.com/green-api/max-issues/issues/29
+
+ETA нет. Готовы тестировать на инстансах 4100621194 (TG) и 3100621187 (MAX)
+когда выкатят. После реализации:
+1. Прогнать все B24-контакты через addContact (одноразовая миграция)
+2. В Bitrix24Service.createInstance добавить hook «import contacts after
+   instance setup»
