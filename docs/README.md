@@ -156,7 +156,13 @@ recovery, нужно знать на случай если меня нет
 
 → [`SLA_RULES.md`](./SLA_RULES.md) — бизнес-SLA
 
-→ TODO: `SLO.md` (P1), `MONITORING.md` (P0), `PERFORMANCE.md` (P2)
+→ [`MONITORING.md`](./MONITORING.md) — что-кому-куда алертит
+
+→ [`DATA_MODEL.md`](./DATA_MODEL.md) — ERD всех таблиц (MySQL/PG/CH)
+
+→ [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
+
+→ TODO: `SLO.md` (P1), `PERFORMANCE.md` (P2), `THREAT_MODEL.md` (P2)
 
 ---
 
@@ -181,6 +187,9 @@ docs/
 ├── 📱 TELEGRAM_BOT_FLOW.md       — TG-бот
 ├── 📨 GREENAPI_CHANNELS.md       — Green API каналы
 ├── 👥 CUSTOMER360.md             — единая БД клиентов
+├── 🗄 DATA_MODEL.md              — ERD всех таблиц (MySQL/PG/CH)
+├── 📡 MONITORING.md              — что-кому-куда алертит
+├── 🧪 TESTING.md                 — структура тестов
 │
 ├── 💡 decisions/                 — ADR
 │   ├── README.md                   формат + правила
