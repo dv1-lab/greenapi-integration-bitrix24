@@ -170,6 +170,8 @@ recovery, нужно знать на случай если меня нет
 
 → [`OPENAPI.md`](./OPENAPI.md) — Swagger UI / OpenAPI 3.1 spec
 
+→ [`PERFORMANCE.md`](./PERFORMANCE.md) — latency/error rate metrics + /health/metrics
+
 → [`TESTING.md`](./TESTING.md) — структура тестов и DI mock pattern
 
 → TODO: `PERFORMANCE.md` (P2)
@@ -202,6 +204,7 @@ docs/
 ├── 🎯 SLO.md                     — технические SLO + error budget
 ├── 📡 MONITORING.md              — что-кому-куда алертит
 ├── 🌐 OPENAPI.md                 — Swagger UI / OpenAPI spec
+├── ⚡ PERFORMANCE.md              — latency/error metrics
 ├── 🧪 TESTING.md                 — структура тестов
 │
 ├── 💡 decisions/                 — ADR

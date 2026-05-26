@@ -47,7 +47,10 @@ Last reviewed: 2026-05-26 (task #49).
 | imconnector.send.messages latency p95 | < 5 сек (включая B24) | unknown | TODO: log timer вокруг B24 calls |
 | OAuth refresh success rate | 99.9% | unknown | TODO: log counter |
 
-**Чтобы заполнить gap'ы** — задача #53 «Performance baselines».
+**Чтобы заполнить gap'ы** — см. [`PERFORMANCE.md`](./PERFORMANCE.md):
+с 2026-05-26 (#53) подключен `PerformanceInterceptor` (мерит latency
+каждого endpoint) + `/health/metrics` endpoint. После недели baseline-сбора
+сюда впишем реальные p50/p95/p99/error rate.
 
 ### 2. customer-service (Master DB клиентов)
 

@@ -7,6 +7,8 @@ import { urlencoded, json } from "express";
 import { mask, maskString } from "./common/mask";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { createSwaggerAuthMiddleware } from "./swagger/swagger-auth.middleware";
+import { PerformanceInterceptor } from "./common/perf.interceptor";
+import { PerfMetricsService } from "./common/perf-metrics.service";
 
 declare global {
 	namespace PrismaJson {
@@ -37,6 +39,11 @@ async function bootstrap() {
 	patchGreenApiLogger();
 	const app = await NestFactory.create(AppModule, {});
 	app.useGlobalPipes(new ValidationPipe());
+	// Performance interceptor — меряет latency каждого endpoint в
+	// PerfMetricsService. Глобально, без opt-in. Доступ через
+	// /health/metrics (защищено METRICS_TOKEN).
+	const perfMetrics = app.get(PerfMetricsService);
+	app.useGlobalInterceptors(new PerformanceInterceptor(perfMetrics));
 	app.use(helmet({
 		contentSecurityPolicy: false,
 		frameguard: false,
