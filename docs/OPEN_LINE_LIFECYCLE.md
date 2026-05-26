@@ -116,7 +116,37 @@ adapter logs grep "<chatId>" → один session_id, не два
 писать в [`REGRESSIONS.md`](./REGRESSIONS.md) с датой и sha, **не мерджить пока
 не нашли причину**.
 
-## 7. Связанные документы
+## 7. Orphan-лиды от native B24 OpenLine UI
+
+Когда оператор пишет клиенту **не через наш widget**, а через native B24
+OpenLine UI (форма чата в Контакт-центре / кнопка в карточке клиента не
+от нашего placement), B24 сам создаёт open-line чат + лид. **Наш
+adapter widget не дёргается**, поэтому `backfillSendLead` не отрабатывает —
+лид остаётся orphan: `CONTACT_ID=null`, `UF_CRM_*_CHAT_ID` пусто, имя
+клиента = chat_id из мессенджера.
+
+**Фикс (sha 9f8fdf6 + afe5316, 26.05.2026)**: `_maybeLinkOrphanLead` в
+начале `handleB24CrmEvent` для `ONCRMLEADADD`:
+
+1. orphan-фильтр (нет CONTACT_ID + нет UF полей)
+2. парс TITLE pattern `<chat_id> - <CHANNEL> <phone?>`
+3. поиск контакта по `UF_CRM_*_CHAT_ID`, fallback по phone
+4. **collision-defense**: если по UF найдено `>1` — переход на phone
+   (на портале легaси-коллизии: десятки контактов с одним UF_CRM_MAX_CHAT_ID)
+5. при found — `crm.lead.update`: CONTACT_ID + UF + NAME + PHONE;
+   если есть открытая сделка/лид у контакта — закрываем orphan как
+   «Дубликат → kind id» (STATUS_ID=12)
+
+Постфактум-починка существующих orphan'ов:
+```bash
+curl -X POST https://social.9wb.ru/webhooks/internal/relink-orphan-lead \
+  -H "X-Hint-Secret: $BRIDGE_HINT_SECRET" \
+  -d '{"leadId": <N>}'
+```
+
+ADR: [`decisions/2026-05-26-orphan-lead-linker.md`](./decisions/2026-05-26-orphan-lead-linker.md)
+
+## 8. Связанные документы
 
 - [`SOCIAL_CONNECTOR.md §6.2`](./SOCIAL_CONNECTOR.md) — общий обзор виджета
 - [`SOCIAL_CONNECTOR.md §13 «Грабли»](./SOCIAL_CONNECTOR.md) — список известных quirks
