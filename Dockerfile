@@ -1,9 +1,11 @@
-# Stage 1: Donor для Prisma engines (когда binaries.prisma.sh недоступен с
-# my-server — см. REGRESSIONS 26.05.2026). Берём engines из последнего
-# успешно собранного image — они уже скомпилированы под linux-musl.
-# Валидны пока не менялся `prisma/schema.prisma`. Если donor отсутствует
-# (первый build на новом сервере) — fallback на retry с CDN ниже.
-FROM source-adapter:latest AS prisma-engines-donor
+# Stage 1: Donor для node_modules (включая Prisma engines из pnpm-store).
+# Когда binaries.prisma.sh + registry.npmjs.org недоступны с my-server
+# (см. REGRESSIONS 26.05.2026) — берём весь готовый `/app/node_modules`
+# из последнего успешно собранного image. Валидно пока не менялись
+# `package.json` + `pnpm-lock.yaml` (deps не добавлялись).
+# Если donor отсутствует (первый build на новом сервере) — Docker откатится
+# на пересборку с нуля через `pnpm install` (требует доступ к npm + Prisma CDN).
+FROM source-adapter:latest AS deps-donor
 
 # Stage 2: Основной build.
 # Используем Google зеркало Docker Hub вместо прямого `node:20-alpine`.
@@ -22,29 +24,21 @@ RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 WORKDIR /app
 
-# Layer 1: только manifest + lockfile, лучше cache hit
+# Layer 1: manifest + lockfile (нужны для prisma migrate deploy в runtime).
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
 
-# Layer 2: pre-bundle Prisma engines из donor (overlay поверх node_modules).
-# Если donor доступен — engines уже есть, `prisma generate` будет no-op.
-# Если donor недоступен или схема изменилась — retry-loop ниже скачает с CDN.
-COPY --from=prisma-engines-donor /app/node_modules/@prisma /app/node_modules/@prisma
-COPY --from=prisma-engines-donor /app/node_modules/.prisma /app/node_modules/.prisma
+# Layer 2: весь node_modules из donor (включая Prisma engines в pnpm-store).
+# Это обходит и npm registry, и Prisma CDN. Если в `package.json` / lock
+# добавились новые deps — donor неактуальный, нужно fallback на `pnpm install`
+# (см. ниже комментарий про восстановление полноценной сборки).
+COPY --from=deps-donor /app/node_modules /app/node_modules
 
 # Layer 3: код
 COPY . .
 
-# `prisma generate` качает engine binaries с binaries.prisma.sh. Иногда
-# CDN флапает — добавляем retry-loop (3 попытки с экспоненциальным backoff).
-# Если engines уже скопированы из donor (Layer 2) и схема не менялась —
-# generate отрабатывает быстро без сетевых запросов.
-RUN for i in 1 2 3; do \
-        pnpm prisma generate && break || { \
-            echo "prisma generate attempt $i failed, retry in $((i*15))s..."; \
-            sleep $((i*15)); \
-        }; \
-    done && pnpm run build
+# Сборка TS → JS. Prisma generate не нужен — клиент уже сгенерирован в donor
+# `node_modules/.pnpm/@prisma+client@.../node_modules/.prisma/client/`.
+RUN pnpm run build
 
 EXPOSE 3000
 
