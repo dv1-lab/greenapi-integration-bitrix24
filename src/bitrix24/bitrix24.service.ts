@@ -25,6 +25,22 @@ import {
 import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { mask } from "../common/mask";
+import {
+	validateI2crmIncoming,
+	buildI2crmUserKey,
+	envKeyForI2crmLine,
+	buildI2crmFinalText,
+	extractI2crmMediaFile,
+	extractB24SessionInfo,
+	normalizePhoneE164,
+	formatI2crmQuoted,
+	type I2crmChannel,
+} from "../common/i2crm-payload";
+import {
+	shouldSkipOutgoingStatus,
+	isValidOutgoingStatus,
+	isOutgoingExpired,
+} from "../common/outgoing-status";
 import * as emoji from "node-emoji";
 
 export interface EnsureLeadResult {
@@ -93,6 +109,10 @@ export class Bitrix24Service extends BaseAdapter<
 	private readonly logger = GreenApiLogger.getInstance(Bitrix24Service.name);
 	private _outgoingCleanupInterval: NodeJS.Timeout | null = null;
 	private _tokenRefreshInterval: NodeJS.Timeout | null = null;
+	// Initial setTimeout handles — отменяем в onModuleDestroy, иначе
+	// зависают в event loop (в тестах ловятся как «log after tests done»).
+	private _outgoingCleanupKickoff: NodeJS.Timeout | null = null;
+	private _tokenRefreshKickoff: NodeJS.Timeout | null = null;
 
 	constructor(
 		protected readonly bitrix24Transformer: Bitrix24Transformer,
@@ -103,6 +123,11 @@ export class Bitrix24Service extends BaseAdapter<
 		private readonly mediaCache: MediaCacheService,
 	) {
 		super(bitrix24Transformer, prisma);
+		// В юнит-тестах не запускаем фоновые таймеры — иначе они срабатывают
+		// после teardown'а Prisma-mock'а и Jest ловит log-after-tests warning.
+		if (process.env.NODE_ENV === "test") {
+			return;
+		}
 		// Cleanup expired OutgoingMessage записей раз в час. Делаем через
 		// setInterval а не cron, чтобы не вводить новую инфру. Первый запуск
 		// через 5 минут после старта (даём миграциям прокатиться).
@@ -110,7 +135,9 @@ export class Bitrix24Service extends BaseAdapter<
 			() => { void this.cleanupExpiredOutgoingMessages(); },
 			60 * 60 * 1000,
 		);
-		setTimeout(() => { void this.cleanupExpiredOutgoingMessages(); }, 5 * 60 * 1000);
+		this._outgoingCleanupKickoff = setTimeout(
+			() => { void this.cleanupExpiredOutgoingMessages(); }, 5 * 60 * 1000,
+		);
 		// Проактивное обновление B24-токена: рефрешим заранее, до истечения.
 		// Без этого токен протухал в БД между ленивыми refresh-on-401, и
 		// read-only потребители (calls-poll синхронизатора звонков берёт токен
@@ -119,10 +146,20 @@ export class Bitrix24Service extends BaseAdapter<
 			() => { void this._proactiveTokenRefresh(); },
 			15 * 60 * 1000,
 		);
-		setTimeout(() => { void this._proactiveTokenRefresh(); }, 60 * 1000);
+		this._tokenRefreshKickoff = setTimeout(
+			() => { void this._proactiveTokenRefresh(); }, 60 * 1000,
+		);
 	}
 
 	onModuleDestroy() {
+		if (this._outgoingCleanupKickoff) {
+			clearTimeout(this._outgoingCleanupKickoff);
+			this._outgoingCleanupKickoff = null;
+		}
+		if (this._tokenRefreshKickoff) {
+			clearTimeout(this._tokenRefreshKickoff);
+			this._tokenRefreshKickoff = null;
+		}
 		if (this._outgoingCleanupInterval) {
 			clearInterval(this._outgoingCleanupInterval);
 			this._outgoingCleanupInterval = null;
@@ -2698,25 +2735,8 @@ export class Bitrix24Service extends BaseAdapter<
 	 *  i2crm может прислать его строкой или объектом — обрабатываем оба варианта
 	 *  без жёстких допущений о структуре; полный payload журналируется в
 	 *  I2crmEventLog, по нему можно уточнить формат при появлении живого примера. */
-	private formatI2crmQuoted(quoted: any): string {
-		if (!quoted) return "";
-		if (typeof quoted === "string") {
-			const s = quoted.trim();
-			return s ? `↩️ В ответ на: ${s}` : "";
-		}
-		if (typeof quoted === "object") {
-			const qText = String(quoted.text || quoted.caption || "").trim();
-			const qUrl = String(
-				quoted.url || quoted.media_url || quoted.src || quoted.story_url || "",
-			).trim();
-			const qType = String(quoted.type || "").trim();
-			const isStory = /story|stories/i.test(qType) || /story|stories/i.test(qUrl);
-			const label = isStory ? "сторис" : "сообщение";
-			const parts = [qText, qUrl].filter(Boolean);
-			return `↩️ В ответ на ${label}${parts.length ? ": " + parts.join(" ") : ""}`;
-		}
-		return "";
-	}
+	// formatI2crmQuoted вынесен в src/common/i2crm-payload.ts (single source of
+	// truth, покрыт тестами). См. там же — connector chat.id префиксы.
 
 	// Я.Метрика ClientId из метки, которую сайт 1begovoy.ru подставляет в
 	// pre-fill текста при «Спросить о товаре в WhatsApp/Telegram». Сайт за
@@ -3157,14 +3177,16 @@ export class Bitrix24Service extends BaseAdapter<
 	// в B24 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Отправляем через imconnector.send.messages
 	// напрямую, минуя Green API pipeline (i2crm — не Green API инстанс).
 	async handleI2crmIncoming(payload: any): Promise<{ success: boolean; reason?: string }> {
-		// Эхо: outgoing от оператора возвращается нам обратно — игнорируем.
-		if (payload?.incoming === false) {
-			return { success: true, reason: "outgoing-echo-ignored" };
+		// Валидация payload — pure helper (см. src/common/i2crm-payload.ts).
+		const v = validateI2crmIncoming(payload);
+		if (!v.valid) {
+			// echo (outgoing-echo) — это success:true, всё остальное — fail.
+			return { success: !!v.echo, reason: v.reason };
 		}
 
-		const channel = String(payload?.channel || "");
-		const clientId = payload?.client_id;
-		const messageId = payload?.message_id;
+		const channel = String(payload.channel) as I2crmChannel;
+		const clientId = payload.client_id;
+		const messageId = payload.message_id;
 		const text = payload?.text || "";
 		const type = String(payload?.type || "text");
 		const username = payload?.client_username || "";
@@ -3172,13 +3194,6 @@ export class Bitrix24Service extends BaseAdapter<
 		const phone = payload?.phone_number || "";
 		const externalId = payload?.external_id || "";
 		const datetime = payload?.datetime;
-
-		if (!clientId || !messageId) {
-			return { success: false, reason: "missing client_id or message_id" };
-		}
-		if (channel !== "instdir" && channel !== "instcom") {
-			return { success: false, reason: `unsupported channel: ${channel}` };
-		}
 
 		// Автоответ «нерабочее время» — только Instagram Direct (не комментарии),
 		// фоном, не блокирует доставку входящего в B24.
@@ -3213,7 +3228,7 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 
 		// LINE id из env: instdir → I2CRM_LINE_ID_IG_DIRECT, instcom → I2CRM_LINE_ID_IG_COMMENT
-		const lineEnv = channel === "instdir" ? "I2CRM_LINE_ID_IG_DIRECT" : "I2CRM_LINE_ID_IG_COMMENT";
+		const lineEnv = envKeyForI2crmLine(channel);
 		const lineId = Number(this.configService.get<string>(lineEnv));
 		if (!lineId || !Number.isFinite(lineId)) {
 			this.logger.error(`i2crm: ${lineEnv} not configured in .env`);
@@ -3233,9 +3248,7 @@ export class Bitrix24Service extends BaseAdapter<
 		const portalDomain = user.portalDomain;
 
 		// Лид/контакт по UF_CRM_IG_CHAT_ID (или phone если есть).
-		const phoneE164 = phone && /^\+?\d{10,15}$/.test(String(phone))
-			? (String(phone).startsWith("+") ? String(phone) : `+${phone}`)
-			: "";
+		const phoneE164 = normalizePhoneE164(phone);
 		// skipLeadCreation=true — лид создаст сама открытая линия B24, свой
 		// «(auto)» лид не плодим. Контакт привяжем к лиду сессии ниже через
 		// backfillIgUfFields (см. контакт-привязку по образцу tg-бота).
@@ -3265,12 +3278,8 @@ export class Bitrix24Service extends BaseAdapter<
 		const igPostUrl = isComment ? (payload?.src || payload?.post_url || payload?.media_url || "") : "";
 		// Для Direct: на что отвечает клиент (ответ на сторис / на сообщение).
 		// quoted_message=null у холодного сообщения — тогда контекста нет, это норма.
-		const quotedNote = !isComment ? this.formatI2crmQuoted(payload?.quoted_message) : "";
-		const finalText = isComment
-			? `[Instagram комментарий${igPostUrl ? " к посту " + igPostUrl : ""}]\n${text}`
-			: quotedNote
-				? `${quotedNote}\n${text}`
-				: text;
+		const quotedNote = !isComment ? formatI2crmQuoted(payload?.quoted_message) : "";
+		const finalText = buildI2crmFinalText({ channel, text, igPostUrl, quotedNote });
 
 		// A2: для instcom используем mediaId в составе chat/user.id — каждый
 		// пост получает свою сессию и свой лид B24. Для instdir один user.id
@@ -3278,9 +3287,7 @@ export class Bitrix24Service extends BaseAdapter<
 		// постами) подвязываются к одному контакту через UF_CRM_IG_CHAT_ID и
 		// orphan-link / backfillIgUfFields.
 		const mediaIdForKey = isComment ? String(payload?.media_id || "") : "";
-		const userKey = isComment && mediaIdForKey
-			? `i2crm_ig_${clientId}_c${mediaIdForKey}`
-			: `i2crm_ig_${clientId}`;
+		const userKey = buildI2crmUserKey(channel, clientId, mediaIdForKey);
 		const ts = datetime ? Math.floor(new Date(datetime).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
 		const messagePayload: any = {
@@ -3313,16 +3320,9 @@ export class Bitrix24Service extends BaseAdapter<
 		// instdir, в т.ч. картинка поста-источника когда клиент нажал
 		// «отправить сообщение» с поста — Instagram прикрепляет фото поста
 		// первым сообщением); `media_url` / `media.url` (legacy / другие типы).
-		if (type !== "text") {
-			const mediaUrl = payload?.src || payload?.media_url || payload?.media?.url;
-			if (mediaUrl) {
-				messagePayload.message.files = [
-					{
-						url: String(mediaUrl),
-						name: payload.media?.file_name || `${type}.bin`,
-					},
-				];
-			}
+		const mediaFile = extractI2crmMediaFile(type, payload);
+		if (mediaFile) {
+			messagePayload.message.files = [mediaFile];
 		}
 
 		let sessionInfo: { sessionId?: string; chatId?: string } = {};
@@ -3334,11 +3334,7 @@ export class Bitrix24Service extends BaseAdapter<
 			});
 			// Извлекаем session.ID и session.CHAT_ID из ответа — нужны для карточки
 			// клиента в TG-зеркало.
-			const r0 = response?.DATA?.RESULT?.[0];
-			if (r0?.session) {
-				sessionInfo.sessionId = String(r0.session.ID || "");
-				sessionInfo.chatId = String(r0.session.CHAT_ID || "");
-			}
+			sessionInfo = extractB24SessionInfo(response);
 			this.logger.info(
 				`i2crm: sent to B24 line=${lineId} channel=${channel} client=${clientId} msg=${messageId} externalId=${externalId}`,
 			);
@@ -5664,7 +5660,7 @@ export class Bitrix24Service extends BaseAdapter<
 	async handleOutgoingMessageStatus(webhook: any): Promise<void> {
 		const idMessage = String(webhook?.idMessage || "");
 		const status = String(webhook?.status || "").toLowerCase();
-		if (!idMessage || !["sent", "delivered", "read"].includes(status)) return;
+		if (!idMessage || !isValidOutgoingStatus(status)) return;
 
 		const entry = await (this.prisma as any).outgoingMessage.findUnique({
 			where: { idMessage },
@@ -5674,7 +5670,7 @@ export class Bitrix24Service extends BaseAdapter<
 			// нет mapping'а для проксирования статуса.
 			return;
 		}
-		if (entry.expiresAt.getTime() < Date.now()) {
+		if (isOutgoingExpired(entry.expiresAt)) {
 			await (this.prisma as any).outgoingMessage.delete({ where: { idMessage } }).catch(() => undefined);
 			return;
 		}
@@ -5682,9 +5678,8 @@ export class Bitrix24Service extends BaseAdapter<
 		// более продвинутый) уже обработан — skip. Иначе при retry'е
 		// Green API мы каждый раз дёргали бы B24 imconnector.send.status.delivery,
 		// забивая rate-limit и засоряя logs.
-		const STATUS_ORDER: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
 		const last = entry.lastStatusSeen ? String(entry.lastStatusSeen) : "";
-		if (last && (STATUS_ORDER[last] || 0) >= (STATUS_ORDER[status] || 0)) {
+		if (shouldSkipOutgoingStatus(last, status)) {
 			this.logger.debug(
 				`outgoingStatus dedup: idMessage=${idMessage} already at ${last}, ignoring ${status}`,
 			);
