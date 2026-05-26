@@ -5,6 +5,7 @@
 	"author": "GREEN-API",
 	"private": false,
 	"license": "MIT",
+	"packageManager": "pnpm@10.33.2",
 	"scripts": {
 		"build": "nest build",
 		"start": "nest start",

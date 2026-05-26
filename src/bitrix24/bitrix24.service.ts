@@ -2822,7 +2822,10 @@ export class Bitrix24Service extends BaseAdapter<
 		const field = isImage ? "photo" : "document";
 		const form = new FormData();
 		form.append("chat_id", chatId);
-		form.append(field, new Blob([buffer]), filename);
+		// Buffer → Uint8Array: новые @types/node v22 требуют ArrayBufferView<ArrayBuffer>
+		// для BlobPart, а Buffer<ArrayBufferLike> может быть SharedArrayBuffer.
+		// new Uint8Array(buffer) шарит underlying memory, не копирует.
+		form.append(field, new Blob([new Uint8Array(buffer)]), filename);
 		if (caption) form.append("caption", caption.slice(0, 1024));
 		const resp: any = await axios.post(
 			`https://api.telegram.org/bot${token}/${method}`,
