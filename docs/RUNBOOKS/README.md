@@ -37,3 +37,5 @@
   если open-line не отвечает на incoming
 - [`secret-leak-recovery.md`](./secret-leak-recovery.md) — Утёк секрет
   в git/transcript — что делать
+- [`backup-person-onboarding.md`](./backup-person-onboarding.md) —
+  Onboarding для backup-person Дмитрия (на случай если он недоступен)

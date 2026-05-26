@@ -92,13 +92,38 @@ backup-person:
   контакт ещё актуален)
 - Раз в полгода — drill-тест
 
-## TODO от Дмитрия
+## Решения Дмитрия (26.05.2026)
 
-- [ ] Решить **кого** назначить backup-person
-- [ ] Создать в Bitwarden Emergency Access (если есть Premium, иначе купить)
-- [ ] Положить sealed envelope в банковскую ячейку
-- [ ] Заполнить колонку **Backup-person** в `ACCESS.md`
-- [ ] Назначить дату первого drill-теста (например, через 3 месяца)
+| Вопрос | Решение |
+|---|---|
+| **Кого назначить backup-person?** | Член семьи (жена / родители / брат) — конкретное имя TODO |
+| **Механизм передачи** | Bitwarden Emergency Access (без sealed envelope) |
+| **Bitwarden Premium** | НЕТ, нужно купить (~$10/год) |
+
+**Минус выбора без sealed envelope:** если Bitwarden как сервис
+окажется недоступен (компания закрылась, акк заблокирован) — есть
+риск потери всего. Sealed envelope страховал бы. Но Дмитрий принял
+этот риск (Bitwarden — крупный игрок, риск низкий).
+
+## TODO от Дмитрия (по новым решениям)
+
+- [ ] **Купить Bitwarden Premium** — https://bitwarden.com/upgrade
+  ($10/год, оплата картой). После покупки появится «Emergency Access»
+  в Account Settings.
+- [ ] **Выбрать конкретного члена семьи** и обсудить с ним готовность
+  быть backup-person. Минимум что нужно от него:
+  - Tech-savvy на уровне «открыть Bitwarden, скопировать пароль,
+    зайти по SSH через клиент» (научим если нет)
+  - Готов получать звонки в экстренных случаях
+  - Bitwarden account (можно создать на его имя при онбординге)
+- [ ] **Создать в Bitwarden Emergency Access** запись для него
+  (Settings → Emergency Access → Add Trusted Emergency Contact →
+  email backup-person, grace period 7 дней)
+- [ ] **Onboarding** — пройти с ним документ
+  `RUNBOOKS/backup-person-onboarding.md` (создан в этом же ADR)
+- [ ] **Заполнить колонку «Backup-person»** в `ACCESS.md` после
+  принятия (имя + email)
+- [ ] **Назначить дату drill-теста** через 3 месяца (примерно 26 августа 2026)
 
 ## Связано
 
