@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 import { StartupBackfillService } from "./startup-backfill.service";
+import { OutgoingAuditService } from "./outgoing-audit.service";
 
 /**
  * REST для ручного запуска startup-backfill (например, после очередного
@@ -18,7 +19,10 @@ import { StartupBackfillService } from "./startup-backfill.service";
 export class RecoveryController {
 	private readonly logger = GreenApiLogger.getInstance(RecoveryController.name);
 
-	constructor(private readonly backfill: StartupBackfillService) {}
+	constructor(
+		private readonly backfill: StartupBackfillService,
+		private readonly outgoingAudit: OutgoingAuditService,
+	) {}
 
 	@Post("run-backfill")
 	@HttpCode(HttpStatus.OK)
@@ -40,6 +44,32 @@ export class RecoveryController {
 			res.json({ ok: true, ...result });
 		} catch (error: any) {
 			this.logger.error(`recovery/run-backfill failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
+	@Post("outgoing-audit")
+	@HttpCode(HttpStatus.OK)
+	@ApiOperation({
+		summary: "Dry-run audit operator outgoing messages (task #72)",
+		description:
+			"Сравнивает operator-сообщения в B24 open-line чатах с нашей OutgoingMessage таблицей. " +
+			"Возвращает количество потенциально не доставленных + sample. НЕ ретраит, только аудит. " +
+			"Параметры: { minutes?: number } (default 1440). Auth: X-Hint-Secret.",
+	})
+	async runOutgoingAudit(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { minutes?: number };
+		try {
+			const result = await this.outgoingAudit.audit({ minutes: body.minutes });
+			res.json({ ok: true, ...result });
+		} catch (error: any) {
+			this.logger.error(`recovery/outgoing-audit failed: ${error.message}`);
 			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
 		}
 	}

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { PrismaModule } from "../prisma/prisma.module";
 import { Bitrix24Module } from "../bitrix24/bitrix24.module";
 import { StartupBackfillService } from "./startup-backfill.service";
+import { OutgoingAuditService } from "./outgoing-audit.service";
 import { RecoveryController } from "./recovery.controller";
 
 /**
@@ -17,7 +18,7 @@ import { RecoveryController } from "./recovery.controller";
 @Module({
 	imports: [PrismaModule, Bitrix24Module],
 	controllers: [RecoveryController],
-	providers: [StartupBackfillService],
-	exports: [StartupBackfillService],
+	providers: [StartupBackfillService, OutgoingAuditService],
+	exports: [StartupBackfillService, OutgoingAuditService],
 })
 export class RecoveryModule {}
