@@ -97,10 +97,53 @@ adapter превращает webhook в сообщение открытой ли
 
 ### 5.1. WhatsApp
 
-- Самый простой: клиент = телефон. `chatId` = `<phone>@c.us`.
-- Исходящие с мобильного WhatsApp (менеджер ответил в приложении) приходят
-  как `outgoingAPIMessageReceived` → `handleOutgoingFromMobile` оставляет
-  **timeline-комментарий** в карточке (открытую линию не создаёт).
+**Конфигурация каналов** (2 номера, 2 инстанса, 2 линии):
+
+| Назначение | Инстанс | Линия B24 | Номер магазина |
+|---|---|---|---|
+| Basic / основной | `1101948511` | **148** | (см. `.env` adapter) |
+| Доп. инстанс | `1103487233` | **174** | (см. `.env` adapter) |
+
+| Параметр | Значение |
+|---|---|
+| UF клиента | **нет** — клиент идентифицируется по phone (стандартное поле B24) |
+| Префикс `chat.id` | `wa_<phone>` (наш формат) / `<phone>@c.us` (Green API формат) |
+
+**Идентификация:** Самый простой канал — клиент = телефон. `chatId` =
+`<phone>@c.us`. `CheckAccount` для phone в WhatsApp работает без ограничений
+(в отличие от TG/MAX, см. §5.2-5.3).
+
+**Правила создания лидов** (применено к обеим линиям):
+открытая сделка → forward; открытый лид → продолжение; иначе → новый лид.
+См. [`PRODUCT_RULES.md §1.1`](./PRODUCT_RULES.md).
+
+**Распределение операторов** (применено 26.05.2026 на 148 + 174):
+`QUEUE_TYPE=all` + `CRM_TRANSFER_CHANGE=N`. См. ADR
+[`2026-05-26-openlines-queue-type-evenly`](./decisions/2026-05-26-openlines-queue-type-evenly.md).
+
+**Outgoing-пути для оператора:**
+1. Из чата open-line в B24 → Green API `sendMessage`
+2. Через виджет «Social Connector» (`POST /widget/send`) → `<phone>@c.us` →
+   `sendMessage` (без CheckAccount-резолва — phone и есть идентификатор)
+3. **С мобильного WhatsApp** того же аккаунта магазина → Green API шлёт
+   `outgoingAPIMessageReceived` → `handleOutgoingFromMobile` оставляет
+   **timeline-комментарий** в карточке (открытую линию не создаёт)
+4. Через native B24 OpenLine UI без нашего widget'а → orphan-link (см. ниже)
+
+**Orphan-link при native B24 UI** (фикс #68, sha `afe5316`, 26.05.2026):
+аналогично MAX/TG/IG. TITLE pattern `<chat_id> - WhatsApp <phone>`, поиск
+контакта **по phone из TITLE** (UF_CRM_WA_CHAT_ID на портале не существует).
+См. ADR
+[`2026-05-26-orphan-lead-linker`](./decisions/2026-05-26-orphan-lead-linker.md).
+
+**Конверсия лида → контакт:** для WhatsApp **спецлогика не нужна** — phone
+это стандартное поле B24, наследуется при конверсии автоматически. Фикс #69
+(`_propagateChatIdsOnConvert`) затрагивает только TG/MAX/IG-каналы с
+кастомными UF.
+
+**Зеркало в TG-группе:**
+Каждый WA-инстанс — своя TG-админ-группа, топик на клиента. Маппинг
+в `bridge.sqlite` wa-tg-bridge. См. §7.
 
 ### 5.2. MAX
 
@@ -178,7 +221,29 @@ B24 при конверсии не наследует UF на новый кон�
 на клиента. Маппинг `instance ↔ chat ↔ topic` — SQLite `bridge.sqlite`
 в wa-tg-bridge. См. §7.
 
-### 5.3. Telegram
+### 5.3. Telegram (номер магазина — НЕ бот)
+
+> ⚠️ **Не путать с TG-ботами** (`@begovoy_bot`, `@begovoy1support_bot`).
+> Это совсем другой канал — см. [`TELEGRAM_BOT_FLOW.md`](./TELEGRAM_BOT_FLOW.md).
+> Здесь — про **TG-аккаунт магазина по номеру**, подключённый через Green API
+> как обычный пользовательский Telegram.
+
+**Конфигурация каналов** (2 номера, 2 инстанса, 2 линии):
+
+| Назначение | Инстанс | Линия B24 | Номер аккаунта |
+|---|---|---|---|
+| Basic «TG begovoy» | `4100621194` | **178** | `79584983354` (тот же что MAX) |
+| Офисный «Office TG» | `4100624465` | **204** | `79240778566` (тот же что WA-148) |
+
+| Параметр | Значение |
+|---|---|
+| UF клиента | `UF_CRM_TG_CHAT_ID` |
+| Префикс `chat.id` | без префикса (внутренний chatId Telegram, например `396522892`) |
+
+Офисная линия 204 имеет специфику запуска и общую очередь операторов с WA-148 —
+см. §8.
+
+**Идентификация и резолв phone→chatId:**
 
 - Клиент = внутренний chatId, телефона нет.
 - **CheckAccount** на TG-shard'е: `phoneNumber` обязан быть **integer**
@@ -188,20 +253,58 @@ B24 при конверсии не наследует UF на новый кон�
   по `@username`.
 - Резолв по username: Green API принимает `chatId` в формате `<username>@c.us`
   в `sendMessage`.
+- Полный flow резолва 4 приоритета (B24 → @username → кеш → CheckAccount):
+  см. §6.1.
 - **КРИТИЧНО: silent-fail `@c.us` для chatId.** Если в `sendMessage` передать
   `chatId: "<numeric_id>@c.us"` — Green API возвращает `idMessage` (как будто
   успех), но сообщение **не доставляется**. Без суффикса (`chatId: "<id>"`) —
   доставляется. Поэтому в `bitrix24.transformer.ts` для chat.id с префиксом
   `sc_` формируется chatId БЕЗ `@c.us`. Префикс `wa_*` остаётся `<phone>@c.us`.
-- Исходящие с устройства (менеджер набрал в Telegram-приложении нашего
-  аккаунта) приходят как `outgoingMessageReceived` → `handleOutgoingFromDevice`
-  зеркалит в открытую линию как `is_self_message` (см. §6).
+
+**Правила создания лидов** (применено к 178 + 204):
+открытая сделка → forward; открытый лид → продолжение; иначе → новый лид.
+См. [`PRODUCT_RULES.md §1.1`](./PRODUCT_RULES.md).
+
+**Распределение операторов** (применено 26.05.2026):
+`QUEUE_TYPE=all` + `CRM_TRANSFER_CHANGE=N`. См. ADR
+[`2026-05-26-openlines-queue-type-evenly`](./decisions/2026-05-26-openlines-queue-type-evenly.md).
+
+**Outgoing-пути для оператора** (4 способа, см. §6):
+1. Из чата open-line в B24 → Green API `sendMessage`
+2. Через виджет «Social Connector» в карточке (`POST /widget/send` →
+   резолв 4 приоритета → `sendMessage`)
+3. С физического устройства Telegram-аккаунта магазина (или Telegram Web) —
+   `outgoingMessageReceived` → `handleOutgoingFromDevice` зеркалит в
+   open-line как `is_self_message`
+4. Через native B24 OpenLine UI — см. ниже про orphan-link
+
+**Orphan-link при native B24 UI** (фикс #68, sha `afe5316`, 26.05.2026):
+TITLE pattern `<chat_id> - Telegram <phone>` или `<chat_id> - TG <phone>`,
+поиск контакта по UF/phone, привязка + закрытие как «Дубликат» при openEntity.
+См. ADR
+[`2026-05-26-orphan-lead-linker`](./decisions/2026-05-26-orphan-lead-linker.md).
+
+**Конверсия лида → контакт** (фикс #69, sha `e883832`, 27.05.2026):
+`_propagateChatIdsOnConvert` копирует `UF_CRM_TG_CHAT_ID` с лида на
+привязанный контакт после конверсии. См. ADR
+[`2026-05-26-convert-propagate-chat-ids`](./decisions/2026-05-26-convert-propagate-chat-ids.md).
+
+**Текущие ограничения:**
+
+- **Bulk-импорт номеров** в адресную книгу TG-аккаунта магазина через API
+  невозможен (`addContact` 404). Issue #21 в `green-api/telegram-issues`.
+  Workaround — ручное добавление через приложение / Telegram Web на телефоне
+  магазина. См. memory `[[greenapi-addcontact-pending]]`, task #64.
 - **Каналы/группы отсекаются.** Наш Telegram-аккаунт подписан на сторонние
   каналы — их посты-рассылки прилетают входящими webhook'ами. У Telegram
   личные чаты имеют положительный `chatId`, а каналы / супергруппы / группы —
   отрицательный (`-100…` / `-…`). bridge в `handle_ga_webhook`
   (`_is_telegram_group_or_channel`) отбрасывает такие webhook'и до форварда в
   adapter и до TG-зеркала — иначе пост канала превращался в лид B24.
+
+**Зеркало в TG-админ-группе:**
+На каждый инстанс — своя группа, топик на клиента. `bridge.sqlite`
+wa-tg-bridge хранит маппинг. См. §7.
 
 ---
 
