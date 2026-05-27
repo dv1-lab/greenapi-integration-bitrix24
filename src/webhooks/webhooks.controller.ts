@@ -90,6 +90,25 @@ export class WebhooksController {
 			this.bitrix24Service.maybeOffHoursAutoReply(webhook).catch((error: any) =>
 				this.logger.warn(`off-hours auto-reply failed: ${error.message}`),
 			);
+			// Журналируем idMessage для дедупа backfill после downtime (task #71).
+			// Идемпотентно: при ретрае webhook от Green API запись уже будет, skipDuplicates
+			// проигнорирует. Не блокируем основной поток — фоном.
+			void (async () => {
+				try {
+					await (this.prisma as any).incomingMessage.createMany({
+						data: [{
+							idMessage: webhook.idMessage,
+							idInstance: BigInt(webhook.instanceData.idInstance),
+							chatId: webhook.senderData.chatId,
+							timestamp: webhook.timestamp,
+							source: "webhook",
+						}],
+						skipDuplicates: true,
+					});
+				} catch (e: any) {
+					this.logger.warn(`incoming-log upsert failed for ${webhook.idMessage}: ${e.message}`);
+				}
+			})();
 		}
 
 		try {

@@ -247,6 +247,25 @@ model OffHoursReply {
   createdAt     DateTime @default(now())
 }
 
+// Журнал incoming-сообщений от Green API (WA/MAX/TG-номер магазина) для
+// (а) идемпотентности backfill после downtime adapter (task #71) и
+// (б) общего аудита. Записывается в webhooks-контроллере при получении
+// `incomingMessageReceived`. При backfill через `lastIncomingMessages`
+// проверяем по `idMessage` — если уже есть, не обрабатываем заново.
+// Idempotent upsert по `idMessage` (Green API гарантирует глобальную
+// уникальность в пределах инстанса).
+model IncomingMessage {
+  idMessage  String   @id @db.VarChar(100)
+  idInstance BigInt
+  chatId     String   @db.VarChar(64)
+  timestamp  Int                                // Unix seconds от Green API
+  source     String   @default("webhook") @db.VarChar(16)  // webhook / backfill_startup
+  receivedAt DateTime @default(now())
+
+  @@index([idInstance, timestamp])
+  @@index([chatId])
+}
+
 // Журнал сообщений Telegram-бота (@begovoy_bot) — клиентский канал,
 // подключённый напрямую через Telegram Bot API (не Green API, не i2crm).
 // Симметрично I2crmEventLog: каждый incoming-update и outgoing-сообщение
