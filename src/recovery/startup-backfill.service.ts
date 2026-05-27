@@ -107,16 +107,37 @@ export class StartupBackfillService implements OnApplicationBootstrap {
 		const apiUrl = greenApiUrl(idInstance);
 		const apiToken = inst.apiTokenInstance;
 
+		// Retry на transient network/DNS-ошибки: после downtime hip.hosting
+		// networking может ещё не стабилизироваться (EAI_AGAIN/getaddrinfo).
+		// Без retry backfill тихо провалится — было 27.05.2026 (см. REGRESSIONS).
 		let messages: any[] = [];
-		try {
-			const r = await axios.get(
-				`${apiUrl}/waInstance${idInstance}/lastIncomingMessages/${apiToken}`,
-				{ params: { minutes }, timeout: 30_000 },
-			);
-			messages = Array.isArray(r.data) ? r.data : [];
-		} catch (e: any) {
+		let lastErr: any = null;
+		const maxAttempts = 3;
+		const baseDelayMs = 30_000;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				const r = await axios.get(
+					`${apiUrl}/waInstance${idInstance}/lastIncomingMessages/${apiToken}`,
+					{ params: { minutes }, timeout: 30_000 },
+				);
+				messages = Array.isArray(r.data) ? r.data : [];
+				lastErr = null;
+				break;
+			} catch (e: any) {
+				lastErr = e;
+				const msg = String(e?.code || e?.message || e);
+				const isTransient = /EAI_AGAIN|getaddrinfo|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET/i.test(msg);
+				if (!isTransient || attempt === maxAttempts) break;
+				const delayMs = baseDelayMs * Math.pow(2, attempt - 1); // 30s → 60s → 120s
+				this.logger.warn(
+					`startup-backfill: lastIncomingMessages for ${idInstance} attempt ${attempt}/${maxAttempts} transient error: ${msg}; retry in ${Math.round(delayMs/1000)}s`,
+				);
+				await new Promise((res) => setTimeout(res, delayMs));
+			}
+		}
+		if (lastErr) {
 			this.logger.warn(
-				`startup-backfill: lastIncomingMessages for ${idInstance} failed: ${e?.message || e}`,
+				`startup-backfill: lastIncomingMessages for ${idInstance} failed after ${maxAttempts} attempts: ${lastErr?.message || lastErr}`,
 			);
 			return { recovered: 0, skipped: 0, errors: 1 };
 		}

@@ -8,6 +8,51 @@
 
 ---
 
+## 2026-05-27 · #71 startup-backfill провалился на DNS EAI_AGAIN после downtime
+
+- **Симптом**: третий за день инцидент hip.hosting (~3.5 ч недоступности
+  19:00–22:30 МСК). Когда сетевой канал восстановился, adapter рестартовал
+  в 22:30 МСК; через 30 сек сработал #71 startup-backfill. В логах:
+  ```
+  startup-backfill: lastIncomingMessages for 1103487233 failed:
+    getaddrinfo EAI_AGAIN 1103.api.green-api.com
+  startup-backfill: lastIncomingMessages for 1101948511 failed:
+    getaddrinfo EAI_AGAIN api.green-api.com
+  ... (то же для 3100/4100/4100624465)
+  startup-backfill: done — instances=5 recovered=0 skipped=0 errors=5
+  ```
+  Тихо завершился с recovered=0. По факту за период outage было **24
+  пропущенных incoming-сообщения** (20 на TG-личном, 2 MAX, 1 WA, 1 офисный
+  TG) — все они **остались бы недоставленными в B24**, если бы регрессия не
+  была замечена и backfill не был перезапущен вручную через
+  `POST /recovery/run-backfill` в 23:09 МСК.
+- **Корень**: networking на my-server после восстановления сетевого канала
+  hip.hosting не сразу разрешает DNS — есть лаг 1–3 минуты пока
+  `systemd-resolved` обновит upstream'ы, маршруты прокачаются, итп.
+  30-секундный `setTimeout` в `onApplicationBootstrap` оказался
+  недостаточным. Один-shot вызов `axios.get(lastIncomingMessages)` без retry
+  даёт `EAI_AGAIN` → тихо `errors=1` → итог recovered=0.
+- **Фикс** (sha TBD, файл `src/recovery/startup-backfill.service.ts`):
+  retry-loop внутри `backfillInstance()` с экспоненциальным backoff
+  30s → 60s → 120s на transient errors (`EAI_AGAIN`/`getaddrinfo`/
+  `ECONNREFUSED`/`ENOTFOUND`/`ETIMEDOUT`/`ECONNRESET`). Каждая попытка
+  логируется через `logger.warn` чтобы видеть прогресс. Максимум 3 попытки,
+  суммарный max-wait ≈ 3.5 мин — этого хватает на восстановление DNS.
+- **Что НЕ делать**:
+  - НЕ увеличивать `setTimeout` в `onApplicationBootstrap` до 5+ мин —
+    блокирует первый backfill после нормального deploy без сетевых проблем,
+    мешает быстрому feedback'у при обычной разработке.
+  - НЕ ретраить **logical errors** Green API (4xx/5xx с осмысленным телом) —
+    только сетевые transient. Иначе при невалидном токене будем 3 раза
+    дёргать с 30/60/120 сек паузами.
+  - НЕ убирать `logger.warn` про каждую попытку — без них не видно
+    разницы между «1 раз 30с медленно» и «3 раза подряд EAI_AGAIN».
+- **Связанные**: `[[1begovoy-bots-CLAUDE-startup-backfill]]`,
+  task #71 (исходный feat), сегодняшние записи в vault про
+  «3 инцидента hip.hosting за день».
+
+---
+
 ## 2026-05-26 · Build залип на 5+ часов — DDoS-атака на hip.hosting
 
 - **Симптом**: `docker compose up -d adapter --build --force-recreate` падает на
