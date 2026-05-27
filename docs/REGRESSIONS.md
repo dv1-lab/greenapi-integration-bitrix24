@@ -58,6 +58,58 @@
 
 ---
 
+## 2026-05-27 · Donor `node_modules` устаревает при изменении `prisma/schema.prisma`
+
+- **Симптом**: при добавлении новой Prisma model (`IncomingMessage`) и
+  деплое через donor-stage Dockerfile (план B from REGRESSIONS 26.05) —
+  runtime даёт `Cannot read properties of undefined (reading 'findMany')`
+  при попытке `this.prisma.incomingMessage.findMany(...)`. Adapter
+  стартует, но в логах `StartupBackfillService` падает на каждом
+  instance.
+- **Корень**: donor image `source-adapter:latest` содержит `node_modules/
+  .pnpm/@prisma+client@.../node_modules/.prisma/client/` сгенерированный
+  на основе **предыдущей** `schema.prisma`. Когда мы COPY всё это в новый
+  build, `prisma generate` повторно не запускается → новый `.prisma/client`
+  не создаётся → клиент Prisma не знает о новой модели.
+- **Фикс** (sha `4077ca3`): добавить `RUN pnpm prisma generate` в Dockerfile
+  **после** `COPY . .` и **до** `pnpm run build`. Engines берутся из donor
+  pnpm-store локально, сетевые запросы к binaries.prisma.sh не делаются —
+  они уже скачаны в donor. Retry-loop оставлен как защита (на случай если
+  Prisma решит дотащить отсутствующие engines с CDN).
+- **Что НЕ повторять**: НЕ предполагать что copy node_modules ≡ свежий
+  Prisma client. Любое изменение `schema.prisma` требует `prisma generate`
+  в той же build-stage где собирается код.
+- **Verify**: после фикса `StartupBackfillService` отработал и
+  восстановил 76 incoming-сообщений за 24ч.
+- **Связано**: ADR `decisions/2026-05-27-startup-backfill-incoming.md`,
+  task #71 closed.
+
+---
+
+## 2026-05-27 · `author_id != 0` ≠ operator — нужен `CONNECTOR_MID` filter
+
+- **Симптом**: первый прогон outgoing-audit для task #72 дал
+  `potentialLoss=175` из 364 (48%!). Подозрительно много, дёрнули
+  samples — нашли author 153298 в чате с клиентом Ярослав. Через
+  `user.get` оказалось что 153298 это **client chat-user**, не B24 employee.
+- **Корень**: в `im.dialog.messages.get` для open-line диалогов `author_id`
+  это **`b24 user_id` И ДЛЯ ОПЕРАТОРОВ, И ДЛЯ КЛИЕНТОВ-в-чате**. У клиентов
+  B24 заводит синтетический chat-user. Простой фильтр «author_id != 0»
+  даёт **incoming клиентов** наравне с outgoing операторов.
+- **Фикс** (sha `46c3da9`): использовать `params.CONNECTOR_MID` как
+  признак «прошло через коннектор». Для incoming — B24 проставляет
+  CONNECTOR_MID = idMessage Green API при приёме. Для outgoing — мы
+  проставляем через `imconnector.send.status.delivery`. Если `author_id
+  != 0` И **CONNECTOR_MID отсутствует** — это и есть operator-сообщение
+  которое не доставилось наружу. После фикса: 0 потерь за 24ч.
+- **Что НЕ повторять**: для open-line диалогов B24 НЕ полагаться на
+  `author_id` как «человеческое vs. бот». Использовать `params.CONNECTOR_MID`
+  как индикатор «прошло через коннектор».
+- **Связано**: ADR `decisions/2026-05-27-outgoing-audit-dry-run.md`,
+  task #72 closed.
+
+---
+
 ## 2026-05-27 · `event.bind ONCRMLEADCONVERT` не существует в B24 (HTTP 400)
 
 - **Симптом**: после деплоя task #69, `POST /internal/register-b24-events` вернул для всех events `bound`, кроме `ONCRMLEADCONVERT` — `failed, Bitrix24 API call failed: Request failed with status code 400`.
