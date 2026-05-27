@@ -118,13 +118,22 @@ export class OutgoingAuditService {
 						? result
 						: [];
 				for (const m of messages) {
-					if (!m || !m.id || m.author_id === 0) continue; // система
+					if (!m || !m.id || m.author_id === 0) continue; // системные
 					const ts = m.date ? new Date(m.date).getTime() : 0;
 					if (ts > 0 && ts < cutoff.getTime()) continue; // за окном
-					operatorMessagesInB24++;
+					// CONNECTOR_MID — поле которое B24 проставляет если сообщение
+					// прошло через коннектор (incoming клиента или подтверждённый
+					// outgoing оператора через imconnector.send.status.delivery).
+					// Если есть — сообщение доставлено за пределы B24. Нет → loss.
+					const params = m.params;
+					const hasConnectorMid =
+						params && typeof params === "object" && !Array.isArray(params)
+							&& Array.isArray(params.CONNECTOR_MID) && params.CONNECTOR_MID.length > 0;
+					if (hasConnectorMid) continue; // доставлено
+					operatorMessagesInB24++; // только не-доставленные operator-сообщения
 					const b24MessageId = String(m.id);
-					if (ourMessageIds.has(b24MessageId)) continue; // у нас есть, всё ок
-					// Не нашли — кандидат на «не доставлено»
+					if (ourMessageIds.has(b24MessageId)) continue; // у нас в OutgoingMessage есть
+					// Точная потеря: operator-сообщение в B24 без CONNECTOR_MID и без записи у нас.
 					potentialLoss++;
 					if (samples.length < SAMPLE_CAP) {
 						samples.push({
