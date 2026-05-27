@@ -104,12 +104,79 @@ adapter превращает webhook в сообщение открытой ли
 
 ### 5.2. MAX
 
+**Конфигурация канала:**
+
+| Параметр | Значение |
+|---|---|
+| Номер аккаунта магазина | `79584983354` (тот же что для TG-канала магазина) |
+| Green API инстанс | `3100621187` |
+| Линия B24 | **182** «MAX» |
+| UF клиента | `UF_CRM_MAX_CHAT_ID` |
+| Префикс `chat.id` | без префикса (внутренний chatId MAX) |
+
+**Идентификация и резолв phone→chatId:**
+
 - Клиент = внутренний chatId, телефона нет.
 - Green API метод **CheckAccount** резолвит phone → chatId, **только если**
   номер есть в адресной книге MAX-аккаунта. `phoneNumber` принимается строкой.
-- Кеш phone→chatId — таблица `MaxContact` в БД adapter.
+- Кеш phone→chatId — таблица `MaxContact` в БД adapter (исторически имя одно
+  на оба провайдера TG/MAX).
+- Полный flow резолва 4 приоритета (B24 → @username → кеш → CheckAccount):
+  см. §6.1.
 - **Изображения приходят в формате webp** — Telegram принимает их через
   `send_photo` загруженными байтами (не по ссылке).
+
+**Правила создания лидов** (применено к линии 182):
+открытая сделка → forward; открытый лид → продолжение; иначе → новый лид
+(`CRM_CREATE=lead`, `CRM_CREATE_SECOND=N`, `CRM_FORWARD=Y`). См.
+[`PRODUCT_RULES.md §1.1`](./PRODUCT_RULES.md).
+
+**Распределение операторов** (применено 26.05.2026 на линии 182):
+`QUEUE_TYPE=all` (уведомление всем сразу, первый забрал — ведёт) +
+`CRM_TRANSFER_CHANGE=N` (новое обращение не наследует ответственного
+из исторического лида). См. ADR
+[`2026-05-26-openlines-queue-type-evenly`](./decisions/2026-05-26-openlines-queue-type-evenly.md).
+
+**Outgoing-пути для оператора** (4 способа, см. §6):
+1. Из чата open-line в B24 (`ONIMCONNECTORMESSAGEADD` → `sendMessage`)
+2. Через виджет «Social Connector» в карточке (`POST /widget/send` →
+   резолв 4 приоритета → `sendMessage`)
+3. С физического устройства MAX (или MAX Web) того же аккаунта магазина —
+   `outgoingMessageReceived` → `handleOutgoingFromDevice` зеркалит в open-line
+4. Через native B24 OpenLine UI (без нашего widget'а) — см. ниже про orphan-link
+
+**Orphan-link при native B24 UI** (фикс #68, sha `afe5316`, 26.05.2026):
+если оператор пишет через стандартный B24 OpenLine UI без нашего виджета,
+B24 создаёт лид без `CONTACT_ID` и `UF_CRM_MAX_CHAT_ID`. Listener
+`_maybeLinkOrphanLead` в `ONCRMLEADADD` парсит TITLE pattern
+`<chat_id> - MAX <phone>`, ищет контакт по UF/phone, привязывает; если
+у клиента есть открытая сделка — закрывает orphan как «Дубликат → deal N».
+Постфактум: `POST /webhooks/internal/relink-orphan-lead {leadId}`.
+См. ADR
+[`2026-05-26-orphan-lead-linker`](./decisions/2026-05-26-orphan-lead-linker.md).
+
+**Конверсия лида → контакт** (фикс #69, sha `e883832`, 27.05.2026):
+B24 при конверсии не наследует UF на новый контакт — `UF_CRM_MAX_CHAT_ID`
+терялся. Listener `_propagateChatIdsOnConvert` детектирует конверсию
+через `ONCRMLEADUPDATE + STATUS_ID=CONVERTED` и копирует UF на привязанный
+контакт. Постфактум: `POST /webhooks/internal/propagate-chat-ids {leadId}`.
+См. ADR
+[`2026-05-26-convert-propagate-chat-ids`](./decisions/2026-05-26-convert-propagate-chat-ids.md).
+
+**Текущие ограничения:**
+
+- **Массовый bulk-импорт номеров** в адресную книгу MAX-аккаунта магазина
+  через API невозможен: Green API `addContact` для MAX возвращает 404.
+  Зарегистрировано как issue #29 в `green-api/max-issues`. Workaround —
+  ручное добавление через приложение MAX на физическом телефоне магазина.
+  См. memory `[[greenapi-addcontact-pending]]`, task #64.
+
+**Зеркало в TG-группе:**
+
+Каждое incoming/outgoing сообщение зеркалится в TG-админ-группу
+(`TELEGRAM_GROUP_CHAT_ID` для инстанса `3100621187`), отдельный топик
+на клиента. Маппинг `instance ↔ chat ↔ topic` — SQLite `bridge.sqlite`
+в wa-tg-bridge. См. §7.
 
 ### 5.3. Telegram
 
