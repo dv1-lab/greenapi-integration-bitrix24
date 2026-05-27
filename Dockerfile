@@ -36,9 +36,18 @@ COPY --from=deps-donor /app/node_modules /app/node_modules
 # Layer 3: код
 COPY . .
 
-# Сборка TS → JS. Prisma generate не нужен — клиент уже сгенерирован в donor
-# `node_modules/.pnpm/@prisma+client@.../node_modules/.prisma/client/`.
-RUN pnpm run build
+# `prisma generate` обязателен ПОСЛЕ COPY кода (включает свежую schema.prisma).
+# Если в schema добавлена новая model — donor `.prisma/client` не знает о ней
+# и runtime даст `Cannot read properties of undefined (reading 'findMany')`.
+# Engines берутся локально из donor (`.pnpm/@prisma+engines@.../`), сеть
+# не используется. Retry-loop оставлен на случай если engines в donor
+# не подойдут и Prisma попробует docнать — тогда нужен binaries.prisma.sh.
+RUN for i in 1 2 3; do \
+        pnpm prisma generate && break || { \
+            echo "prisma generate attempt $i failed, retry in $((i*15))s..."; \
+            sleep $((i*15)); \
+        }; \
+    done && pnpm run build
 
 EXPOSE 3000
 
