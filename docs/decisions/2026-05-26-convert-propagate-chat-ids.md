@@ -1,5 +1,11 @@
 # ADR 2026-05-26: Перенос UF_CRM_*_CHAT_ID с лида на контакт при конверсии
 
+> ⚠️ **Поправка 27.05.2026**: Изначально я думал подписаться на отдельное
+> событие `ONCRMLEADCONVERT`. При попытке `event.bind` B24 вернул **HTTP 400**
+> — этого события **не существует** в их REST API. Реальный механизм:
+> детектировать конверсию внутри `ONCRMLEADUPDATE` через
+> `snap.STATUS_ID === "CONVERTED"`. Раздел «Решение» ниже актуализирован.
+
 ## Контекст
 
 При конверсии лида в контакт B24 **не наследует** кастомные UF поля автоматически.
@@ -19,20 +25,24 @@ MAX (3100621187), Instagram (i2crm), оба TG-бота (`@begovoy_bot` line 8,
 `@begovoy1support_bot` line 206). WhatsApp **не затронут** — там идентификатор
 phone, B24 наследует стандартное поле при конверсии.
 
-## Решение
+## Решение (актуально на 27.05.2026)
 
-Подписаться на B24-событие `ONCRMLEADCONVERT` через `event.bind` (используется
-тот же handler `/webhooks/b24-event`, что и для других CRM-событий — токен
-auth уже валидируется).
-
-В `handleB24CrmEvent` — отдельная ветка **до** определения `action`:
+Детектировать конверсию внутри уже-подписанного `ONCRMLEADUPDATE`:
+B24 при конверсии лида ставит `STATUS_ID="CONVERTED"`. В `handleB24CrmEvent`
+после `crm.lead.get` снимка:
 
 ```ts
-if (ev === "ONCRMLEADCONVERT") {
+if (entity === "lead" && action === "updated" && snap.STATUS_ID === "CONVERTED") {
   await this._propagateChatIdsOnConvert(portalDomain, leadId);
-  return { ok: true, ... };
 }
 ```
+
+Это идёт **рядом** с orphan-link для ONCRMLEADADD, до Customer-360 sync.
+Try/catch внутри чтобы ошибка не сорвала остальную обработку.
+
+**Почему не отдельным event'ом:** при попытке `event.bind` для `ONCRMLEADCONVERT`
+B24 REST вернул `HTTP 400`. Документация B24 не описывает этот event как
+доступный для подписки.
 
 `_propagateChatIdsOnConvert`:
 1. `crm.lead.get` — текущий снапшот лида (B24 уже проставил CONTACT_ID)

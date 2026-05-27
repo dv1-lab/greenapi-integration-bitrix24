@@ -58,6 +58,17 @@
 
 ---
 
+## 2026-05-27 · `event.bind ONCRMLEADCONVERT` не существует в B24 (HTTP 400)
+
+- **Симптом**: после деплоя task #69, `POST /internal/register-b24-events` вернул для всех events `bound`, кроме `ONCRMLEADCONVERT` — `failed, Bitrix24 API call failed: Request failed with status code 400`.
+- **Корень**: я угадал имя события. В реальности B24 REST такое событие не предоставляет для `event.bind`. Конверсия лида ловится через `ONCRMLEADUPDATE` + детект `STATUS_ID="CONVERTED"`.
+- **Фикс** (sha TBD): убрал `ONCRMLEADCONVERT` из `events[]` в `registerB24CrmEvents`, заменил early-return на условие внутри `handleB24CrmEvent`: `if (entity === "lead" && action === "updated" && snap.STATUS_ID === "CONVERTED") { _propagateChatIdsOnConvert(...) }`. Логика propagate осталась идентичной.
+- **Что НЕ повторять**: не угадывать имена событий B24 — сначала проверять `event.get` / документацию. Список доступных events для подписки можно получить через `events.get` REST-метод.
+- **Verify**: после redeploy register-b24-events вернёт все 6 events `bound`. Первая реальная конверсия лида с непустым UF будет видна в логах `convert lead=... → contact=...: propagated`.
+- **Связано**: ADR `decisions/2026-05-26-convert-propagate-chat-ids.md` (поправка в начале файла), task #69.
+
+---
+
 ## 2026-05-26 · Конверсия лида теряет `UF_CRM_*_CHAT_ID` — chatId на контакт не переносится
 
 - **Симптом (потенциальный)**: после ручной конверсии лида в контакт в B24,

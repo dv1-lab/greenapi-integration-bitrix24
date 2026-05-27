@@ -1300,10 +1300,13 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const events = [
 			"ONCRMLEADADD", "ONCRMLEADUPDATE",
-			"ONCRMLEADCONVERT",
 			"ONCRMCONTACTADD", "ONCRMCONTACTUPDATE",
 			"ONCRMDEALADD", "ONCRMDEALUPDATE",
 		];
+		// ONCRMLEADCONVERT отдельным событием НЕ существует в B24 REST
+		// (event.bind возвращает HTTP 400). Конверсия лида детектируется
+		// внутри ONCRMLEADUPDATE через `snap.STATUS_ID === "CONVERTED"`,
+		// см. handleB24CrmEvent ниже.
 		const expectedHandlers: Record<string, string> = {};
 		for (const ev of events) {
 			expectedHandlers[ev] = `${handlerBaseUrl}/webhooks/b24-event?event=${ev}`;
@@ -1382,23 +1385,6 @@ export class Bitrix24Service extends BaseAdapter<
 		else if (ev.startsWith("ONCRMDEAL")) entity = "deal";
 		else return { ok: false, reason: `unknown event ${ev}` };
 
-		// ONCRMLEADCONVERT — отдельная ветка (task #69). B24 шлёт это событие
-		// при конверсии лида в контакт/сделку/компанию. Нам нужно перенести
-		// UF_CRM_TG/MAX/IG_CHAT_ID с лида на созданный/привязанный контакт —
-		// иначе chatId «теряется» после конверсии и при следующем входящем
-		// контакт по UF не находится → плодятся дубли. Customer-360 KBD-лента
-		// получит обновление через сопутствующий ONCRMLEADUPDATE (B24 шлёт
-		// его при изменении STATUS_ID=CONVERTED).
-		if (ev === "ONCRMLEADCONVERT") {
-			try {
-				const result = await this._propagateChatIdsOnConvert(portalDomain, entityId);
-				return { ok: true, reason: result.reason || `convert: ${result.action || "no-op"}` };
-			} catch (e: any) {
-				this.logger.warn(`convert propagate failed lead=${entityId}: ${e?.message || e}`);
-				return { ok: false, reason: `convert failed: ${e?.message || e}` };
-			}
-		}
-
 		action = ev.endsWith("ADD") ? "added" : "updated";
 
 		// Снимок entity для phone/email/title/stage
@@ -1423,6 +1409,20 @@ export class Bitrix24Service extends BaseAdapter<
 				await this._maybeLinkOrphanLead(portalDomain, entityId, snap);
 			} catch (e: any) {
 				this.logger.warn(`orphan-link lead ${entityId} failed: ${e?.message || e}`);
+			}
+		}
+
+		// Convert chat-id propagate (task #69 / ADR 2026-05-26-convert-propagate-chat-ids):
+		// B24 не имеет отдельного event ONCRMLEADCONVERT — event.bind его не знает
+		// (HTTP 400). Конверсия детектируется через ONCRMLEADUPDATE с
+		// STATUS_ID="CONVERTED". В этот момент копируем UF_CRM_TG/MAX/IG_CHAT_ID
+		// с лида на привязанный контакт чтобы chatId не «терялся» после конверсии.
+		// Errors не должны сорвать дальнейший Customer-360 sync.
+		if (entity === "lead" && action === "updated" && snap.STATUS_ID === "CONVERTED") {
+			try {
+				await this._propagateChatIdsOnConvert(portalDomain, entityId);
+			} catch (e: any) {
+				this.logger.warn(`convert propagate failed lead=${entityId}: ${e?.message || e}`);
 			}
 		}
 
