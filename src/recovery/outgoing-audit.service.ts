@@ -63,8 +63,9 @@ export class OutgoingAuditService {
 			.filter((v): v is string => !!v);
 
 		// Все наши b24MessageId за период (одной выборкой, для быстрого set lookup).
+		// NOT NULL фильтруем в TS — Prisma в этой версии не принимает `not: null`.
 		const ourRows: Array<{ b24MessageId: string | null }> = await (this.prisma as any).outgoingMessage.findMany({
-			where: { createdAt: { gte: cutoff }, b24MessageId: { not: null } },
+			where: { createdAt: { gte: cutoff } },
 			select: { b24MessageId: true },
 		});
 		const ourMessageIds = new Set(
