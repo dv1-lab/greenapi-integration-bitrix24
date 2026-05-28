@@ -3,11 +3,14 @@
 // imports Bitrix24Module).
 
 import { Global, Module } from "@nestjs/common";
+import { ConfigModule } from "@nestjs/config";
 import { B24MetricsService } from "./b24-metrics.service";
+import { B24OverloadAlertService } from "./b24-overload-alert.service";
 
 @Global()
 @Module({
-	providers: [B24MetricsService],
-	exports: [B24MetricsService],
+	imports: [ConfigModule],
+	providers: [B24MetricsService, B24OverloadAlertService],
+	exports: [B24MetricsService, B24OverloadAlertService],
 })
 export class B24MetricsModule {}

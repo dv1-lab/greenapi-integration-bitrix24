@@ -8,6 +8,40 @@
 
 ---
 
+## 2026-05-28 · B24OverloadAlertService — TG-алерт при разгоне нагрузки (#19)
+
+- **Контекст**: 18.05 и 28.05 — два OVERLOAD_LIMIT блока B24 local-app
+  без предупреждений. После #13 у нас есть `b24Metrics.snapshot()` —
+  значит можно поймать разгон ДО блокировки и руками отреагировать.
+- **Реализация** (sha TBD, файл `src/common/b24-overload-alert.service.ts`):
+  - `B24OverloadAlertService` с `OnApplicationBootstrap`. setInterval
+    каждые 5 мин (первая проверка через 1 мин после старта).
+  - Читает `b24Metrics.snapshot()`, для каждого app сравнивает:
+    - `overload_last_24h > 0` → 🚨🚨 «получили OVERLOAD_LIMIT»
+    - `calls_last_1h >= critical` → 🚨 «приближаемся к блокировке»
+    - `calls_last_1h >= warn` → ⚠️ «нагрузка повышенная»
+  - Debounce per (app, severity): overload 1ч / critical 30мин / warn 1ч.
+    In-memory `Map<string, lastTs>` — спам в админ-чат не идёт.
+  - В сообщение включается top-5 методов часа (`crm.lead.add(234)…`)
+    чтобы оператор сразу видел кто создаёт объём.
+  - Канал — `ALERT_BOT_TOKEN` + `ALERT_CHAT_ID` (тот же что у
+    AlertsService и `_alertInternalUrlLeak`).
+  - Disable через `B24_OVERLOAD_ALERT_DISABLED=1` (на случай шторма).
+- **Verify**: понизить `B24_HOUR_WARN` в env до 5 → перезапустить
+  adapter → через минуту прийти warn в TG (если за час было ≥5 вызовов).
+  При нормальных порогах (2400/3000/24000/30000) в спокойную пору
+  алертов быть не должно.
+- **Что НЕ делать**:
+  - НЕ снижать debounce ниже 30 мин для critical — иначе при долгом
+    разгоне получим 50+ одинаковых сообщений за час.
+  - НЕ слать алерты per-method — слишком granular, информация уже
+    в `top_methods_1h` field самого алерта.
+  - НЕ полагаться на эти алерты как на единственный мониторинг —
+    они работают только если adapter жив и принимает webhook'и.
+    Independent dead-man-switch (Healthchecks) обязателен.
+
+---
+
 ## 2026-05-28 · message_delivery_status events/ingest без resolveAlias (#18)
 
 - **Симптом**: в логах adapter regularly видим
