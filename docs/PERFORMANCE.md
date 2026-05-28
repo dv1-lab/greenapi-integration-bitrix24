@@ -1,9 +1,55 @@
 # Performance baselines — adapter
 
 Инструментирование latency / error rate adapter'а и snapshot baseline
-цифр для SLO.md.
+цифр для SLO.md. Также — B24 API нагрузка (task #13, добавлено 2026-05-28).
 
-Last updated: 2026-05-26 (task #53).
+Last updated: 2026-05-28 (task #13: B24 metrics + #19: OVERLOAD alerts).
+
+## 📊 B24 API нагрузка (`/metrics/b24`)
+
+`src/common/b24-metrics.service.ts` + `src/common/b24-overload-alert.service.ts`:
+
+- **B24MetricsService** — in-memory rolling counter всех вызовов
+  `Bitrix24Service.callBitrix24Method`. Запись per (appKind, method,
+  result, durationMs). Lazy GC раз в 100 записей, retention 25h, hard
+  cap 100K событий.
+- **Hook в `callBitrix24Method`** — outer try/finally, классификация
+  ошибки в `_classifyB24Error`: `ok / overload / 4xx / 5xx / timeout
+  / network / expired_token / other`. OVERLOAD_LIMIT определяется по
+  тексту ответа B24.
+- **GET /metrics/b24** endpoint (auth `X-Metrics-Token`, env
+  `METRICS_TOKEN`) — JSON snapshot для dv-dashboard `/monitoring` и
+  ручного debug:
+  ```
+  apps: {
+    social: { calls_last_1m, calls_last_1h, calls_last_24h,
+              errors_last_1h, overload_last_24h, blocked,
+              top_methods_1h: [{method, count, errors}, ...] },
+    customer360: { ... }
+  },
+  thresholds: { per_hour_warn, per_hour_critical, per_day_warn,
+                per_day_critical },
+  total_buffered
+  ```
+- **B24OverloadAlertService** — cron-сторож (setInterval каждые 5 мин,
+  первая проверка через 1 мин после старта). Шлёт TG-алерт в
+  `ALERT_CHAT_ID` при:
+  - `overload_last_24h > 0` — 🚨🚨 critical (debounce 1ч)
+  - `calls_last_1h >= per_hour_critical` — 🚨 (debounce 30мин)
+  - `calls_last_1h >= per_hour_warn` — ⚠️ (debounce 1ч)
+  Disable: env `B24_OVERLOAD_ALERT_DISABLED=1`.
+- **Пороги** в env (defaults для портала 1begovoy.bitrix24.ru — empirical
+  до OVERLOAD у нас 2 случая за 10 дней):
+  ```
+  B24_HOUR_WARN=2400
+  B24_HOUR_CRITICAL=3000
+  B24_DAY_WARN=24000
+  B24_DAY_CRITICAL=30000
+  ```
+  B24 docs / реальный лимит — 30K req/hour PER APP (см. memory
+  `[[b24-overload-pattern]]`).
+
+---
 
 ---
 
