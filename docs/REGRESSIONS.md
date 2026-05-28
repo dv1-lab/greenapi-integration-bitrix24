@@ -8,6 +8,47 @@
 
 ---
 
+## 2026-05-28 · Blacklist своих instance-номеров — защита от false-merge (#65a)
+
+- **Контекст**: после инцидента «контакт Булат прицепляется ко всем лидам»
+  (см. ниже отдельную запись) — выяснилось, что у Булата в PHONE был наш
+  бизнес-номер `+79584983354` (WhatsApp 1Begovoy инстанс 1103487233).
+  Любой ensureLead для клиента без phone делал `crm.duplicate.findbycomm`
+  с фейк-фолбэком на номер инстанса → возвращал Булата → false-merge.
+  Также adapter сам записывал наш номер в `PHONE` нового лида.
+- **Корень**: 5 точек в коде вызывали `crm.duplicate.findbycomm(PHONE, ...)`
+  без проверки что переданный номер не наш собственный. Плюс
+  `ensureLead → crm.lead.add` безусловно писал `PHONE: [{VALUE: phoneE164}]`,
+  даже если phoneE164 был номер инстанса.
+- **Фикс** (sha TBD, файл `src/bitrix24/bitrix24.service.ts`):
+  - Новый приватный метод `_isOurOwnPhone(phone)` с in-memory кешем 60 сек.
+    Загружает все `Instance.settings.wid` + `Instance.settings.label` и
+    нормализует phone до 10-15 цифр.
+  - Перед каждым `findbycomm(PHONE)` (5 точек) — проверка через
+    `_isOurOwnPhone`. Если наш — skip + warn в лог.
+  - В `ensureLead → crm.lead.add` — `PHONE` field пишется только если
+    `phoneE164` валиден И НЕ наш. Иначе лид создаётся без PHONE field.
+- **Где guard'ы добавлены**:
+  - `ensureOpenLeadForPhone` (line ~720) — главный путь incoming
+  - `addTimelineCommentByPhone` (Customer-360 пути)
+  - `resolveB24Entities → findByPhone` (KBD карточка)
+  - `getContactName / operator-hint resolver` (TG-зеркала)
+  - `resolveActiveOperatorByPhone` (outgoing-from-mobile)
+- **Verify**: после deploy log должен содержать
+  `refuse findbycomm — phone +795... is OUR own instance number`
+  для любых сценариев где раньше фейк-phone проходил. ensureLead для
+  клиента без phone — создаёт лид без PHONE field, не привязывает к
+  существующему контакту по нашему номеру.
+- **Что НЕ делать**:
+  - НЕ убирать `_isOurOwnPhone` cache (60 сек) — query на каждый findbycomm
+    через DB слишком дорого.
+  - НЕ полагаться только на `Instance.settings.wid` — `label` иногда
+    единственное место где есть phone (для legacy инстансов).
+  - НЕ хардкодить список номеров в коде — Дмитрий может подключить новый
+    инстанс, fallback на `Instance` table в БД даёт самообновление.
+
+---
+
 ## 2026-05-28 · resolveAlias.type "b24_deal" не существует в customer-service enum
 
 - **Симптом**: после фикса Guard (см. ниже) webhook'и от customer-360-bridge

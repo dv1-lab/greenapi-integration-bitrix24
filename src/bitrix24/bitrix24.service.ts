@@ -716,7 +716,8 @@ export class Bitrix24Service extends BaseAdapter<
 				// (для случая когда клиент пишет с приватным phone в MAX/Telegram).
 				let contactId: number | undefined;
 				const hasUsablePhone = /^\+?\d{10,15}$/.test(phoneE164);
-				if (hasUsablePhone) {
+				const isOurNumber = hasUsablePhone && await this._isOurOwnPhone(phoneE164);
+				if (hasUsablePhone && !isOurNumber) {
 					const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
 						type: "PHONE",
 						values: [phoneE164],
@@ -725,6 +726,11 @@ export class Bitrix24Service extends BaseAdapter<
 					this.logger.info(
 						`ensureLead[${trace}]: findbycomm(PHONE=${phoneE164}) → ` +
 						`${contactId ? `contact=${contactId}` : "no contact"}`,
+					);
+				} else if (isOurNumber) {
+					this.logger.warn(
+						`ensureLead[${trace}]: phone ${phoneE164} is OUR own instance number — ` +
+						`skip findbycomm (защита от false-merge, см. инцидент 28.05)`,
 					);
 				} else {
 					this.logger.info(`ensureLead[${trace}]: phone ${phoneE164 || "-"} not usable, skip duplicate.findbycomm`);
@@ -870,13 +876,21 @@ export class Bitrix24Service extends BaseAdapter<
 					TITLE: `${senderName} - ${channelLabel} (auto)`,
 					NAME: senderName,
 					CONTACT_ID: contactId,
-					PHONE: [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }],
 					// Yandex Metrika ClientId: с сайта-формы заполняется через NetForm.
 					// Из WhatsApp прилетает в служебной метке сообщения (PB-WA-CID) и
 					// прокидывается сюда как ymClientId. Если метки нет — ставим "-"
 					// (B24 требует поле при смене стадии, иначе оператор заблокирован).
 					UF_CRM_NF_YM_CLIENT_ID: ymClientId || "-",
 				};
+				// PHONE пишем только если это реальный phone клиента, а не наш
+				// собственный instance-номер. Защита от false-merge (инцидент 28.05).
+				if (phoneE164 && !isOurNumber) {
+					fields.PHONE = [{ VALUE: phoneE164, VALUE_TYPE: "MOBILE" }];
+				} else if (isOurNumber) {
+					this.logger.warn(
+						`ensureLead[${trace}]: refuse to write OUR own number ${phoneE164} as lead PHONE`,
+					);
+				}
 				if (sourceId) fields.SOURCE_ID = sourceId;
 
 				const createdId: any = await this.callBitrix24Method(portalDomain, "crm.lead.add", { fields });
@@ -1597,6 +1611,51 @@ export class Bitrix24Service extends BaseAdapter<
 	private _statusNamesCacheAt = 0;
 	private readonly _userNameCache = new Map<string, string>();
 
+	/** Кеш номеров наших Green API инстансов (бизнес-номера 1Begovoy).
+	 *  TTL 60 сек. Используется чтобы НЕ вызывать findbycomm(PHONE)
+	 *  по своему же номеру и НЕ писать его в PHONE лида/контакта.
+	 *  См. инцидент 28.05.2026 — контакт «Булат» имел в phone наш
+	 *  +79584983354, и любой ensureLead без phone клиента находил Булата. */
+	private _ourPhonesCache: { phones: Set<string>; expiresAt: number } = {
+		phones: new Set(),
+		expiresAt: 0,
+	};
+
+	/** Возвращает true если phone — это номер одного из наших Green API инстансов
+	 *  (а не клиента). Защита от false-merge через findbycomm. */
+	private async _isOurOwnPhone(phone: string): Promise<boolean> {
+		if (!phone) return false;
+		const norm = String(phone).replace(/\D/g, "");
+		if (norm.length < 10) return false;
+		const now = Date.now();
+		if (now > this._ourPhonesCache.expiresAt) {
+			try {
+				const instances: any[] = await (this.prisma as any).instance.findMany({
+					select: { idInstance: true, settings: true },
+				});
+				const phones = new Set<string>();
+				for (const inst of instances) {
+					const s: any = inst.settings || {};
+					const wid = String(s.wid || "").trim();
+					const widMatch = wid.match(/^(\d{10,15})/);
+					if (widMatch) phones.add(widMatch[1]);
+					const label = String(s.label || "").trim();
+					const labelMatch = label.match(/\+?(\d[\d\s\-()]{8,}\d)/);
+					if (labelMatch) {
+						const labelNorm = labelMatch[1].replace(/\D/g, "");
+						if (labelNorm.length >= 10) phones.add(labelNorm);
+					}
+				}
+				this._ourPhonesCache = { phones, expiresAt: now + 60_000 };
+			} catch (e: any) {
+				this.logger.warn(`_isOurOwnPhone: failed to load instances: ${e?.message || e}`);
+				// fail-open: лучше пропустить guard чем сломать flow при DB-проблемах
+				return false;
+			}
+		}
+		return this._ourPhonesCache.phones.has(norm);
+	}
+
 	/** Стабильная сериализация: ключи объектов сортируются рекурсивно.
 	 *  B24 возвращает phone/email/мессенджер-массивы с непостоянным порядком
 	 *  ключей внутри объекта ({VALUE,TYPE_ID} vs {TYPE_ID,VALUE}) — без
@@ -2137,6 +2196,10 @@ export class Bitrix24Service extends BaseAdapter<
 		const portalDomain = users[0]?.portalDomain;
 		if (!portalDomain) return { ok: false, reason: "no portal" };
 		try {
+			if (await this._isOurOwnPhone(phone)) {
+				this.logger.warn(`addTimelineCommentByPhone: refuse findbycomm — phone ${phone} is OUR own instance number`);
+				return { ok: false, reason: "phone is our own instance number" };
+			}
 			const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
 				type: "PHONE",
 				values: [phone],
@@ -2364,6 +2427,10 @@ export class Bitrix24Service extends BaseAdapter<
 			entityType: "LEAD" | "CONTACT",
 		): Promise<number | null> => {
 			if (!phone) return null;
+			if (await this._isOurOwnPhone(phone)) {
+				this.logger.warn(`resolveB24Entities: refuse findbycomm ${entityType} — phone ${phone} is OUR own instance number`);
+				return null;
+			}
 			try {
 				const result: any = await this.callBitrix24Method(
 					portalDomain, "crm.duplicate.findbycomm",
@@ -6228,7 +6295,11 @@ export class Bitrix24Service extends BaseAdapter<
 		let igUsername: string | null = null;
 
 		try {
-			if (phone) {
+			const phoneIsOurs = phone ? await this._isOurOwnPhone(phone) : false;
+			if (phone && phoneIsOurs) {
+				this.logger.warn(`getContactName/operator-hint: refuse findbycomm — phone ${phone} is OUR own instance number`);
+			}
+			if (phone && !phoneIsOurs) {
 				const dup: any = await this.callBitrix24Method(portalDomain, "crm.duplicate.findbycomm", {
 					entity_type: "CONTACT",
 					type: "PHONE",
@@ -6391,6 +6462,10 @@ export class Bitrix24Service extends BaseAdapter<
 	private async resolveActiveOperatorByPhone(
 		domain: string, phone: string,
 	): Promise<string | null> {
+		if (await this._isOurOwnPhone(phone)) {
+			this.logger.warn(`resolveActiveOperatorByPhone: refuse findbycomm — phone ${phone} is OUR own instance number`);
+			return null;
+		}
 		try {
 			const dup: any = await this.callBitrix24Method(domain, "crm.duplicate.findbycomm", {
 				type: "PHONE", values: [phone], entity_type: "CONTACT",
