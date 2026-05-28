@@ -8,6 +8,43 @@
 
 ---
 
+## 2026-05-28 · Guard /webhooks/b24-event reject'ил все customer-360 events
+
+- **Симптом**: после миграции customer-360-bridge V1 → V2 (28.05 при OVERLOAD_LIMIT
+  блокировке V1) все CRM-events `ONCRMLEADUPDATE`/`ONCRMDEALUPDATE`/
+  `ONCRMCONTACTUPDATE` приходили в adapter, но reject'ились с warning'ом
+  `b24-event ONCRMDEALUPDATE rejected: application_token mismatch for 1begovoy.bitrix24.ru`.
+  Гипотеза «webhook'и от OLD app» оказалась неверной — Дмитрий удалил OLD,
+  а mismatch продолжался. Тестовый комментарий «тест» к сделке 108000 в B24 UI
+  → webhook пришёл → reject. Customer-360 event-log в ClickHouse не писался.
+- **Корень**: Guard в `webhooks.controller.ts:548-560` сравнивал
+  `body.auth.application_token` **только** с `User.applicationToken`. В этом
+  поле лежит applicationToken **Social Connector V2** (set при его install).
+  Когда B24 шлёт events от customer-360-bridge V2, в payload идёт **другой**
+  applicationToken (от customer-360 app'а, лежит в
+  `OAuthApp[customer360].applicationToken`). Guard их не знал про второе место
+  хранения → всегда mismatch. Проверка sha256: `User.applicationToken` =
+  `fa8c03...`, `OAuthApp[customer360].applicationToken` = `033653...` — разные.
+- **Фикс** (sha TBD, файл `src/webhooks/webhooks.controller.ts`): Guard теперь
+  проверяет applicationToken против **обоих** мест хранения:
+  - `User.applicationToken` (social-app)
+  - `OAuthApp[portal, customer360].applicationToken` (customer-360-app)
+  Если хотя бы один совпадает — pass. Иначе reject. Запрос к `OAuthApp` идёт
+  только если first check не прошёл (lazy lookup, без overhead на social-flow).
+- **Verify**: после deploy `b24-event ONCRMDEALUPDATE` от тестового комментария
+  Дмитрия должны проходить (`OK` в логах вместо `rejected`). `events/ingest`
+  начнёт писать в ClickHouse `customer_events`.
+- **Что НЕ делать**:
+  - НЕ переносить applicationToken customer-360 в `User.applicationToken` —
+    тогда social events будут reject'иться (зеркальная регрессия).
+  - НЕ убирать первичную проверку `User.applicationToken` — большинство
+    webhook'ов от social-app, делать DB hit на каждый event ради проверки
+    customer360 — дорого.
+  - НЕ менять схему БД (`User.applicationToken` → массив) — break api compat
+    в SDK; правильно держать customer360-token в `OAuthApp` рядом с access/refresh.
+
+---
+
 ## 2026-05-27 · #71 startup-backfill провалился на DNS EAI_AGAIN после downtime
 
 - **Симптом**: третий за день инцидент hip.hosting (~3.5 ч недоступности

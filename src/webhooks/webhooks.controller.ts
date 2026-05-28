@@ -548,7 +548,18 @@ export class WebhooksController {
 				this.logger.warn(`b24-event ${rawEvent} rejected: unknown portal ${portalDomain}`);
 				return;
 			}
-			if (user.applicationToken !== applicationToken) {
+			// applicationToken может прийти от social-app (User.applicationToken)
+			// или от customer-360-bridge (OAuthApp[customer360].applicationToken).
+			// Это два разных B24 local-app'а на одном портале — у каждого свой
+			// applicationToken. Без проверки обоих CRM events от customer-360-bridge
+			// reject'ились как mismatch (см. инцидент 28.05.2026).
+			let okSocial = user.applicationToken === applicationToken;
+			let okCustomer = false;
+			if (!okSocial) {
+				const c360 = await this.prisma.findOAuthApp(portalDomain, "customer360");
+				okCustomer = !!(c360 && c360.applicationToken && c360.applicationToken === applicationToken);
+			}
+			if (!okSocial && !okCustomer) {
 				this.logger.warn(
 					`b24-event ${rawEvent} rejected: application_token mismatch for ${portalDomain}`,
 				);

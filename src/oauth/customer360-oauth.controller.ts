@@ -25,7 +25,9 @@ import { ApiTags } from "@nestjs/swagger";
  *    - Тип: server
  *    - Адрес приложения: https://social.9wb.ru/oauth/customer360/install
  *    - Адрес обработчика установки: тот же
- *    - Права (scope): crm, user, placement, event
+ *    - Права (scope): crm, user, placement
+ *      (отдельного scope `event` в B24 НЕТ — event.bind работает через
+ *       scope той области, к которой относится событие; для ONCRM* — `crm`)
  *
  * 2. Получить CLIENT_ID и CLIENT_SECRET → положить в .env adapter'а:
  *    BITRIX24_CUSTOMER360_CLIENT_ID=local....
