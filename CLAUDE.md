@@ -2,9 +2,10 @@
 
 ## TL;DR
 
-NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. На my-server
-`/home/dv/greenapi-b24/` (Docker compose). Публичный URL — `https://social.9wb.ru`
-(Caddy proxy). MySQL adapter в контейнере, Prisma schema.
+NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. **На server-spb
+(Beget СПб, РФ) с 29.05.2026** (переехал с my-server в ночь 28→29.05).
+Путь `/home/dv/greenapi-b24/` (Docker compose). Публичный URL — `https://social.9wb.ru`
+(**nginx**, не Caddy). Adapter port `127.0.0.1:3005:3000` (3001 занят uptime-kuma). MySQL adapter в контейнере, Prisma schema.
 
 ## ⚠️ Обязательное чтение перед любой правкой
 
