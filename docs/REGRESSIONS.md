@@ -8,6 +8,43 @@
 
 ---
 
+## 2026-05-28 · resolveAlias.type "b24_deal" не существует в customer-service enum
+
+- **Симптом**: после фикса Guard (см. ниже) webhook'и от customer-360-bridge
+  проходят аутентификацию, но падают на следующем шаге — `events/ingest`
+  отвергает payload с `b24_deal/deal_updated`:
+  ```
+  events/ingest failed: resolveAlias.type must be one of: phone, email,
+    b24_lead, b24_contact, tg_user, wa_chat, max_chat, ig_client, ig_username
+  ```
+  Customer-360 не получает события сделок (deal_added / deal_updated /
+  deal_stage_changed). Лента KBD для клиента не показывает движение сделок.
+- **Корень**: `bitrix24.service.ts:1440` для deal events ставил
+  `resolveAlias.type = "b24_deal"`, но customer-service enum его не содержит
+  (там `b24_lead`/`b24_contact`, не `b24_deal`). Архитектурно правильно —
+  потому что Customer-360 UUID привязан к **клиенту** (контакт/лид),
+  а не к сделке. Сделка — business object, привязка к клиенту через
+  `snap.CONTACT_ID` / `snap.LEAD_ID`.
+- **Фикс** (sha TBD, файл `src/bitrix24/bitrix24.service.ts:1436-1457`):
+  resolveAlias для deal теперь резолвится через связку:
+  - `snap.CONTACT_ID` (если есть) → `{type:"b24_contact", value:contactId}`
+  - иначе `snap.LEAD_ID` (если есть) → `{type:"b24_lead", value:leadId}`
+  - иначе resolveAlias остаётся null, events/ingest не вызывается
+    (сделка без клиента — Customer-360 нечего привязывать).
+  Аналогичная цепочка `if (entity === "lead")` / `if (entity === "contact")`
+  оставлена как было (для них резолвится своим entityId, что попадает в enum).
+- **Verify**: после deploy изменение стадии сделки 108000 в B24 UI →
+  webhook → Guard pass → resolveAlias = `{type:"b24_contact", value:"<id>"}`
+  → events/ingest 200 OK → запись в CH `customer_events`.
+- **Что НЕ делать**:
+  - НЕ добавлять `b24_deal` в enum customer-service — это создаст
+    redundant aliases (сделка не имеет своей customer-привязки, всегда
+    через контакт/лид).
+  - НЕ читать contact через `crm.contact.get` чтобы взять phone —
+    избыточный API-call, и так уже знаем `CONTACT_ID` достаточно для merge.
+
+---
+
 ## 2026-05-28 · Guard /webhooks/b24-event reject'ил все customer-360 events
 
 - **Симптом**: после миграции customer-360-bridge V1 → V2 (28.05 при OVERLOAD_LIMIT

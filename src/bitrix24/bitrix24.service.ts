@@ -1437,7 +1437,22 @@ export class Bitrix24Service extends BaseAdapter<
 		if (phone) resolveAlias = { type: "phone", value: phone };
 		else if (email) resolveAlias = { type: "email", value: email };
 		else if (igChatId) resolveAlias = { type: "ig_client", value: igChatId };
-		else resolveAlias = { type: entity === "lead" ? "b24_lead" : entity === "contact" ? "b24_contact" : "b24_deal", value: String(entityId) };
+		else if (entity === "lead") resolveAlias = { type: "b24_lead", value: String(entityId) };
+		else if (entity === "contact") resolveAlias = { type: "b24_contact", value: String(entityId) };
+		else if (entity === "deal") {
+			// Deal — business object, к клиенту привязан через CONTACT_ID/LEAD_ID.
+			// customer-service enum resolveAlias.type не содержит "b24_deal"
+			// (только b24_lead/b24_contact). Резолвим через связку.
+			// См. инцидент 28.05.2026 — раньше слали "b24_deal" и все события
+			// сделок reject'ились с validation error.
+			const contactId = String(snap.CONTACT_ID || "").trim();
+			const leadId = String(snap.LEAD_ID || "").trim();
+			if (contactId && contactId !== "0") resolveAlias = { type: "b24_contact", value: contactId };
+			else if (leadId && leadId !== "0") resolveAlias = { type: "b24_lead", value: leadId };
+			// else: сделка без клиента (редко, обычно при ручном создании
+			// сделки без привязки). Customer-360 event для неё не пишем —
+			// нечего резолвить.
+		}
 
 		// Если UF_CRM_PB_CUSTOMER_UUID уже стоит — используем напрямую
 		const customerUuid: string | undefined = snap.UF_CRM_PB_CUSTOMER_UUID || undefined;
