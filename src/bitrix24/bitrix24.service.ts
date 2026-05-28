@@ -1657,6 +1657,49 @@ export class Bitrix24Service extends BaseAdapter<
 		expiresAt: 0,
 	};
 
+	/** Детектор внутренних URL в outgoing-тексте. Менеджеры часто копируют
+	 *  название товара из админки МойСклад / B24 — браузер копирует rich-text
+	 *  с гиперссылкой → при downgrade в plain text получается "Title (URL)"
+	 *  → клиент получает внутреннюю ссылку админки. См. кейс Орлова 28.05.2026.
+	 *  Возвращает массив найденных подозрительных URL (пусто если чисто). */
+	private _detectInternalUrls(text: string): string[] {
+		if (!text || typeof text !== "string") return [];
+		const found: string[] = [];
+		const patterns: RegExp[] = [
+			/https?:\/\/online\.moysklad\.ru\/[^\s)]+/gi,
+			/https?:\/\/[^\s/)]*\.bitrix24\.ru\/[^\s)]*/gi,
+			/https?:\/\/[^\s/)]*\.9wb\.ru\/admin\/[^\s)]*/gi,
+			/https?:\/\/(?:metabase|dashboard|msb24|sklad)\.9wb\.ru\/[^\s)]*/gi,
+		];
+		for (const re of patterns) {
+			const matches = text.match(re);
+			if (matches) found.push(...matches);
+		}
+		return Array.from(new Set(found));
+	}
+
+	/** Fire-and-forget алерт в админ-TG про утечку внутреннего URL клиенту.
+	 *  Не блокирует outbound flow — клиент сообщение получит как есть.
+	 *  Цель — операторская видимость (тренинг + retroactive cleanup). */
+	private _alertInternalUrlLeak(meta: { instance?: string | number; line?: number; operatorId?: string; preview: string }, urls: string[]): void {
+		const token = this.configService.get<string>("ALERT_BOT_TOKEN");
+		const chatId = this.configService.get<string>("ALERT_CHAT_ID");
+		if (!token || !chatId) {
+			this.logger.warn(`internal-url-leak (no alert channel): ${urls.join(", ")}`);
+			return;
+		}
+		const msg =
+			`⚠️ Менеджер отправил клиенту внутренний URL:\n` +
+			urls.map((u) => `• ${u}`).join("\n") + "\n" +
+			`Инстанс: ${meta.instance ?? "-"}, линия: ${meta.line ?? "-"}, оператор: ${meta.operatorId ?? "-"}\n\n` +
+			`Текст (превью):\n${meta.preview.slice(0, 400)}`;
+		axios.post(
+			`https://api.telegram.org/bot${token}/sendMessage`,
+			{ chat_id: chatId, text: `🔌 social-connector:\n${msg}`, disable_web_page_preview: true },
+			{ timeout: 10000 },
+		).catch((e: any) => this.logger.warn(`internal-url-leak alert send failed: ${e?.message || e}`));
+	}
+
 	/** Валидный chat_id мессенджера: только цифры, длина ≥6.
 	 *  TG/MAX/IG client/chat_id всегда числовые и длиной 8+. Защита от
 	 *  записи мусора в UF_CRM_TG/MAX/IG_CHAT_ID. См. инцидент 28.05.2026 —
@@ -5974,6 +6017,34 @@ export class Bitrix24Service extends BaseAdapter<
 			const domain = webhook.auth.domain;
 			const lineNumber = webhook.data?.LINE ? parseInt(webhook.data.LINE) : 0;
 			const connector = String((webhook.data as any)?.CONNECTOR || "").toLowerCase();
+
+			// Детектор внутренних URL (см. кейс Орлова 28.05.2026):
+			// менеджер при копировании названия товара из МойСклад/B24 получает
+			// rich-text с гиперссылкой, plain-text downgrade даёт "Title (URL)"
+			// → клиент видит внутреннюю ссылку админки. Не блокируем outbound
+			// (могут быть legit случаи где оператор сознательно делится URL),
+			// но шлём async-алерт в админ-чат.
+			try {
+				const messages: any[] = Array.isArray(webhook.data?.MESSAGES) ? webhook.data.MESSAGES : [];
+				for (const m of messages) {
+					const text = String(m?.message?.text || "");
+					if (!text) continue;
+					const urls = this._detectInternalUrls(text);
+					if (urls.length === 0) continue;
+					this.logger.warn(`internal-url-leak: outbound to line=${lineNumber} contains ${urls.length} internal URL(s)`);
+					this._alertInternalUrlLeak(
+						{
+							line: lineNumber,
+							operatorId: String(m?.message?.user_id || ""),
+							preview: text,
+						},
+						urls,
+					);
+				}
+			} catch (e: any) {
+				// Detector не должен ничего ломать в outbound flow.
+				this.logger.warn(`internal-url-detector failed (non-fatal): ${e?.message || e}`);
+			}
 
 			// Branch: Instagram через i2crm. CONNECTOR=i2crm выставляется B24
 			// для линий 18/22 (CRM_SOURCE="18|I2CRM"/"22|I2CRM"). Если CONNECTOR

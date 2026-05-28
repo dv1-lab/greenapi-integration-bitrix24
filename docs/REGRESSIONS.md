@@ -8,6 +8,42 @@
 
 ---
 
+## 2026-05-28 · Детектор внутренних URL в outgoing (кейс Орлова, #14)
+
+- **Контекст**: 28.05 Орлов отправил клиенту в TG-чат сообщение, содержавшее
+  `https://online.moysklad.ru/app/#good/edit?id=...` — внутреннюю ссылку
+  админки МойСклад. Это не баг кода — оператор скопировал название товара
+  из МС-веб-интерфейса, браузер copies rich-text с гиперссылкой → B24
+  хранит разметку → SDK Green API downgrades → клиент получает
+  `Title (URL)` plain text. Без последствий для клиента (страница МС
+  без логина просто 404), но непрофессионально.
+- **Корень**: операторская UX-проблема (не выработана привычка вставлять
+  `Cmd+Shift+V`). В коде нет защиты.
+- **Фикс** (sha TBD, файл `src/bitrix24/bitrix24.service.ts`):
+  - Новый приватный метод `_detectInternalUrls(text)` — возвращает массив
+    подозрительных URL'ов по 4 шаблонам: `online.moysklad.ru`,
+    `*.bitrix24.ru`, `*.9wb.ru/admin/*`, internal `*.9wb.ru` subdomains
+    (metabase/dashboard/msb24/sklad).
+  - `_alertInternalUrlLeak(meta, urls)` — fire-and-forget POST в TG бот
+    (`ALERT_BOT_TOKEN` / `ALERT_CHAT_ID`). Не блокирует outbound flow.
+  - Hook в `handleBitrix24Webhook(ONIMCONNECTORMESSAGEADD)` — перед
+    роутингом в i2crm/TG-bot/Green-API ветки. Если в тексте найден
+    URL — async alert в админ-чат, основной поток продолжается.
+- **Verify**: оператор отправляет тестовое сообщение с
+  `https://online.moysklad.ru/app/...` → клиент получает как обычно,
+  параллельно в TG `@agent_dv_bot` (или ALERT_CHAT_ID) приходит warn
+  с превью текста и списком URL.
+- **Что НЕ делать**:
+  - НЕ блокировать outbound — есть legit случаи (оператор сознательно
+    делится ссылкой на инструкцию админки между внутренними чатами,
+    хотя редко).
+  - НЕ фильтровать публичные URL (1begovoy.ru, instagram.com и т.п.) —
+    они и есть основной контент outbound сообщений.
+  - НЕ ловить через `text.includes("moysklad")` — false-positive на
+    legitimate упоминания «есть в МойСклад» в тексте.
+
+---
+
 ## 2026-05-28 · Assertion на формат UF_CRM_*_CHAT_ID — защита от мусора (#65b)
 
 - **Контекст**: лид 361494 (27.05) имел `UF_CRM_TG_CHAT_ID = "M"` —
