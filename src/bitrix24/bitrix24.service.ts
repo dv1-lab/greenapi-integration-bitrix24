@@ -25,6 +25,7 @@ import {
 import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { mask } from "../common/mask";
+import { B24MetricsService, B24CallResult } from "../common/b24-metrics.service";
 import {
 	validateI2crmIncoming,
 	buildI2crmUserId,
@@ -122,6 +123,7 @@ export class Bitrix24Service extends BaseAdapter<
 		private readonly i2crmTgMirror: I2crmTgMirrorService,
 		private readonly tgBotMirror: TgBotMirrorService,
 		private readonly mediaCache: MediaCacheService,
+		private readonly b24Metrics: B24MetricsService,
 	) {
 		super(bitrix24Transformer, prisma);
 		// В юнит-тестах не запускаем фоновые таймеры — иначе они срабатывают
@@ -297,6 +299,14 @@ export class Bitrix24Service extends BaseAdapter<
 		retryCount: number = 0,
 		appKind: "social" | "customer360" = "social",
 	): Promise<unknown> {
+		// === B24 metrics wrap (task #13) ===
+		// Записываем КАЖДЫЙ HTTP-вызов в B24 — это горячий путь, но
+		// b24Metrics.record() in-memory и легковесна (Array.push + lazy GC).
+		// При expired_token retry recursive вызов запишется отдельно: два HTTP
+		// в B24 = два события в метрике (это отражает реальную нагрузку).
+		const _metricsStart = Date.now();
+		let _metricsResult: B24CallResult = "other";
+		try {
 		// Customer-360 split (см. memory customer_360_split_b24): если для этого
 		// портала установлено отдельное приложение `customer360`, используем его
 		// токен для CRM-операций. Иначе fallback на стандартного social User —
@@ -331,6 +341,7 @@ export class Bitrix24Service extends BaseAdapter<
 
 			if (response.data.error) {
 				if (response.data.error === "expired_token" && retryCount === 0) {
+					_metricsResult = "expired_token";
 					this.logger.warn(`Token expired for ${portalDomain} (${app ? "customer360" : "social"}), attempting refresh...`);
 					try {
 						let newToken: string;
@@ -350,6 +361,7 @@ export class Bitrix24Service extends BaseAdapter<
 				throw new Error(`Bitrix24 API Error: ${response.data.error_description || response.data.error}`);
 			}
 
+			_metricsResult = "ok";
 			return response.data.result;
 		} catch (error: any) {
 			if (error.response?.status === 401 && retryCount === 0) {
@@ -370,6 +382,7 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 			}
 
+			_metricsResult = this._classifyB24Error(error);
 			this.logger.error(`Bitrix24 API call failed: ${method}`, error.response?.data || error.message);
 			throw new IntegrationError(
 				`Bitrix24 API call failed: ${error.message}`,
@@ -377,6 +390,23 @@ export class Bitrix24Service extends BaseAdapter<
 				error.response?.status || 500,
 			);
 		}
+		} finally {
+			this.b24Metrics.record(appKind, method, _metricsResult, Date.now() - _metricsStart);
+		}
+	}
+
+	/** Классификация B24 error для метрик. OVERLOAD_LIMIT — критично
+	 *  (per-app блокировка, требует ручного создания V2 app). */
+	private _classifyB24Error(error: any): B24CallResult {
+		const msg = String(error?.message || error?.response?.data?.error || error?.response?.data?.error_description || "");
+		const status = Number(error?.response?.status || 0);
+		if (/OVERLOAD_LIMIT|QUERY_LIMIT_EXCEEDED|application is blocked/i.test(msg)) return "overload";
+		if (/ETIMEDOUT|ECONNABORTED|timeout/i.test(msg) || status === 504) return "timeout";
+		if (/ECONNREFUSED|EAI_AGAIN|ENOTFOUND|ECONNRESET/i.test(msg)) return "network";
+		if (/expired_token/i.test(msg)) return "expired_token";
+		if (status >= 500 && status < 600) return "5xx";
+		if (status >= 400 && status < 500) return "4xx";
+		return "other";
 	}
 
 	async createPlatformClient(_portalDomain: string): Promise<AxiosInstance> {

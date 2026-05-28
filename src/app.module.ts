@@ -6,6 +6,7 @@ import { PrismaModule } from "./prisma/prisma.module";
 import { WidgetModule } from "./widget/widget.module";
 import { HealthModule } from "./health/health.module";
 import { RecoveryModule } from "./recovery/recovery.module";
+import { B24MetricsModule } from "./common/b24-metrics.module";
 import { ConfigModule } from "@nestjs/config";
 import { AppController } from "./app.controller";
 import { ServeStaticModule } from "@nestjs/serve-static";
@@ -16,7 +17,7 @@ import { join } from "path";
 		isGlobal: true, envFilePath: ".env", cache: true,
 	}), ServeStaticModule.forRoot({
 		rootPath: join(__dirname, "..", "static"),
-	}), Bitrix24Module, OauthModule, WebhooksModule, PrismaModule, WidgetModule, HealthModule, RecoveryModule],
+	}), B24MetricsModule, Bitrix24Module, OauthModule, WebhooksModule, PrismaModule, WidgetModule, HealthModule, RecoveryModule],
 	controllers: [AppController],
 })
 export class AppModule {}
