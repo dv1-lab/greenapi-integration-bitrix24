@@ -1640,10 +1640,13 @@ export class Bitrix24Service extends BaseAdapter<
 					const widMatch = wid.match(/^(\d{10,15})/);
 					if (widMatch) phones.add(widMatch[1]);
 					const label = String(s.label || "").trim();
-					const labelMatch = label.match(/\+?(\d[\d\s\-()]{8,}\d)/);
+					// Phone-pattern: "+" digit [digits/spaces/dashes]+ — БЕЗ скобок,
+					// иначе захватывает "1)" из "(1Begovoy)" и phone становится с
+					// лишней цифрой. Допустимая длина — 10..15 digits после normalize.
+					const labelMatch = label.match(/\+\d[\d\s-]+/);
 					if (labelMatch) {
-						const labelNorm = labelMatch[1].replace(/\D/g, "");
-						if (labelNorm.length >= 10) phones.add(labelNorm);
+						const labelNorm = labelMatch[0].replace(/\D/g, "");
+						if (labelNorm.length >= 10 && labelNorm.length <= 15) phones.add(labelNorm);
 					}
 				}
 				this._ourPhonesCache = { phones, expiresAt: now + 60_000 };
