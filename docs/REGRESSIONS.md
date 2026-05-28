@@ -8,6 +8,43 @@
 
 ---
 
+## 2026-05-28 · message_delivery_status events/ingest без resolveAlias (#18)
+
+- **Симптом**: в логах adapter regularly видим
+  `events/ingest failed (adapter/message_delivery_status): customerUuid
+  или resolveAlias обязателен`. Customer-360 ничего не получает про
+  delivery статусы (sent/delivered/read/failed) для исходящих —
+  на странице `/customer-360/outgoing-pending` все outgoing «зависшие».
+- **Корень**: `_emitMessageDeliveryEvent` слал event с `body.customerUuid`
+  только если он передан в opts. Если нет — body содержал source/eventType/
+  channel/payload, но **ни** customerUuid **ни** resolveAlias. Customer-service
+  отвергал с validation error. При этом в opts.b24ChatId почти всегда
+  был полезный chat-id (`wa_+phone`, `tgbot_135967973`, `i2crm_ig_...`),
+  из которого можно построить resolveAlias.
+- **Фикс** (sha TBD): новый `_b24ChatIdToResolveAlias(chatId, channel)` —
+  парсит префикс b24ChatId по правилам CLAUDE.md / OPEN_LINE_LIFECYCLE.md
+  и возвращает `{type, value}`:
+  - `wa_<phone>` / `sc_<phone>` → `{phone}`
+  - `tgbot_<id>` / `tgsupport_<id>` → `{tg_user}`
+  - `i2crm_ig_<id>(_c<media>)?` → `{ig_client}`
+  - голый numeric + channel=TG/MAX → `{tg_user}` / `{max_chat}`
+  В `_emitMessageDeliveryEvent`: если нет customerUuid, пытаемся
+  resolveAlias из b24ChatId. Если ничего не вышло — skip ingest целиком
+  (предотвращаем заведомо невалидный HTTP-вызов).
+- **Verify**: после deploy log warn `_emitMessageDeliveryEvent: skip
+  ingest — нет customerUuid...` (если действительно нет данных) или
+  отсутствие старого warn `events/ingest failed`. На странице
+  `/customer-360/outgoing-pending` события delivery_status начинают
+  привязываться к клиенту через resolveAlias.
+- **Что НЕ делать**:
+  - НЕ слать `resolveAlias.type="adapter_chat_id"` или подобное —
+    customer-service enum строгий, нужны точные `phone/tg_user/max_chat/
+    ig_client`. Дробить enum дальше — нужны migrations.
+  - НЕ блокировать outbound flow если skip ingest — это observability
+    канал, не основная доставка.
+
+---
+
 ## 2026-05-28 · Детектор внутренних URL в outgoing (кейс Орлова, #14)
 
 - **Контекст**: 28.05 Орлов отправил клиенту в TG-чат сообщение, содержавшее

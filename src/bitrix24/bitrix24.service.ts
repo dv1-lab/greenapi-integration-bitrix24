@@ -1271,8 +1271,56 @@ export class Bitrix24Service extends BaseAdapter<
 			summary: `${opts.status}: ${opts.idMessage}${opts.error ? " — " + opts.error.slice(0, 100) : ""}`,
 			payload,
 		};
-		if (opts.customerUuid) body.customerUuid = opts.customerUuid;
+		if (opts.customerUuid) {
+			body.customerUuid = opts.customerUuid;
+		} else if (opts.b24ChatId) {
+			// customer-service /events/ingest требует customerUuid ИЛИ resolveAlias.
+			// Если customerUuid не знаем — пробуем извлечь alias из b24ChatId.
+			// Формат b24ChatId — см. CLAUDE.md / OPEN_LINE_LIFECYCLE.md §«chat.id префикс».
+			const alias = this._b24ChatIdToResolveAlias(opts.b24ChatId, opts.channel);
+			if (alias) body.resolveAlias = alias;
+		}
+		// Skip если ни customerUuid, ни resolveAlias — customer-service всё равно
+		// отвергнет с validation error, лишний HTTP-call в /events/ingest.
+		if (!body.customerUuid && !body.resolveAlias) {
+			this.logger.warn(
+				`_emitMessageDeliveryEvent: skip ingest — нет customerUuid и не удалось извлечь resolveAlias из b24ChatId=${opts.b24ChatId || "-"} (channel=${opts.channel})`,
+			);
+			return;
+		}
 		await this._eventsIngest(body);
+	}
+
+	/** Парсер b24ChatId → resolveAlias по формату префикса.
+	 *  - "wa_<phone>"        → {type:"phone", value:phone}
+	 *  - "sc_<phone>"        → {type:"phone", value:phone}
+	 *  - "tgbot_<id>"        → {type:"tg_user", value:id}
+	 *  - "tgsupport_<id>"    → {type:"tg_user", value:id}
+	 *  - "i2crm_ig_<id>..."  → {type:"ig_client", value:id}
+	 *  - голый numeric для TG/MAX по channel hint
+	 *  Возвращает null если формат не распознан. */
+	private _b24ChatIdToResolveAlias(
+		b24ChatId: string,
+		channel?: string,
+	): { type: string; value: string } | null {
+		if (!b24ChatId) return null;
+		const s = String(b24ChatId).trim();
+		// wa_/sc_ → phone
+		let m = s.match(/^(?:wa|sc)_(\+?\d{10,15})$/);
+		if (m) return { type: "phone", value: m[1].startsWith("+") ? m[1] : "+" + m[1] };
+		// tgbot_/tgsupport_ → tg_user
+		m = s.match(/^(?:tgbot|tgsupport)_(\d{6,})$/);
+		if (m) return { type: "tg_user", value: m[1] };
+		// i2crm_ig_<id>(_c<media>)? → ig_client
+		m = s.match(/^i2crm_ig_(\d{6,})/);
+		if (m) return { type: "ig_client", value: m[1] };
+		// голый numeric — по channel hint
+		if (/^\d{6,}$/.test(s)) {
+			const ch = (channel || "").toUpperCase();
+			if (ch === "TG" || ch.includes("TELEGRAM")) return { type: "tg_user", value: s };
+			if (ch === "MAX") return { type: "max_chat", value: s };
+		}
+		return null;
 	}
 
 	/**
