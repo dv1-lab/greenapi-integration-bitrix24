@@ -773,6 +773,11 @@ export class Bitrix24Service extends BaseAdapter<
 					if (chatId && chatIdUf) {
 						const existingValue = contactData?.[chatIdUf];
 						if (!existingValue) {
+							if (!this._isValidChatId(chatId)) {
+								this.logger.warn(
+									`ensureLead[${trace}]: refuse to write ${chatIdUf}=${JSON.stringify(chatId)} on contact ${contactId} — invalid format (must be numeric ≥6 chars)`,
+								);
+							} else {
 							try {
 								await this.callBitrix24Method(portalDomain, "crm.contact.update", {
 									id: contactId,
@@ -796,6 +801,7 @@ export class Bitrix24Service extends BaseAdapter<
 							).catch((e: any) =>
 								this.logger.warn(`ensureLead[${trace}]: orphan-link failed (non-fatal): ${e.message}`),
 							);
+							}
 						} else {
 							this.logger.info(
 								`ensureLead[${trace}]: ${chatIdUf} on contact ${contactId} already = ${existingValue} ` +
@@ -1620,6 +1626,18 @@ export class Bitrix24Service extends BaseAdapter<
 		phones: new Set(),
 		expiresAt: 0,
 	};
+
+	/** Валидный chat_id мессенджера: только цифры, длина ≥6.
+	 *  TG/MAX/IG client/chat_id всегда числовые и длиной 8+. Защита от
+	 *  записи мусора в UF_CRM_TG/MAX/IG_CHAT_ID. См. инцидент 28.05.2026 —
+	 *  лид 361494 имел UF_CRM_TG_CHAT_ID="M" (первая буква имени клиента),
+	 *  и любой клиент с именем на "M" мог зацепиться. */
+	private _isValidChatId(value: any): boolean {
+		if (value === null || value === undefined) return false;
+		const s = String(value).trim();
+		if (s.length < 6) return false;
+		return /^\d+$/.test(s);
+	}
 
 	/** Возвращает true если phone — это номер одного из наших Green API инстансов
 	 *  (а не клиента). Защита от false-merge через findbycomm. */
@@ -2630,7 +2648,11 @@ export class Bitrix24Service extends BaseAdapter<
 					updateFields.CONTACT_ID = contactId;
 				}
 				if (chatIdUf && !target[chatIdUf]) {
-					updateFields[chatIdUf] = chatId;
+					if (this._isValidChatId(chatId)) {
+						updateFields[chatIdUf] = chatId;
+					} else {
+						this.logger.warn(`backfill: refuse to write ${chatIdUf}=${JSON.stringify(chatId)} — invalid format`);
+					}
 				}
 				if (!target.UF_CRM_NF_YM_CLIENT_ID) {
 					updateFields.UF_CRM_NF_YM_CLIENT_ID = "-";
@@ -2875,7 +2897,13 @@ export class Bitrix24Service extends BaseAdapter<
 		const openEntity = await this._findOpenEntityForContact(portalDomain, contactId);
 
 		const updateFields: Record<string, any> = { CONTACT_ID: contactId };
-		if (chatIdUf && !snap[chatIdUf]) updateFields[chatIdUf] = chatId;
+		if (chatIdUf && !snap[chatIdUf]) {
+			if (this._isValidChatId(chatId)) {
+				updateFields[chatIdUf] = chatId;
+			} else {
+				this.logger.warn(`orphan-link backfill: refuse to write ${chatIdUf}=${JSON.stringify(chatId)} — invalid format`);
+			}
+		}
 		if (!snap.UF_CRM_NF_YM_CLIENT_ID) updateFields.UF_CRM_NF_YM_CLIENT_ID = "-";
 		if (phoneFromTitle && !(Array.isArray(snap.PHONE) && snap.PHONE.length > 0)) {
 			updateFields.PHONE = [{ VALUE: phoneFromTitle, VALUE_TYPE: "MOBILE" }];

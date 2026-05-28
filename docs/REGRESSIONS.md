@@ -8,6 +8,34 @@
 
 ---
 
+## 2026-05-28 · Assertion на формат UF_CRM_*_CHAT_ID — защита от мусора (#65b)
+
+- **Контекст**: лид 361494 (27.05) имел `UF_CRM_TG_CHAT_ID = "M"` —
+  однобуквенное значение, скорее всего обрывок имени клиента. После
+  ensureLead этот лид по filter `{UF_CRM_TG_CHAT_ID: "M"}` мог зацепляться
+  к любому клиенту с TG chat_id содержащим букву «M» как substring или
+  при поиске по строке. См. инцидент 28.05 «контакт Булат».
+- **Корень**: adapter в нескольких местах писал `chatId` в
+  `UF_CRM_TG_CHAT_ID`/`UF_CRM_MAX_CHAT_ID`/`UF_CRM_IG_CHAT_ID` без проверки
+  формата. Если на входе оказывался мусор (например первая буква имени
+  как fallback из widget'а или upstream-баг) — он попадал в UF без warn.
+- **Фикс** (sha TBD): новый приватный метод `_isValidChatId(value)` —
+  numeric ≥6 chars. Guard перед каждой записью chatId в UF:
+  - `bitrix24.service.ts:779` — ensureLead → contact.update
+  - `bitrix24.service.ts:2630` — orphan-link backfill (по chatId)
+  - `bitrix24.service.ts:2875` — orphan-link contact-based
+  - `widget.controller.ts:733` — IG backfill (inline `^\d{6,}$` regex)
+- **Verify**: при попытке записать `"M"` или другое не-numeric/короткое —
+  warn в логи (`refuse to write UF_CRM_*_CHAT_ID=... — invalid format`),
+  UF не записывается. Лид остаётся без UF, ensureLead продолжает работать.
+- **Что НЕ делать**:
+  - НЕ опускать длину до <6 — есть risk false-positive (легитимный chat_id
+    короткий), но в практике TG/MAX/IG client_id всегда длиной 8+ цифр.
+  - НЕ делать helper глобальным utility пока не нужно — inline regex
+    в widget.controller дешевле import-цепочки между Nest-модулями.
+
+---
+
 ## 2026-05-28 · Blacklist своих instance-номеров — защита от false-merge (#65a)
 
 - **Контекст**: после инцидента «контакт Булат прицепляется ко всем лидам»

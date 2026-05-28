@@ -722,6 +722,13 @@ export class WidgetController {
 					|| (!l?.UF_CRM_IG_CHAT_ID && !l?.UF_CRM_NF_YM_CLIENT_ID)
 				);
 				if (!target) continue;
+				// _isValidChatId inline: numeric ≥6 chars. Защита от записи
+				// мусора в UF (инцидент 28.05.2026 — лид 361494 имел "M").
+				const isValidIgChatId = clientId && /^\d{6,}$/.test(String(clientId));
+				if (!isValidIgChatId) {
+					this.logger.warn(`backfill IG: skip lead ${target.ID} — invalid clientId ${JSON.stringify(clientId)}`);
+					continue;
+				}
 				const fields: Record<string, any> = {
 					UF_CRM_IG_CHAT_ID: clientId,
 					UF_CRM_NF_YM_CLIENT_ID: "-",
