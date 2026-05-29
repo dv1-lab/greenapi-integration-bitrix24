@@ -109,10 +109,49 @@ export class B24MetricsService {
 		return result;
 	}
 
+	/**
+	 * Агрегат событий за окно (ts > sinceTs) по приложениям — для push на
+	 * дашборд нагрузки B24 (dv-dashboard /api/b24-metrics/push). `calls`
+	 * разбит ровно по классам B24CallResult (контракт пуша).
+	 */
+	windowSince(sinceTs: number): B24WindowResult {
+		const now = Date.now();
+		const zero = (): Record<B24CallResult, number> => ({
+			ok: 0, overload: 0, "4xx": 0, "5xx": 0, timeout: 0, network: 0, expired_token: 0, other: 0,
+		});
+		const apps: B24WindowResult["apps"] = {};
+		const methodCounts = new Map<string, Map<string, number>>();
+		for (const e of this.events) {
+			if (e.ts <= sinceTs) continue;
+			if (!apps[e.app]) {
+				apps[e.app] = { calls: zero(), topMethods: [] };
+				methodCounts.set(e.app, new Map());
+			}
+			apps[e.app].calls[e.result]++;
+			const mc = methodCounts.get(e.app)!;
+			mc.set(e.method, (mc.get(e.method) ?? 0) + 1);
+		}
+		for (const app of Object.keys(apps)) {
+			apps[app].topMethods = Array.from(methodCounts.get(app)!.entries())
+				.map(([method, count]) => ({ method, count }))
+				.sort((a, b) => b.count - a.count)
+				.slice(0, 5);
+		}
+		return { now, apps };
+	}
+
 	/** Только для тестов — сбросить buffer. */
 	_reset(): void {
 		this.events = [];
 	}
+}
+
+export interface B24WindowResult {
+	now: number;
+	apps: Record<string, {
+		calls: Record<B24CallResult, number>;
+		topMethods: Array<{ method: string; count: number }>;
+	}>;
 }
 
 export interface B24AppSnapshot {
