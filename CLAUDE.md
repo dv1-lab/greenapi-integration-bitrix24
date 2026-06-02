@@ -79,6 +79,16 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. **
    header `X-Metrics-Token`. Возвращает p50/p95/p99/error rate per endpoint.
    См. `docs/PERFORMANCE.md`.
 
+9. **Защита от OVERLOAD** (02.06, после блокировки ms-b24-sync). В
+   `callBitrix24Method` — `B24CircuitBreaker` (`b24-circuit-breaker.ts`) +
+   `_b24Pace(appKind)`:
+   - **breaker** (cooldown 30с→5мин при OVERLOAD_LIMIT/QUERY_LIMIT) — для ВСЕХ
+     appKind, защита от блокировки приложения;
+   - **кран** `B24_MIN_INTERVAL_MS` (~1 r/s) — ТОЛЬКО для фонового
+     `customer360`. Интерактивный `social` (`imconnector.send.messages` —
+     сообщения клиентам) **НЕ тормозим**, иначе ответы оператора уходят с
+     задержкой. Не убирать это разделение. См. memory [[b24_overload_pattern]].
+
 ## Деплой
 
 ```bash

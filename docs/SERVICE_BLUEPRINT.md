@@ -95,6 +95,8 @@ GreenAPI кабинеты, i2crm подключение, customer-service.
 | `APP_URL` | `https://social.9wb.ru` — публичный URL для OAuth callback и placement |
 | `BITRIX24_CLIENT_ID` | client_id Local app `social` |
 | `BITRIX24_CLIENT_SECRET` | client_secret Local app `social` |
+| `B24_MIN_INTERVAL_MS` | кран min-interval (дефолт 1000≈1 r/s) — применяется ТОЛЬКО к фоновому `appKind=customer360` (см. `_b24Pace`). social-интерактив не тормозится |
+| `B24_OVERLOAD_COOLDOWN_BASE_MS` / `_MAX_MS` | circuit-breaker пауза при OVERLOAD (дефолт 30000→300000), для всех appKind. `b24-circuit-breaker.ts`, добавлено 02.06 |
 | `BITRIX24_CUSTOMER360_CLIENT_ID` | client_id app `customer360` |
 | `BITRIX24_CUSTOMER360_CLIENT_SECRET` | client_secret app `customer360` |
 | `BITRIX_WEBHOOK_URL` | legacy inbound webhook B24, **не использовать в новом коде** |
