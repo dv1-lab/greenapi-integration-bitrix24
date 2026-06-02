@@ -26,6 +26,7 @@ import { Bitrix24WebhookDto } from "./dto/bitrix24-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { mask } from "../common/mask";
 import { B24MetricsService, B24CallResult } from "../common/b24-metrics.service";
+import { B24CircuitBreaker } from "./b24-circuit-breaker";
 import {
 	validateI2crmIncoming,
 	buildI2crmUserId,
@@ -115,6 +116,15 @@ export class Bitrix24Service extends BaseAdapter<
 	// зависают в event loop (в тестах ловятся как «log after tests done»).
 	private _outgoingCleanupKickoff: NodeJS.Timeout | null = null;
 	private _tokenRefreshKickoff: NodeJS.Timeout | null = null;
+	// === Защита от перегрузки B24 (после блокировки 02.06, см. b24-circuit-breaker.ts) ===
+	// breaker применяется ко ВСЕМ appKind (защита от OVERLOAD-блокировки);
+	// постоянный кран min-interval — только для фонового customer360 (см. _b24Pace).
+	private readonly _b24Breaker = new B24CircuitBreaker({
+		baseCooldownMs: Number(process.env.B24_OVERLOAD_COOLDOWN_BASE_MS) || 30_000,
+		maxCooldownMs: Number(process.env.B24_OVERLOAD_COOLDOWN_MAX_MS) || 300_000,
+	});
+	/** Момент, раньше которого следующий customer360-запрос стартовать нельзя. */
+	private _b24NextSlotC360 = 0;
 
 	constructor(
 		protected readonly bitrix24Transformer: Bitrix24Transformer,
@@ -326,6 +336,7 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 
 		try {
+			await this._b24Pace(appKind);
 			const url = `https://${portalDomain}/rest/${method}?auth=${token}`;
 			// Маскируем токен в логах — он попадает в docker logs/transcript.
 			const safeUrl = url.replace(/(auth=)[^&]+/, "$1<masked>");
@@ -362,6 +373,7 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 
 			_metricsResult = "ok";
+			this._b24Breaker.recordSuccess();
 			return response.data.result;
 		} catch (error: any) {
 			if (error.response?.status === 401 && retryCount === 0) {
@@ -383,6 +395,7 @@ export class Bitrix24Service extends BaseAdapter<
 			}
 
 			_metricsResult = this._classifyB24Error(error);
+			if (_metricsResult === "overload") this._b24Breaker.recordOverload();
 			this.logger.error(`Bitrix24 API call failed: ${method}`, error.response?.data || error.message);
 			throw new IntegrationError(
 				`Bitrix24 API call failed: ${error.message}`,
@@ -407,6 +420,34 @@ export class Bitrix24Service extends BaseAdapter<
 		if (status >= 500 && status < 600) return "5xx";
 		if (status >= 400 && status < 500) return "4xx";
 		return "other";
+	}
+
+	private _b24Sleep(ms: number): Promise<void> {
+		return new Promise((r) => setTimeout(r, ms));
+	}
+
+	/**
+	 * Пейсинг перед B24-вызовом:
+	 * - breaker-cooldown — для ВСЕХ appKind (если портал перегружен, ждём, чтобы
+	 *   не долбить и не усугублять блокировку);
+	 * - кран min-interval — ТОЛЬКО для фонового `customer360` (его вал
+	 *   `crm.deal.get` положил приложение 02.06). Интерактивный `social`
+	 *   (сообщения клиентам через imconnector) НЕ тормозим — иначе ответы
+	 *   оператора уходят с задержкой.
+	 */
+	private async _b24Pace(appKind: "social" | "customer360"): Promise<void> {
+		const cooldown = this._b24Breaker.msUntilClosed();
+		if (cooldown > 0) {
+			this.logger.warn(`B24 перегружен — пауза ${cooldown}мс (circuit-breaker, ${appKind})`);
+			await this._b24Sleep(cooldown);
+		}
+		if (appKind === "customer360") {
+			const minInterval = Number(process.env.B24_MIN_INTERVAL_MS) || 1000;
+			const now = Date.now();
+			const wait = Math.max(0, this._b24NextSlotC360 - now);
+			this._b24NextSlotC360 = Math.max(now, this._b24NextSlotC360) + minInterval;
+			if (wait > 0) await this._b24Sleep(wait);
+		}
 	}
 
 	async createPlatformClient(_portalDomain: string): Promise<AxiosInstance> {

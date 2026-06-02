@@ -18,6 +18,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { I2crmTgMirrorService } from "./i2crm-tg-mirror.service";
 import { TgBotMirrorService } from "./tg-bot-mirror.service";
 import { MediaCacheService } from "./media-cache.service";
+import { B24MetricsService } from "../common/b24-metrics.service";
 
 // Минимальный mock Prisma — все методы, которые могут вызваться в early-paths
 // handleI2crmIncoming / handleOutgoingMessageStatus, возвращают пустоту
@@ -97,6 +98,7 @@ async function buildService(overrides?: {
 			{ provide: I2crmTgMirrorService, useValue: i2crmMirror },
 			{ provide: TgBotMirrorService, useValue: tgBotMirror },
 			{ provide: MediaCacheService, useValue: mediaCache },
+			{ provide: B24MetricsService, useValue: { record: jest.fn() } },
 		],
 	}).compile();
 
