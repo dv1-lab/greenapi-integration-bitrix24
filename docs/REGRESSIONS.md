@@ -8,6 +8,37 @@
 
 ---
 
+## 2026-06-04 · Дубль вкладки «Social Connector» в CRM-карточках
+
+- **Симптом**: в карточке сделки (и лида/контакта/...) две одинаковые вкладки
+  «Social Connector» подряд. Обе открывают один и тот же виджет. Появилось
+  после переустановки приложения.
+- **Корень**: `registerCrmPlacements` биндит `HANDLER = APP_URL` как есть. B24
+  различает placement по **точному** URL, поэтому `https://social.9wb.ru/` (со
+  слешем, прошлая установка) и `https://social.9wb.ru` (без слеша, переустановка)
+  — для него РАЗНЫЕ handler'ы. Идемпотентная защита `ALREADY_BINDED` не
+  сработала (handler не совпал) → второй комплект из 13 вкладок. Плюс
+  `SETTING_CONNECTOR` зря был в списке `registerCrmPlacements` с корневым
+  handler'ом — давал 3-ю запись поверх правильного `/oauth/install` от
+  `imconnector.register`.
+- **Фикс** (sha `aab93b2`): `appUrlBase()` срезает хвостовой `/` — все 3
+  регистрации (webhooks / CRM placements / connector) дают канонический handler.
+  `SETTING_CONNECTOR` убран из списка `registerCrmPlacements`. Файл:
+  `src/oauth/oauth.controller.ts`.
+- **Очистка прода** (разово, портал 1begovoy): `placement.unbind` по каждому
+  коду с `HANDLER=https://social.9wb.ru/` (со слешем) снёс старый набор;
+  для `SETTING_CONNECTOR` — unbind обоих вариантов (`/` и без), правильный
+  `/oauth/install` остался. Было 84 привязки → стало 69 (−15). Токен брать из
+  БД adapter: `SELECT accessToken FROM User`; диагностика — `placement.get`
+  (возвращает все привязки приложения с handler'ами).
+- **Что НЕ ломать**: `placement.list` ≠ привязки — это системный каталог всех
+  кодов B24 (111 шт). Реальные привязки приложения смотреть `placement.get`.
+  `unbind` фильтрует по точному HANDLER — указывать URL ровно как в `placement.get`
+  (важен слеш). `SETTING_CONNECTOR` должен остаться **только** на `/oauth/install`,
+  иначе настройки инстанса оператором откроются не на той странице.
+
+---
+
 ## 2026-06-04 · Orphan-лид Telegram не привязывается к контакту (имя в TITLE вместо chat_id)
 
 - **Симптом**: лид #362196 «Николай - Telegram Office +7 924 077-85-66»
