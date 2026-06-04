@@ -30,7 +30,8 @@ export class OAuthController {
 		description:
 			"Вызывается B24 при установке приложения. Создаёт User в БД с " +
 			"OAuth-токеном, регистрирует social_connector через imconnector.register, " +
-			"привязывает 14 placement'ов (CRM-карточки + LEFT_MENU + SETTING_CONNECTOR), " +
+			"привязывает 13 placement'ов (CRM-карточки + LEFT_MENU + USER_PROFILE_MENU); " +
+			"SETTING_CONNECTOR ставит imconnector.register отдельно (/oauth/install), " +
 			"подписывается на ONIMCONNECTORMESSAGEADD и др. webhook'и. " +
 			"Также обрабатывает PLACEMENT=SETTING_CONNECTOR — рендерит UI настройки инстанса.",
 	})
@@ -434,8 +435,15 @@ export class OAuthController {
 		return res.send(html);
 	}
 
+	// APP_URL без хвостовых слешей. B24 различает handler'ы по точному URL:
+	// `https://host/` и `https://host` для него — РАЗНЫЕ placement'ы, поэтому
+	// слеш в APP_URL приводил к дублю вкладок при переустановке (инцидент 2026-06-04).
+	private appUrlBase(): string {
+		return (this.configService.get<string>("APP_URL") || "").replace(/\/+$/, "");
+	}
+
 	private async registerBitrix24Webhooks(domain: string, accessToken: string): Promise<void> {
-		const appUrl = this.configService.get<string>("APP_URL");
+		const appUrl = this.appUrlBase();
 		const webhookUrl = `${appUrl}/webhooks/bitrix24`;
 
 		const eventsToRegister = [
@@ -469,12 +477,14 @@ export class OAuthController {
 		// Регистрируем вкладку Social Connector во всех CRM-карточках. Без этого
 		// после переустановки приложения у клиента в B24-карточке не появляется
 		// вкладка — нужно делать placement.bind вручную через REST.
-		const appUrl = this.configService.get<string>("APP_URL");
-		// 14 placement'ов:
+		const appUrl = this.appUrlBase();
+		// 13 placement'ов:
 		// — Карточки CRM (вкладки): Lead, Deal, Contact, Company, Quote (Предложение),
 		//   Smart Invoice, Order, Dynamic SmartProcess 141/1032/1036/1040
 		// — Глобальные: LEFT_MENU, USER_PROFILE_MENU
-		// — Контакт-центр: SETTING_CONNECTOR (настройка коннектора оператором)
+		// SETTING_CONNECTOR здесь НЕ регистрируем — его привязывает imconnector.register
+		// с правильным handler'ом /oauth/install. Дублирование тут давало 3-ю запись
+		// SETTING_CONNECTOR с корневым handler'ом и ломало открытие настроек (инцидент 2026-06-04).
 		const placements = [
 			"CRM_LEAD_DETAIL_TAB",
 			"CRM_DEAL_DETAIL_TAB",
@@ -489,7 +499,6 @@ export class OAuthController {
 			"CRM_DYNAMIC_1040_DETAIL_TAB",
 			"LEFT_MENU",
 			"USER_PROFILE_MENU",
-			"SETTING_CONNECTOR",
 		];
 		for (const placement of placements) {
 			try {
@@ -513,7 +522,7 @@ export class OAuthController {
 
 	private async registerMessengerConnector(domain: string, accessToken: string) {
 		const baseUrl = `https://${domain}/rest`;
-		const appUrl = this.configService.get<string>("APP_URL");
+		const appUrl = this.appUrlBase();
 
 		try {
 			const connectorId = "social_connector";
