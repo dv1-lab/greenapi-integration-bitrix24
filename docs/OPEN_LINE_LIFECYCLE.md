@@ -130,7 +130,17 @@ adapter widget не дёргается**, поэтому `backfillSendLead` не
 
 1. orphan-фильтр (нет CONTACT_ID + нет UF полей)
 2. парс TITLE pattern `<chat_id> - <CHANNEL> <phone?>`
-3. поиск контакта по `UF_CRM_*_CHAT_ID`, fallback по phone
+2-bis. **fallback на активность сессии (sha c6b11ef, 04.06.2026)**: если из
+   TITLE chat_id не извлёкся (`!_isValidChatId`), берём его из
+   `IMOPENLINES_SESSION.PROVIDER_PARAMS.USER_CODE`
+   (`social_connector|<line>|<prefix><chatId>|<user>` →
+   `_parseSessionUserCode` снимает префикс sc_/wa_/i2crm_ig_,
+   `_channelLabelForSession` определяет канал по `provider` инстанса линии).
+   **Зачем**: Telegram/MAX отдают senderName, и B24 кладёт в TITLE **имя**
+   клиента, а не chat_id (regex `\w` ещё и не покрывает кириллицу) → парс п.2
+   промахивался мимо существующего контакта. Кейс #362196 «Николай - Telegram
+   Office». См. REGRESSIONS 2026-06-04.
+3. поиск контакта по `UF_CRM_*_CHAT_ID` (голый chatId), fallback по phone
 4. **collision-defense**: если по UF найдено `>1` — переход на phone
    (на портале легaси-коллизии: десятки контактов с одним UF_CRM_MAX_CHAT_ID)
 5. при found — `crm.lead.update`: CONTACT_ID + UF + NAME + PHONE;
