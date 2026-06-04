@@ -389,3 +389,66 @@ describe("Bitrix24Service.handleOutgoingMessageStatus (early returns)", () => {
 		expect(prisma.outgoingMessage.findUnique).not.toHaveBeenCalled();
 	});
 });
+
+// =====================================================================
+// Orphan-lead linker: chat_id из активности сессии (fix #362196, 04.06)
+// =====================================================================
+describe("Bitrix24Service orphan-link chatId resolution", () => {
+	let service: Bitrix24Service;
+
+	beforeEach(async () => {
+		service = await buildService();
+	});
+	afterEach(() => service.onModuleDestroy());
+
+	describe("_parseSessionUserCode (pure)", () => {
+		const cases: Array<[string, { line: number; chatId: string; prefix: string } | null]> = [
+			["social_connector|204|sc_6215338890|153922", { line: 204, chatId: "6215338890", prefix: "sc_" }],
+			["social_connector|148|wa_79001234567|999", { line: 148, chatId: "79001234567", prefix: "wa_" }],
+			["social_connector|178|123456789|55", { line: 178, chatId: "123456789", prefix: "" }],
+			["social_connector|18|i2crm_ig_27986508|3", { line: 18, chatId: "27986508", prefix: "i2crm_ig_" }],
+			["", null],
+			["garbage-no-pipes", null],
+			["i2crm|18|inst-555-777|3", null], // legacy i2crm-код, не наш connector
+			["social_connector|204|sc_abc|5", null], // userKey без хвостовых цифр
+		];
+		it.each(cases)("%s", (code, expected) => {
+			expect((service as any)._parseSessionUserCode(code)).toEqual(expected);
+		});
+	});
+
+	describe("_parseOrphanLeadTitle — корень бага", () => {
+		it("кириллическое имя в TITLE НЕ даёт валидный chatId (Telegram senderName)", () => {
+			const parsed = (service as any)._parseOrphanLeadTitle("Николай - Telegram Office +7 924 077-85-66");
+			const valid = parsed && (service as any)._isValidChatId(parsed.chatId);
+			expect(valid).toBeFalsy();
+		});
+		it("native-формат с chat_id всё ещё парсится (без регрессии)", () => {
+			const parsed = (service as any)._parseOrphanLeadTitle("32656502 - MAX 79584983354");
+			expect(parsed?.chatId).toBe("32656502");
+			expect((service as any)._isValidChatId(parsed.chatId)).toBe(true);
+		});
+	});
+
+	describe("_resolveOrphanChatFromActivity (fallback)", () => {
+		it("Telegram-сессия → chatId без префикса + channelLabel из provider инстанса", async () => {
+			const prisma = mockPrisma();
+			(prisma as any).instance = {
+				findFirst: jest.fn().mockResolvedValue({ bitrixLine: 204, settings: { provider: "telegram" } }),
+			};
+			service = await buildService({ prisma });
+			jest.spyOn(service as any, "callBitrix24Method").mockResolvedValue([
+				{ ID: "1310156", PROVIDER_PARAMS: { USER_CODE: "social_connector|204|sc_6215338890|153922" } },
+			]);
+			const r = await (service as any)._resolveOrphanChatFromActivity("p.bitrix24.ru", 362196);
+			expect(r).toEqual({ chatId: "6215338890", channelLabel: "Telegram" });
+		});
+
+		it("нет IMOPENLINES_SESSION активности → null", async () => {
+			service = await buildService();
+			jest.spyOn(service as any, "callBitrix24Method").mockResolvedValue([]);
+			const r = await (service as any)._resolveOrphanChatFromActivity("p.bitrix24.ru", 999);
+			expect(r).toBeNull();
+		});
+	});
+});

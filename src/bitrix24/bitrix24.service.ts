@@ -2917,6 +2917,72 @@ export class Bitrix24Service extends BaseAdapter<
 		return { chatId, channelLabel, phoneFromTitle };
 	}
 
+	/** Парс `PROVIDER_PARAMS.USER_CODE` сессии открытой линии.
+	 *  Формат: `social_connector|<line>|<prefix?><chatId>|<b24_user>`
+	 *  (`social_connector|204|sc_6215338890|153922`). Префикс (sc_/wa_/tgbot_/
+	 *  i2crm_ig_…) снимается — chatId возвращается голым. null если не подошёл. */
+	private _parseSessionUserCode(code: string): { line: number; chatId: string; prefix: string } | null {
+		if (!code || typeof code !== "string") return null;
+		const parts = code.split("|");
+		if (parts.length < 3 || parts[0] !== "social_connector") return null;
+		const line = Number(parts[1]);
+		if (!Number.isInteger(line)) return null;
+		// userKey = `<prefix><chatId>`. Префикс (sc_/wa_/i2crm_ig_…) может сам
+		// содержать цифры (i2crm_ig_), поэтому chatId — хвостовая группа цифр.
+		const m = parts[2].trim().match(/^(.*?)(\d+)$/);
+		if (!m) return null;
+		return { line, chatId: m[2], prefix: m[1] };
+	}
+
+	/** channelLabel сессии: по prefix (IG) либо по provider инстанса этой линии. */
+	private async _channelLabelForSession(
+		parsed: { line: number; prefix: string },
+	): Promise<"Telegram" | "MAX" | "Instagram" | "WhatsApp" | null> {
+		if (parsed.prefix.startsWith("i2crm_ig_")) return "Instagram";
+		let inst: any = null;
+		try {
+			inst = await (this.prisma as any).instance.findFirst({ where: { bitrixLine: parsed.line } });
+		} catch { /* prisma недоступна — ниже вернём null */ }
+		const provider = String((inst?.settings as any)?.provider || "").toLowerCase();
+		if (provider === "max") return "MAX";
+		if (provider === "telegram") return "Telegram";
+		if (provider === "instagram") return "Instagram";
+		if (provider === "wa" || provider === "whatsapp") return "WhatsApp";
+		return null;
+	}
+
+	/** Fallback к `_parseOrphanLeadTitle`: достаёт chat_id из активности сессии
+	 *  лида, когда B24 положил в TITLE имя клиента (Telegram/MAX отдают
+	 *  senderName), а не chat_id. Источник — `IMOPENLINES_SESSION.USER_CODE`,
+	 *  как в `backfillTgBotContactLink`. Кейс #362196 «Николай - Telegram Office». */
+	private async _resolveOrphanChatFromActivity(
+		portalDomain: string, leadId: number,
+	): Promise<{ chatId: string; channelLabel: "Telegram" | "MAX" | "Instagram" | "WhatsApp" } | null> {
+		let acts: any;
+		try {
+			acts = await this.callBitrix24Method(
+				portalDomain, "crm.activity.list",
+				{
+					filter: { OWNER_ID: leadId, OWNER_TYPE_ID: 1, PROVIDER_ID: "IMOPENLINES_SESSION" },
+					select: ["ID", "PROVIDER_PARAMS"],
+					order: { ID: "DESC" },
+				},
+				undefined, 0, "customer360",
+			);
+		} catch (e: any) {
+			this.logger.warn(`orphan-link: activity.list lead=${leadId} failed: ${e?.message || e}`);
+			return null;
+		}
+		const list = Array.isArray(acts) ? acts : [];
+		for (const a of list) {
+			const parsed = this._parseSessionUserCode(a?.PROVIDER_PARAMS?.USER_CODE);
+			if (!parsed || !this._isValidChatId(parsed.chatId)) continue;
+			const channelLabel = await this._channelLabelForSession(parsed);
+			if (channelLabel) return { chatId: parsed.chatId, channelLabel };
+		}
+		return null;
+	}
+
 	/** Поиск открытой сущности у контакта: приоритет сделки, потом лиды.
 	 *  «Открытая» — CLOSED=N для сделок, STATUS_ID не в финальных для лидов.
 	 *  Себя в выдачу не возвращает — поиск идёт по CONTACT_ID, а сам orphan
@@ -2981,8 +3047,24 @@ export class Bitrix24Service extends BaseAdapter<
 			return { linked: false, reason: "contact set, not orphan" };
 		}
 
-		const parsed = this._parseOrphanLeadTitle(String(snap?.TITLE || ""));
-		if (!parsed) return { linked: false, reason: "title pattern not matched" };
+		let parsed = this._parseOrphanLeadTitle(String(snap?.TITLE || ""));
+		// TITLE даёт chat_id не всегда: для Telegram/MAX B24 берёт имя клиента
+		// (senderName) → парс возвращает null или имя вместо id. Тогда chat_id
+		// достаём из активности сессии. Кейс лида #362196 «Николай - Telegram
+		// Office…» 04.06 — см. REGRESSIONS.
+		if (!parsed || !this._isValidChatId(parsed.chatId)) {
+			const fromAct = await this._resolveOrphanChatFromActivity(portalDomain, leadId);
+			if (fromAct) {
+				parsed = {
+					chatId: fromAct.chatId,
+					channelLabel: fromAct.channelLabel,
+					phoneFromTitle: parsed?.phoneFromTitle ?? null,
+				};
+			}
+		}
+		if (!parsed || !this._isValidChatId(parsed.chatId)) {
+			return { linked: false, reason: "no chatId from title or activity" };
+		}
 		const { chatId, channelLabel, phoneFromTitle } = parsed;
 		const chatIdUf = this.orphanChannelChatIdUf[channelLabel];
 

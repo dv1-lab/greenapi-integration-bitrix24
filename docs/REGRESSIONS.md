@@ -8,6 +8,39 @@
 
 ---
 
+## 2026-06-04 · Orphan-лид Telegram не привязывается к контакту (имя в TITLE вместо chat_id)
+
+- **Симптом**: лид #362196 «Николай - Telegram Office +7 924 077-85-66»
+  (линия 204) пришёл с `CONTACT_ID=null`, хотя контакт #74070 с
+  `UF_CRM_TG_CHAT_ID=6215338890` уже существовал. Привязка не сработала.
+- **Корень**: `_maybeLinkOrphanLead` извлекал chat_id **только из TITLE**
+  через `_parseOrphanLeadTitle` (шаблон `<chat_id> - <КАНАЛ> <phone>`). Но для
+  Telegram/MAX B24 строит TITLE из имени клиента (senderName «Николай»), а не
+  из chat_id. Парсер: regex `^([\w]+)` не покрывает кириллицу → совпадения нет
+  → `title pattern not matched` → привязка не запускалась. При латинском имени
+  взял бы имя за chat_id и тоже промахнулся. Настоящий chat_id всё это время
+  лежал в активности лида (`IMOPENLINES_SESSION.USER_CODE =
+  social_connector|204|sc_6215338890|153922`). **Это НЕ рассинхрон префикса**
+  (`sc_` vs голый): проверка показала все 41 TG + 23 MAX контакта хранят UF в
+  голом формате, поиск ведётся голым chat_id и сработал бы — промах был на
+  этапе извлечения chat_id из TITLE.
+- **Фикс** (sha N/A — этот коммит): fallback в `_maybeLinkOrphanLead` — если
+  TITLE не дал валидный chat_id (`_isValidChatId`), достаём его из активности
+  сессии (`_resolveOrphanChatFromActivity` → `_parseSessionUserCode` снимает
+  префикс sc_/wa_/i2crm_ig_, `_channelLabelForSession` определяет канал по
+  `provider` инстанса этой линии). Старый title-путь остаётся первичным —
+  рабочий формат `32656502 - MAX 79584983354` не задет. Файлы:
+  `src/bitrix24/bitrix24.service.ts` (+ юнит-тесты в `*.spec.ts`).
+- **Затронуто**: 41 Telegram + 23 MAX контакта с историей → разовый прогон
+  orphan-лидов через `/webhooks/internal/relink-orphan-lead` после деплоя.
+  Instagram не затронут (chat_id = голый стабильный client_id, отвязан от
+  префикса). Лид #362196 привязан вручную (CONTACT_ID=74070) до фикса.
+- **Что НЕ ломать**: не убирать первичность title-парса (для каналов где в
+  TITLE реально chat_id это быстрее, без лишнего activity.list). Fallback
+  идёт под `appKind=customer360` — остаётся под краном 1 r/s + circuit-breaker.
+
+---
+
 ## 2026-05-30 · IG Direct из Comment-лида: «Комментарий не существует» (диагноз, фикс отложен)
 
 - **Симптом**: оператор в Instagram **Comment**-лиде (`maximus9307`) жмёт
