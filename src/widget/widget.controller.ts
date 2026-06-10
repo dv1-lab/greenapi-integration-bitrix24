@@ -335,7 +335,12 @@ export class WidgetController {
 					} catch (err: any) {
 						if (err instanceof HttpException) throw err;
 						const msg = err.response?.data || err.message;
-						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}`, HttpStatus.BAD_GATEWAY);
+						// CheckAccount упал (таймаут Green API / MAX-shard, сетевой сбой).
+						// Оператор не должен оставаться заблокированным: и MAX, и Telegram
+						// поддерживают отправку по @username в обход резолва номера —
+						// подсказываем ввести его в поле ниже. См. инцидент #96 (08.06.2026).
+						const fallbackHint = ` Проверка номера сейчас недоступна — введите @username клиента в поле ниже, отправка пойдёт в обход CheckAccount.`;
+						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}.${fallbackHint}`, HttpStatus.BAD_GATEWAY);
 					}
 				}
 				chatId = cached.chatId;
