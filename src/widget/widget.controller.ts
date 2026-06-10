@@ -336,10 +336,15 @@ export class WidgetController {
 						if (err instanceof HttpException) throw err;
 						const msg = err.response?.data || err.message;
 						// CheckAccount упал (таймаут Green API / MAX-shard, сетевой сбой).
-						// Оператор не должен оставаться заблокированным: и MAX, и Telegram
-						// поддерживают отправку по @username в обход резолва номера —
-						// подсказываем ввести его в поле ниже. См. инцидент #96 (08.06.2026).
-						const fallbackHint = ` Проверка номера сейчас недоступна — введите @username клиента в поле ниже, отправка пойдёт в обход CheckAccount.`;
+						// Подсказка зависит от провайдера. Telegram: у людей бывает @username,
+						// и отправка по нему идёт в обход резолва номера — предлагаем ввести.
+						// MAX: username у клиентов как правило НЕТ, телефон — единственный
+						// идентификатор, а резолв phone→chatId делается этим же CheckAccount.
+						// Поэтому обходить нечем — это транзиентный сбой на стороне MAX,
+						// честно просим повторить позже. См. инцидент #96 (08.06.2026).
+						const fallbackHint = provider === "telegram"
+							? ` Проверка номера сейчас недоступна — введите @username клиента в поле ниже, отправка пойдёт в обход.`
+							: ` Это временный сбой на стороне MAX (проверка номера не отвечает). Повторите попытку через 2-3 минуты.`;
 						throw new HttpException(`${providerLabel} CheckAccount: ${typeof msg === "string" ? msg : JSON.stringify(mask(msg))}.${fallbackHint}`, HttpStatus.BAD_GATEWAY);
 					}
 				}
