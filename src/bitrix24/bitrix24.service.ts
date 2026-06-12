@@ -3354,7 +3354,7 @@ export class Bitrix24Service extends BaseAdapter<
 			if (line != null) {
 				const chatIdForUf = (instanceProvider === "max" || instanceProvider === "telegram") ? message.phone : undefined;
 				// Я.Метрика ClientId из служебной метки сайта 1begovoy.ru —
-				// два формата (ym-<id> или «с сайта … (ID <id>)»), см. extractYmClientId.
+				// три формата (ym-<id>, «(ID <id>)», «номер обращения: <id>»), см. extractYmClientId.
 				const ymClientId = this.extractYmClientId(message.message);
 				if (phoneE164 || chatIdForUf) {
 					await this.ensureOpenLeadForPhone(
@@ -3467,12 +3467,15 @@ export class Bitrix24Service extends BaseAdapter<
 
 	// Я.Метрика ClientId из метки, которую сайт 1begovoy.ru подставляет в
 	// pre-fill текста при «Спросить о товаре в WhatsApp/Telegram». Сайт за
-	// время существовал в двух форматах — поддерживаем оба:
+	// время менял разметку — поддерживаем все три формата:
 	//   1) «— код обращения: ym-<id>» (старая разметка);
-	//   2) «— с сайта 1begovoy.ru (ID <id>)» (новая разметка).
+	//   2) «— с сайта 1begovoy.ru (ID <id>)» (разметка до 2026-06-11);
+	//   3) «— с сайта 1begovoy.ru (… номер обращения: <id>)» (с 2026-06-11),
+	//      бывает с UTM: «(источник: …, номер обращения: <id>)».
 	private extractYmClientId(text: string | undefined | null): string | undefined {
 		const s = String(text || "");
 		const m = s.match(/\bym-(\d{6,25})\b/)
+			|| s.match(/номер\s+обращения:\s*(\d{6,25})/i)
 			|| s.match(/с\s+сайта\s+1begovoy\.ru\s*\(ID\s*(\d{6,25})\)/i);
 		return m ? m[1] : undefined;
 	}
@@ -3737,7 +3740,7 @@ export class Bitrix24Service extends BaseAdapter<
 		const portalDomain = user.portalDomain;
 
 		// Я.Метрика ClientId из служебной метки сайта 1begovoy.ru (см. extractYmClientId
-		// — поддерживаются оба формата: ym-<id> и «с сайта … (ID <id>)»).
+		// — поддерживаются форматы: ym-<id>, «(ID <id>)», «номер обращения: <id>»).
 		const ymClientId = this.extractYmClientId(text);
 
 		// Резолвим контакт клиента по UF_CRM_TG_CHAT_ID (channelLabel="Telegram").
