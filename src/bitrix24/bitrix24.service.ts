@@ -777,6 +777,9 @@ export class Bitrix24Service extends BaseAdapter<
 			// Trace-id: помогает следить flow через несколько log-точек на одном
 			// вызове (виджет → ensureLead → orphan-link → backfill).
 			const trace = Math.random().toString(36).slice(2, 8);
+			// Счётчик Я.Метрики 1begovoy.ru. Пишется парой с YA_CID, чтобы
+			// приложение B242YA знало, в какой счётчик слать офлайн-конверсию.
+			const ymCounterId = "45469563";
 			this.logger.info(
 				`ensureLead[${trace}]: enter phone=${phoneE164 || "-"} chat=${chatId || "-"} ` +
 				`channel=${channelLabel} line=${lineId} skipLead=${skipLeadCreation}`,
@@ -897,25 +900,34 @@ export class Bitrix24Service extends BaseAdapter<
 						CONTACT_ID: contactId,
 						"!STATUS_SEMANTIC_ID": ["F", "S"],
 					},
-					select: ["ID", "UF_CRM_NF_YM_CLIENT_ID"],
+					select: ["ID", "UF_CRM_NF_YM_CLIENT_ID", "UF_CRM_YA_CID"],
 				});
 				if (Array.isArray(openLeads) && openLeads.length > 0) {
 					this.logger.info(`ensureLead: contact ${contactId} has ${openLeads.length} open lead(s) — no action`);
-					// Я.Метрика ClientId: метка `ym-<id>` из текста (сайт подставляет
-					// её при «Спросить о товаре в WhatsApp/Telegram»). Если на
-					// открытом лиде поле пусто или заглушка "-", а сейчас пришёл
-					// настоящий id — обновляем. Иначе метка терялась бы для всех
-					// повторных обращений клиента с открытым лидом.
+					// Я.Метрика ClientId: метка из текста (сайт подставляет её при
+					// «Спросить о товаре в WhatsApp/Telegram»). Боевое поле сквозной
+					// аналитики — UF_CRM_YA_CID (туда же пишет форма сайта, оттуда
+					// B242YA шлёт офлайн-конверсии). UF_CRM_NF_YM_CLIENT_ID оставляем
+					// как legacy anti-block заглушку для смены стадий. Каждое поле
+					// заполняем только если оно пусто/заглушка — чтобы не перетереть
+					// более ранний ClientID повторным обращением клиента.
 					if (ymClientId) {
 						const openLead = openLeads[0];
 						const currentYm = String(openLead?.UF_CRM_NF_YM_CLIENT_ID || "");
-						if (!currentYm || currentYm === "-") {
+						const currentYaCid = String(openLead?.UF_CRM_YA_CID || "");
+						const upd: Record<string, any> = {};
+						if (!currentYaCid) {
+							upd.UF_CRM_YA_CID = ymClientId;
+							upd.UF_CRM_YA_COUNTER_ID = ymCounterId;
+						}
+						if (!currentYm || currentYm === "-") upd.UF_CRM_NF_YM_CLIENT_ID = ymClientId;
+						if (Object.keys(upd).length > 0) {
 							try {
 								await this.callBitrix24Method(portalDomain, "crm.lead.update", {
 									id: parseInt(openLead.ID, 10),
-									fields: { UF_CRM_NF_YM_CLIENT_ID: ymClientId },
+									fields: upd,
 								});
-								this.logger.info(`ensureLead: UF_CRM_NF_YM_CLIENT_ID=${ymClientId} → existing lead ${openLead.ID}`);
+								this.logger.info(`ensureLead: ym ClientId=${ymClientId} → existing lead ${openLead.ID} (${Object.keys(upd).join(",")})`);
 							} catch (e: any) {
 								this.logger.warn(`ensureLead: failed to update YM on lead ${openLead.ID}: ${e.message}`);
 							}
@@ -953,12 +965,20 @@ export class Bitrix24Service extends BaseAdapter<
 					TITLE: `${senderName} - ${channelLabel} (auto)`,
 					NAME: senderName,
 					CONTACT_ID: contactId,
-					// Yandex Metrika ClientId: с сайта-формы заполняется через NetForm.
-					// Из WhatsApp прилетает в служебной метке сообщения (PB-WA-CID) и
-					// прокидывается сюда как ymClientId. Если метки нет — ставим "-"
-					// (B24 требует поле при смене стадии, иначе оператор заблокирован).
+					// Yandex Metrika ClientId. Из сообщения прилетает в служебной
+					// метке (см. extractYmClientId) и прокидывается как ymClientId.
+					// UF_CRM_NF_YM_CLIENT_ID — legacy anti-block заглушка для смены
+					// стадий: если метки нет, ставим "-", иначе B24 может блокировать
+					// оператора на стадии с обязательным полем.
 					UF_CRM_NF_YM_CLIENT_ID: ymClientId || "-",
 				};
+				// Боевое поле сквозной аналитики — то же, куда пишет форма сайта и
+				// откуда приложение B242YA шлёт офлайн-конверсии в Я.Метрику. Пишем
+				// только при реальном ClientId (в YA_CID заглушки "-" быть не должно).
+				if (ymClientId) {
+					fields.UF_CRM_YA_CID = ymClientId;
+					fields.UF_CRM_YA_COUNTER_ID = ymCounterId;
+				}
 				// PHONE пишем только если это реальный phone клиента, а не наш
 				// собственный instance-номер. Защита от false-merge (инцидент 28.05).
 				if (phoneE164 && !isOurNumber) {
