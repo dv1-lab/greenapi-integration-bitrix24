@@ -742,6 +742,37 @@ export class Bitrix24Service extends BaseAdapter<
 	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
 	private readonly _ensureLeadLocks = new Map<string, Promise<EnsureLeadResult>>();
 
+	// Отложенный Я.Метрика ClientID органического первого обращения. Когда клиент
+	// пишет впервые (Telegram/MAX, телефона нет) — контакта в B24 ещё нет, и
+	// ensureOpenLeadForPhone выходит, не записав ClientID (см. ADR
+	// 2026-06-16-ym-clientid-orphan-lead). Лид создаёт сама открытая линия B24,
+	// событие ONCRMLEADADD приходит через ~20с — там _maybeLinkOrphanLead уже
+	// знает leadId+chatId. Стэшим ClientID по chatId на это окно, чтобы orphan-
+	// linker дописал UF_CRM_YA_CID в созданный лид. In-memory: достаточно, окно
+	// ~20с, после рестарта потеря допустима (best-effort, как _ensureLeadLocks).
+	private readonly _pendingYmClientId = new Map<string, { ymClientId: string; ts: number }>();
+	private readonly PENDING_YM_TTL_MS = 10 * 60 * 1000;
+
+	/** Запомнить ClientID органического обращения по chatId (TG/MAX user_id).
+	 *  Заодно подчищает протухшие записи — map не растёт без границ. */
+	private stashPendingYmClientId(chatId: string, ymClientId: string): void {
+		if (!chatId || !ymClientId) return;
+		const now = Date.now();
+		this._pendingYmClientId.set(chatId, { ymClientId, ts: now });
+		for (const [k, v] of this._pendingYmClientId) {
+			if (now - v.ts > this.PENDING_YM_TTL_MS) this._pendingYmClientId.delete(k);
+		}
+	}
+
+	/** Забрать (и удалить) отложенный ClientID по chatId. undefined если нет или протух. */
+	private takePendingYmClientId(chatId: string): string | undefined {
+		const e = this._pendingYmClientId.get(chatId);
+		if (!e) return undefined;
+		this._pendingYmClientId.delete(chatId);
+		if (Date.now() - e.ts > this.PENDING_YM_TTL_MS) return undefined;
+		return e.ymClientId;
+	}
+
 	/**
 	 * Гарантирует что у клиента (по phone) есть открытый лид/сделка к моменту
 	 * отправки сообщения в B24. Закрывает gap между приходом сообщения и
@@ -3088,6 +3119,26 @@ export class Bitrix24Service extends BaseAdapter<
 		const { chatId, channelLabel, phoneFromTitle } = parsed;
 		const chatIdUf = this.orphanChannelChatIdUf[channelLabel];
 
+		// 0) Я.Метрика ClientID органического первого обращения. ensureOpenLeadForPhone
+		// не смог его записать (контакта не было) и отложил по chatId. Лид уже создан
+		// открытой линией — пишем UF_CRM_YA_CID прямо в него, контакт для этого не
+		// нужен. Только если поле пусто — не перетираем ранний ClientID. Счётчик
+		// 45469563 (тот же, куда пишет форма сайта). См. ADR 2026-06-16-ym-clientid-orphan-lead.
+		const stashedYm = this.takePendingYmClientId(chatId);
+		if (stashedYm && !String(snap?.UF_CRM_YA_CID || "").trim()) {
+			try {
+				await this.callBitrix24Method(
+					portalDomain,
+					"crm.lead.update",
+					{ id: leadId, fields: { UF_CRM_YA_CID: stashedYm, UF_CRM_YA_COUNTER_ID: "45469563" } },
+					undefined, 0, "customer360",
+				);
+				this.logger.info(`orphan-link lead=${leadId} chatId=${chatId}: wrote UF_CRM_YA_CID=${stashedYm} from pending stash`);
+			} catch (e: any) {
+				this.logger.warn(`orphan-link lead=${leadId}: failed to write YA_CID from stash: ${e?.message || e}`);
+			}
+		}
+
 		// 1) Поиск контакта по UF_CRM_*_CHAT_ID.
 		//
 		// Боевая проверка #361428 26.05: на портале 1begovoy.bitrix24.ru
@@ -3376,6 +3427,11 @@ export class Bitrix24Service extends BaseAdapter<
 				// Я.Метрика ClientId из служебной метки сайта 1begovoy.ru —
 				// три формата (ym-<id>, «(ID <id>)», «номер обращения: <id>»), см. extractYmClientId.
 				const ymClientId = this.extractYmClientId(message.message);
+				// Органическое первое обращение (TG/MAX, телефона нет): контакта в
+				// B24 ещё нет → ensureOpenLeadForPhone ниже выйдет, не записав
+				// ClientID. Стэшим по chatId — лид создаст открытая линия, а
+				// _maybeLinkOrphanLead (ONCRMLEADADD) допишет UF_CRM_YA_CID.
+				if (ymClientId && chatIdForUf) this.stashPendingYmClientId(chatIdForUf, ymClientId);
 				if (phoneE164 || chatIdForUf) {
 					await this.ensureOpenLeadForPhone(
 						instance.user.portalDomain,

@@ -452,3 +452,101 @@ describe("Bitrix24Service orphan-link chatId resolution", () => {
 		});
 	});
 });
+
+// =====================================================================
+// Я.Метрика ClientID органического первого обращения (ADR 2026-06-16)
+// Баг: новый клиент пишет в Telegram → контакта в B24 нет →
+// ensureOpenLeadForPhone выходит, ClientID теряется. Фикс: стэш по chatId +
+// дозапись в созданный лид через _maybeLinkOrphanLead (ONCRMLEADADD).
+// =====================================================================
+describe("Bitrix24Service pending Я.Метрика ClientID", () => {
+	let service: Bitrix24Service;
+
+	beforeEach(async () => {
+		const prisma = mockPrisma();
+		(prisma as any).instance = { findFirst: jest.fn().mockResolvedValue(null) };
+		service = await buildService({ prisma });
+	});
+	afterEach(() => service.onModuleDestroy());
+
+	describe("stash/take (pure)", () => {
+		it("stash → take возвращает значение, повторный take — undefined", () => {
+			(service as any).stashPendingYmClientId("553546236", "1781547537199768487");
+			expect((service as any).takePendingYmClientId("553546236")).toBe("1781547537199768487");
+			expect((service as any).takePendingYmClientId("553546236")).toBeUndefined();
+		});
+		it("неизвестный chatId → undefined", () => {
+			expect((service as any).takePendingYmClientId("nope")).toBeUndefined();
+		});
+	});
+
+	describe("_maybeLinkOrphanLead дозаписывает YA_CID из стэша", () => {
+		const snapBase = {
+			ID: "362976",
+			TITLE: "553546236 - Telegram 79584983354",
+			CONTACT_ID: null,
+			UF_CRM_TG_CHAT_ID: "",
+		};
+
+		it("новый клиент без контакта: пишет UF_CRM_YA_CID + счётчик в лид", async () => {
+			(service as any).stashPendingYmClientId("553546236", "1781547537199768487");
+			const calls: any[] = [];
+			jest.spyOn(service as any, "callBitrix24Method").mockImplementation(
+				async (_d: string, method: string, params: any) => {
+					calls.push({ method, params });
+					if (method === "crm.contact.list") return []; // контакт не найден
+					return {};
+				},
+			);
+			const res = await (service as any)._maybeLinkOrphanLead(
+				"p.bitrix24.ru", 362976, { ...snapBase, UF_CRM_YA_CID: "" },
+			);
+			const yaWrite = calls.find(
+				(c) => c.method === "crm.lead.update" && c.params?.fields?.UF_CRM_YA_CID,
+			);
+			expect(yaWrite).toBeDefined();
+			expect(yaWrite.params.id).toBe(362976);
+			expect(yaWrite.params.fields.UF_CRM_YA_CID).toBe("1781547537199768487");
+			expect(yaWrite.params.fields.UF_CRM_YA_COUNTER_ID).toBe("45469563");
+			// контакта нет → линковки нет, но ClientID записан
+			expect(res.linked).toBe(false);
+		});
+
+		it("UF_CRM_YA_CID уже заполнен → не перетираем", async () => {
+			(service as any).stashPendingYmClientId("553546236", "999");
+			const calls: any[] = [];
+			jest.spyOn(service as any, "callBitrix24Method").mockImplementation(
+				async (_d: string, method: string, params: any) => {
+					calls.push({ method, params });
+					if (method === "crm.contact.list") return [];
+					return {};
+				},
+			);
+			await (service as any)._maybeLinkOrphanLead(
+				"p.bitrix24.ru", 362976, { ...snapBase, UF_CRM_YA_CID: "1781547537199768487" },
+			);
+			const yaWrite = calls.find(
+				(c) => c.method === "crm.lead.update" && c.params?.fields?.UF_CRM_YA_CID,
+			);
+			expect(yaWrite).toBeUndefined();
+		});
+
+		it("стэш пуст → YA_CID не пишем", async () => {
+			const calls: any[] = [];
+			jest.spyOn(service as any, "callBitrix24Method").mockImplementation(
+				async (_d: string, method: string, params: any) => {
+					calls.push({ method, params });
+					if (method === "crm.contact.list") return [];
+					return {};
+				},
+			);
+			await (service as any)._maybeLinkOrphanLead(
+				"p.bitrix24.ru", 362976, { ...snapBase, UF_CRM_YA_CID: "" },
+			);
+			const yaWrite = calls.find(
+				(c) => c.method === "crm.lead.update" && c.params?.fields?.UF_CRM_YA_CID,
+			);
+			expect(yaWrite).toBeUndefined();
+		});
+	});
+});

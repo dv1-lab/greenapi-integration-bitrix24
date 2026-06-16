@@ -8,6 +8,32 @@
 
 ---
 
+## 2026-06-16 · ClientID органического первого обращения всё равно пуст
+
+- **Симптом**: после фикса 13.06 свежий лид (362976, Telegram, Фомин) опять с
+  пустым `UF_CRM_YA_CID`, хотя метка `(номер обращения: <id>)` в сообщении была.
+- **Корень**: фикс 13.06 писал ClientID **только если контакт уже найден**.
+  Новый клиент (Telegram/MAX, телефона нет) — контакта в B24 ещё нет, лид
+  создаёт сама открытая линия. `ensureOpenLeadForPhone` выходит «no existing
+  contact», `_maybeLinkOrphanLead` (ONCRMLEADADD) тоже выходит, а
+  `backfillSendLead` к органическому входящему не подключён. ClientID проваливался
+  мимо всех трёх механизмов. По логам с 13.06: 4 метки, записан 1, потеряно 3.
+- **Фикс** (sha `ef1c276`): стэш ClientID по chatId (`_pendingYmClientId`,
+  TTL 10м) в `sendToPlatform` + дозапись `UF_CRM_YA_CID`+counter прямо в лид
+  через `_maybeLinkOrphanLead` (контакт не нужен, идемпотентно). Хук в
+  orphan-linker, а не в `backfillSendLead`: тот ищет лид по TITLE, а у
+  органического входящего TITLE = имя клиента, не chatId → промах.
+- **Файлы**: `src/bitrix24/bitrix24.service.ts`, `.spec.ts`.
+  ADR: `docs/decisions/2026-06-16-ym-clientid-orphan-lead.md`.
+- **Пересломать рискованно**:
+  - Стэш-ключ = chatId. Для TG/MAX это `message.phone` (= user_id) и совпадает с
+    chatId, который резолвит orphan-linker. WhatsApp **не покрыт** (backlog).
+  - Дозапись только при пустом `UF_CRM_YA_CID` — не перетирать ранний ClientID.
+  - Хук стоит **до** поиска контакта в `_maybeLinkOrphanLead` (шаг 0) — не
+    переносить внутрь contact-ветки, иначе кейс «контакта нет» снова потеряется.
+
+---
+
 ## 2026-06-13 · Я.Метрика ClientID с сайта не доходил до сквозной аналитики
 
 - **Симптом**: Дмитрий заметил в TG-зеркале метку «— с сайта 1begovoy.ru (номер

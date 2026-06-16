@@ -97,6 +97,10 @@ NestJS-адаптер B24 ↔ Green API / i2crm / наши Telegram-боты. **
     боевое. В YA_CID заглушку `"-"` не писать. Метка в тексте сайта:
     `(номер обращения: <id>)` (с 11.06.2026). См. ADR `2026-06-13-ym-clientid-to-ya-cid`,
     memory [[b24_ya_metrika_clientid_fields]].
+    **Органическое первое обращение** (новый клиент, контакта в B24 ещё нет):
+    ClientID стэшится по chatId (`_pendingYmClientId`) и дозаписывается в лид
+    через `_maybeLinkOrphanLead` (ONCRMLEADADD), без контакта. WhatsApp пока не
+    покрыт. См. ADR `2026-06-16-ym-clientid-orphan-lead`.
 
 ## Деплой
 
