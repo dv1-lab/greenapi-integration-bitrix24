@@ -3392,10 +3392,12 @@ export class Bitrix24Service extends BaseAdapter<
 			const chatB24Id = String(a?.ASSOCIATED_ENTITY_ID || "").trim();
 			if (!chatB24Id) continue;
 			try {
+				// im.dialog.messages.get — scope `im` есть только у social-app
+				// (customer360 даёт 401). Это редкий разовый read, не горячий путь.
 				const resp: any = await this.callBitrix24Method(
 					portalDomain, "im.dialog.messages.get",
 					{ DIALOG_ID: `chat${chatB24Id}`, LIMIT: 200 },
-					undefined, 0, "customer360",
+					undefined, 0, "social",
 				);
 				const msgs = Array.isArray(resp?.messages) ? resp.messages : [];
 				for (const m of msgs) {
