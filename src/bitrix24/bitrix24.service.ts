@@ -3375,7 +3375,7 @@ export class Bitrix24Service extends BaseAdapter<
 				portalDomain, "crm.activity.list",
 				{
 					filter: { OWNER_ID: leadId, OWNER_TYPE_ID: 1, PROVIDER_ID: "IMOPENLINES_SESSION" },
-					select: ["ID", "ASSOCIATED_ENTITY_ID", "PROVIDER_PARAMS"],
+					select: ["*", "PROVIDER_PARAMS", "SETTINGS"],
 					order: { ID: "ASC" },
 				},
 				undefined, 0, "customer360",
@@ -3387,6 +3387,7 @@ export class Bitrix24Service extends BaseAdapter<
 		const list = Array.isArray(acts) ? acts : [];
 		let line: number | undefined;
 		for (const a of list) {
+			this.logger.info(`backfill-yacid DEBUG activity lead=${leadId}: ${JSON.stringify(a).slice(0, 1800)}`);
 			const parsed = this._parseSessionUserCode(a?.PROVIDER_PARAMS?.USER_CODE);
 			if (parsed) line = parsed.line;
 			const chatB24Id = String(a?.ASSOCIATED_ENTITY_ID || "").trim();
