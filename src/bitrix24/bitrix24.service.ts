@@ -3501,7 +3501,7 @@ export class Bitrix24Service extends BaseAdapter<
 					{
 						filter: leadFilter,
 						select: ["ID", "TITLE", "CONTACT_ID", "UF_CRM_YA_CID", "SOURCE_ID"],
-						order: { DATE_CREATE: "ASC" },
+						order: { DATE_CREATE: "DESC" },
 						start,
 					},
 					undefined, 0, "customer360",
