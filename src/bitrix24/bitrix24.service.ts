@@ -3361,6 +3361,222 @@ export class Bitrix24Service extends BaseAdapter<
 		return this._maybeLinkOrphanLead(portalDomain, leadId, snap);
 	}
 
+	/** Достаёт Я.Метрика ClientID из истории чата открытой линии лида.
+	 *  Источник — `IMOPENLINES_SESSION` активность лида: её `ASSOCIATED_ENTITY_ID`
+	 *  = B24 chat id, диалог читается через `im.dialog.messages.get`
+	 *  (DIALOG_ID=`chat<id>`). Метку извлекает `extractYmClientId`. Заодно
+	 *  возвращает line (из USER_CODE) для фильтра по нужным открытым линиям. */
+	private async _ymClientIdFromLeadChat(
+		portalDomain: string, leadId: number,
+	): Promise<{ ymClientId?: string; line?: number }> {
+		let acts: any;
+		try {
+			acts = await this.callBitrix24Method(
+				portalDomain, "crm.activity.list",
+				{
+					filter: { OWNER_ID: leadId, OWNER_TYPE_ID: 1, PROVIDER_ID: "IMOPENLINES_SESSION" },
+					select: ["ID", "ASSOCIATED_ENTITY_ID", "PROVIDER_PARAMS"],
+					order: { ID: "ASC" },
+				},
+				undefined, 0, "customer360",
+			);
+		} catch (e: any) {
+			this.logger.warn(`backfill-yacid: activity.list lead=${leadId} failed: ${e?.message || e}`);
+			return {};
+		}
+		const list = Array.isArray(acts) ? acts : [];
+		let line: number | undefined;
+		for (const a of list) {
+			const parsed = this._parseSessionUserCode(a?.PROVIDER_PARAMS?.USER_CODE);
+			if (parsed) line = parsed.line;
+			const chatB24Id = String(a?.ASSOCIATED_ENTITY_ID || "").trim();
+			if (!chatB24Id) continue;
+			try {
+				const resp: any = await this.callBitrix24Method(
+					portalDomain, "im.dialog.messages.get",
+					{ DIALOG_ID: `chat${chatB24Id}`, LIMIT: 200 },
+					undefined, 0, "customer360",
+				);
+				const msgs = Array.isArray(resp?.messages) ? resp.messages : [];
+				for (const m of msgs) {
+					const ym = this.extractYmClientId(String(m?.text || ""));
+					if (ym) return { ymClientId: ym, line };
+				}
+			} catch (e: any) {
+				this.logger.debug(`backfill-yacid: dialog.messages.get chat${chatB24Id} failed: ${e?.message || e}`);
+			}
+		}
+		return { line };
+	}
+
+	/** Разовый backfill боевого поля `UF_CRM_YA_CID` по лидам открытых линий,
+	 *  созданным до фикса 2026-06-16: метка ClientID была в чате, но в поле не
+	 *  попала (см. ADR `2026-06-16-ym-clientid-orphan-lead`). Источник ClientID —
+	 *  история чата (`_ymClientIdFromLeadChat`). Пишет в лид, и (если поле
+	 *  существует и пусто) в привязанный контакт и его открытые сделки.
+	 *  Идемпотентно: только при пустом YA_CID. `dryRun` — только превью, без записи.
+	 *  Через `customer360` (троттлинг, правило OVERLOAD). */
+	async backfillYaCidFromOpenLines(opts: {
+		lineIds: number[];
+		sinceIso: string;
+		dryRun?: boolean;
+		limit?: number;
+	}): Promise<any> {
+		const dryRun = opts.dryRun !== false; // по умолчанию превью
+		const limit = opts.limit && opts.limit > 0 ? opts.limit : 500;
+		const lineSet = new Set(opts.lineIds.map(Number));
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, reason: "no authorized portal" };
+		const ymCounterId = "45469563";
+
+		// CRM_SOURCE нужных линий — чтобы сузить crm.lead.list до их лидов.
+		const sourceIds = new Set<string>();
+		for (const lineId of opts.lineIds) {
+			try {
+				const cfg: any = await this.callBitrix24Method(
+					portalDomain, "imopenlines.config.get", { CONFIG_ID: lineId }, undefined, 0, "customer360",
+				);
+				if (cfg?.CRM_SOURCE) sourceIds.add(String(cfg.CRM_SOURCE));
+			} catch (e: any) {
+				this.logger.warn(`backfill-yacid: config.get line ${lineId} failed: ${e?.message || e}`);
+			}
+		}
+
+		// Существуют ли поля YA_CID на контакте/сделке (на лиде — точно есть).
+		const hasField = async (entity: "contact" | "deal"): Promise<boolean> => {
+			try {
+				const f: any = await this.callBitrix24Method(
+					portalDomain, `crm.${entity}.fields`, {}, undefined, 0, "customer360",
+				);
+				return !!(f && f.UF_CRM_YA_CID);
+			} catch { return false; }
+		};
+		const hasContactField = await hasField("contact");
+		const hasDealField = await hasField("deal");
+
+		const leadFilter: Record<string, any> = { ">=DATE_CREATE": opts.sinceIso };
+		if (sourceIds.size > 0) leadFilter["@SOURCE_ID"] = Array.from(sourceIds);
+
+		const summary = {
+			ok: true,
+			dryRun,
+			lineIds: opts.lineIds,
+			sinceIso: opts.sinceIso,
+			hasContactField,
+			hasDealField,
+			scanned: 0,
+			alreadyFilled: 0,
+			noClientId: 0,
+			wrongLine: 0,
+			matched: [] as any[],
+			wrote: { leads: 0, contacts: 0, deals: 0 },
+		};
+
+		let start = 0;
+		while (summary.scanned < limit) {
+			let leads: any;
+			try {
+				leads = await this.callBitrix24Method(
+					portalDomain, "crm.lead.list",
+					{
+						filter: leadFilter,
+						select: ["ID", "TITLE", "CONTACT_ID", "UF_CRM_YA_CID", "SOURCE_ID"],
+						order: { DATE_CREATE: "ASC" },
+						start,
+					},
+					undefined, 0, "customer360",
+				);
+			} catch (e: any) {
+				this.logger.warn(`backfill-yacid: lead.list start=${start} failed: ${e?.message || e}`);
+				break;
+			}
+			const batch = Array.isArray(leads) ? leads : [];
+			if (batch.length === 0) break;
+			for (const lead of batch) {
+				if (summary.scanned >= limit) break;
+				summary.scanned++;
+				if (String(lead.UF_CRM_YA_CID || "").trim()) { summary.alreadyFilled++; continue; }
+				const leadId = Number(lead.ID);
+				const { ymClientId, line } = await this._ymClientIdFromLeadChat(portalDomain, leadId);
+				if (line && !lineSet.has(line)) { summary.wrongLine++; continue; }
+				if (!ymClientId) { summary.noClientId++; continue; }
+
+				const contactId = Number(lead.CONTACT_ID || 0) || undefined;
+				const rec: any = { leadId, ymClientId, line, contactId, deals: [] as number[] };
+
+				// Сделки клиента — по CONTACT_ID (открытые и закрытые: ClientID
+				// нужен и в выигранных для атрибуции).
+				if (contactId && hasDealField) {
+					try {
+						const deals: any = await this.callBitrix24Method(
+							portalDomain, "crm.deal.list",
+							{ filter: { CONTACT_ID: contactId }, select: ["ID", "UF_CRM_YA_CID"] },
+							undefined, 0, "customer360",
+						);
+						for (const d of (Array.isArray(deals) ? deals : [])) {
+							if (!String(d.UF_CRM_YA_CID || "").trim()) rec.deals.push(Number(d.ID));
+						}
+					} catch (e: any) {
+						this.logger.warn(`backfill-yacid: deal.list contact=${contactId} failed: ${e?.message || e}`);
+					}
+				}
+
+				summary.matched.push(rec);
+				if (dryRun) continue;
+
+				// Запись: лид
+				try {
+					await this.callBitrix24Method(
+						portalDomain, "crm.lead.update",
+						{ id: leadId, fields: { UF_CRM_YA_CID: ymClientId, UF_CRM_YA_COUNTER_ID: ymCounterId } },
+						undefined, 0, "customer360",
+					);
+					summary.wrote.leads++;
+					this.logger.info(`backfill-yacid: lead=${leadId} ← UF_CRM_YA_CID=${ymClientId}`);
+				} catch (e: any) {
+					this.logger.warn(`backfill-yacid: lead.update ${leadId} failed: ${e?.message || e}`);
+				}
+				// Контакт (если поле есть и пусто)
+				if (contactId && hasContactField) {
+					try {
+						const c: any = await this.callBitrix24Method(
+							portalDomain, "crm.contact.get", { id: contactId }, undefined, 0, "customer360",
+						);
+						if (c && !String(c.UF_CRM_YA_CID || "").trim()) {
+							await this.callBitrix24Method(
+								portalDomain, "crm.contact.update",
+								{ id: contactId, fields: { UF_CRM_YA_CID: ymClientId, UF_CRM_YA_COUNTER_ID: ymCounterId } },
+								undefined, 0, "customer360",
+							);
+							summary.wrote.contacts++;
+							this.logger.info(`backfill-yacid: contact=${contactId} ← UF_CRM_YA_CID=${ymClientId}`);
+						}
+					} catch (e: any) {
+						this.logger.warn(`backfill-yacid: contact.update ${contactId} failed: ${e?.message || e}`);
+					}
+				}
+				// Сделки
+				for (const dealId of rec.deals) {
+					try {
+						await this.callBitrix24Method(
+							portalDomain, "crm.deal.update",
+							{ id: dealId, fields: { UF_CRM_YA_CID: ymClientId, UF_CRM_YA_COUNTER_ID: ymCounterId } },
+							undefined, 0, "customer360",
+						);
+						summary.wrote.deals++;
+						this.logger.info(`backfill-yacid: deal=${dealId} ← UF_CRM_YA_CID=${ymClientId}`);
+					} catch (e: any) {
+						this.logger.warn(`backfill-yacid: deal.update ${dealId} failed: ${e?.message || e}`);
+					}
+				}
+			}
+			if (batch.length < 50) break;
+			start += 50;
+		}
+		return summary;
+	}
+
 	async sendToPlatform(message: Bitrix24PlatformMessage, instance: Instance & { user: User }): Promise<void> {
 		this.logger.info(`Sending message to Bitrix24 for instance ${instance.idInstance}`);
 		this.logger.info("Instance", instance);

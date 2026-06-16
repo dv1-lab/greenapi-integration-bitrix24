@@ -655,6 +655,41 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: разовый backfill UF_CRM_YA_CID по лидам открытых линий,
+	// созданным до фикса 2026-06-16 (ClientID был в чате, в поле не попал). Читает
+	// метку из истории чата, пишет в лид/контакт/сделку. По умолчанию dryRun=true
+	// (превью). Auth: X-Hint-Secret. См. ADR 2026-06-16-ym-clientid-orphan-lead.
+	// body: { lineIds:[174,178], sinceIso:"2026-06-12T00:00:00+03:00", dryRun?:bool, limit?:int }
+	@Post("internal/backfill-ya-cid")
+	@HttpCode(HttpStatus.OK)
+	async backfillYaCid(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = req.body || {};
+		const lineIds = Array.isArray(body.lineIds) ? body.lineIds.map(Number).filter(Boolean) : [];
+		const sinceIso = String(body.sinceIso || "").trim();
+		if (lineIds.length === 0 || !sinceIso) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "lineIds[] and sinceIso required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.backfillYaCidFromOpenLines({
+				lineIds,
+				sinceIso,
+				dryRun: body.dryRun !== false,
+				limit: Number(body.limit) || undefined,
+			});
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`backfill-ya-cid failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: один батч бэкфилла UF_CRM_PB_CUSTOMER_UUID. Запускается
 	// по cron каждые 15 минут (через systemd timer на сервере). Делает по 20
 	// entity за раз с rate-limit 2 sec → 40 sec/батч, нагрузка минимальная.
