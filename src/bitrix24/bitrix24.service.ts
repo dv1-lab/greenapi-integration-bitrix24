@@ -3436,13 +3436,20 @@ export class Bitrix24Service extends BaseAdapter<
 		const sourceIds = new Set<string>();
 		for (const lineId of opts.lineIds) {
 			try {
+				// imopenlines scope — только у social-app (customer360 даёт 401).
 				const cfg: any = await this.callBitrix24Method(
-					portalDomain, "imopenlines.config.get", { CONFIG_ID: lineId }, undefined, 0, "customer360",
+					portalDomain, "imopenlines.config.get", { CONFIG_ID: lineId }, undefined, 0, "social",
 				);
 				if (cfg?.CRM_SOURCE) sourceIds.add(String(cfg.CRM_SOURCE));
 			} catch (e: any) {
 				this.logger.warn(`backfill-yacid: config.get line ${lineId} failed: ${e?.message || e}`);
 			}
+		}
+
+		// Без CRM_SOURCE линий фильтр был бы пустым → скан всего портала. Это
+		// слишком тяжело (OVERLOAD-риск) — лучше честно прерваться.
+		if (sourceIds.size === 0) {
+			return { ok: false, reason: "could not resolve CRM_SOURCE for lines — aborting to avoid full-portal scan" };
 		}
 
 		// Существуют ли поля YA_CID на контакте/сделке (на лиде — точно есть).
