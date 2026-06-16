@@ -97,6 +97,31 @@ TITLE **или** из `USER_CODE` активности сессии), поэто
   / `takePendingYmClientId`; стэш в `sendToPlatform`; дозапись в `_maybeLinkOrphanLead`.
 - `src/bitrix24/bitrix24.service.spec.ts` — тесты стэша и дозаписи.
 
+## Backfill за июнь (2026-06-16)
+
+Эндпоинт `/webhooks/internal/backfill-ya-cid` (X-Hint-Secret; body `{lineIds,
+sinceIso, dryRun, limit, delayMs}`). Для лидов открытых линий с пустым
+`UF_CRM_YA_CID` достаёт ClientID из истории чата и пишет в лид (+сделку, если
+поле есть). Цепочка чтения чата: лид → `crm.activity.list` (IMOPENLINES_SESSION)
+→ `PROVIDER_PARAMS.USER_CODE` → **`im.chat.get(ENTITY_TYPE=LINES, ENTITY_ID=USER_CODE)`
+= CHAT_ID** → `im.dialog.messages.get(chat<CHAT_ID>)` → `extractYmClientId`.
+CHAT_ID нет ни в activity (там `ASSOCIATED_ENTITY_ID` = id сессии), ни в session-id.
+im-методы — через social-app (customer360 без scope `im`/`imopenlines`).
+
+Результат: восстановлено **6 лидов** (WA линия 174 + TG линия 178) + сделка 108238.
+Перекрёстно сверено с ClickHouse `customer360.customer_events.summary` (там лежит
+**текст** входящих — в `summary`, не в `payload`; метку `номер обращения`/`(ID )`/`ym-`
+видно SQL). **За май меток не было** — восстанавливать нечего.
+
+Грабли backfill:
+- **`docker compose up --force-recreate` стирает логи адаптера** — историческую
+  выборку из `docker logs` потеряли; источник метки — только чат B24 (или CH.summary).
+- **Немодерированный проход выбивает лимит B24** (≈6k запросов за 13 мин →
+  ECONNRESET + задержки операторов). Обязателен `delayMs` (≈250мс) и запуск
+  по узкому окну (июнь, не «с мая» — лидов на линиях меньше).
+- **Контакты**: поля `UF_CRM_YA_CID` на них НЕТ (только лиды/сделки). В контакт
+  ClientID писать некуда — и семантически он per-визит, а не per-человек.
+
 ## Связанные
 
 - ADR `2026-06-13-ym-clientid-to-ya-cid` — предыдущий слой (регекс + поле).
