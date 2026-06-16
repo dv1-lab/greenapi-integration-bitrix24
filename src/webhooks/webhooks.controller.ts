@@ -691,6 +691,32 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: точечная запись ClientID в конкретные лиды (+сделки).
+	// Для дозаписи случаев, не пойманных сканером (повторные клиенты, старые
+	// лиды). body: { items:[{clientId, leadId?, chatId?, channelLabel?}], dryRun?:bool }
+	@Post("internal/set-ya-cid")
+	@HttpCode(HttpStatus.OK)
+	async setYaCid(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const items = Array.isArray(req.body?.items) ? req.body.items : [];
+		if (items.length === 0) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "items[] required" });
+			return;
+		}
+		try {
+			const result = await this.bitrix24Service.setYaCidExplicit(items, req.body?.dryRun !== false);
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`set-ya-cid failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: один батч бэкфилла UF_CRM_PB_CUSTOMER_UUID. Запускается
 	// по cron каждые 15 минут (через systemd timer на сервере). Делает по 20
 	// entity за раз с rate-limit 2 sec → 40 sec/батч, нагрузка минимальная.

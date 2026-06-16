@@ -3604,6 +3604,73 @@ export class Bitrix24Service extends BaseAdapter<
 		return summary;
 	}
 
+	/** Точечная запись Я.Метрика ClientID в указанные лиды (+их сделки). Для
+	 *  дозаписи случаев, которые сканер из чата не достал (повторные клиенты,
+	 *  старые лиды). Каждый item: {clientId, leadId?, chatId?, channelLabel?}.
+	 *  Если leadId нет — резолвим лид по контакту (UF_CRM_*_CHAT_ID=chatId) →
+	 *  его незакрытые лиды. clientId валидируется (15-25 цифр). Идемпотентно:
+	 *  пишем только в пустой UF_CRM_YA_CID. dryRun по умолчанию. customer360. */
+	async setYaCidExplicit(items: Array<{ clientId: string; leadId?: number; chatId?: string; channelLabel?: string }>, dryRun = true): Promise<any> {
+		const users = await (this.prisma as any).user.findMany({ take: 1 });
+		const portalDomain = users[0]?.portalDomain;
+		if (!portalDomain) return { ok: false, reason: "no authorized portal" };
+		const ymCounterId = "45469563";
+		const chatIdUfMap: Record<string, string> = { Telegram: "UF_CRM_TG_CHAT_ID", MAX: "UF_CRM_MAX_CHAT_ID", Instagram: "UF_CRM_IG_CHAT_ID" };
+		const hasDealField = await (async () => { try { const f: any = await this.callBitrix24Method(portalDomain, "crm.deal.fields", {}, undefined, 0, "customer360"); return !!(f && f.UF_CRM_YA_CID); } catch { return false; } })();
+		const out: any = { ok: true, dryRun, hasDealField, results: [] as any[] };
+
+		for (const it of items) {
+			const cid = String(it.clientId || "").trim();
+			const r: any = { clientId: cid, chatId: it.chatId, leadIds: [] as number[], wrote: { leads: 0, deals: 0 }, note: "" };
+			if (!/^\d{15,25}$/.test(cid)) { r.note = "skip: clientId не похож на ClientID (15-25 цифр)"; out.results.push(r); continue; }
+
+			// Резолв лидов
+			let leadIds: number[] = [];
+			if (it.leadId) {
+				leadIds = [Number(it.leadId)];
+			} else if (it.chatId && it.channelLabel) {
+				const uf = chatIdUfMap[it.channelLabel];
+				try {
+					const cs: any = await this.callBitrix24Method(portalDomain, "crm.contact.list", { filter: { [`=${uf}`]: it.chatId }, select: ["ID"] }, undefined, 0, "customer360");
+					const contactId = Array.isArray(cs) && cs[0] ? Number(cs[0].ID) : undefined;
+					if (contactId) {
+						const ls: any = await this.callBitrix24Method(portalDomain, "crm.lead.list", { filter: { CONTACT_ID: contactId, "!STATUS_SEMANTIC_ID": ["F"] }, select: ["ID"], order: { DATE_CREATE: "DESC" } }, undefined, 0, "customer360");
+						leadIds = (Array.isArray(ls) ? ls : []).map((l: any) => Number(l.ID));
+						r.note = `contact ${contactId}`;
+					} else { r.note = `контакт по ${uf}=${it.chatId} не найден`; }
+				} catch (e: any) { r.note = `resolve failed: ${e?.message || e}`; }
+			} else { r.note = "skip: нет ни leadId, ни (chatId+channelLabel)"; }
+
+			r.leadIds = leadIds;
+			if (leadIds.length === 0 || leadIds.length > 3) { if (leadIds.length > 3) r.note += `; слишком много лидов (${leadIds.length}) — не пишу вслепую`; out.results.push(r); continue; }
+
+			for (const leadId of leadIds) {
+				try {
+					const snap: any = await this.callBitrix24Method(portalDomain, "crm.lead.get", { id: leadId }, undefined, 0, "customer360");
+					if (!snap) { r.note += `; lead ${leadId} not found`; continue; }
+					if (String(snap.UF_CRM_YA_CID || "").trim()) { r.note += `; lead ${leadId} уже заполнен`; continue; }
+					if (!dryRun) {
+						await this.callBitrix24Method(portalDomain, "crm.lead.update", { id: leadId, fields: { UF_CRM_YA_CID: cid, UF_CRM_YA_COUNTER_ID: ymCounterId } }, undefined, 0, "customer360");
+					}
+					r.wrote.leads++;
+					this.logger.info(`set-yacid: lead=${leadId} ← ${cid}${dryRun ? " (dry)" : ""}`);
+					// сделки контакта
+					const contactId = Number(snap.CONTACT_ID || 0) || undefined;
+					if (contactId && hasDealField) {
+						const ds: any = await this.callBitrix24Method(portalDomain, "crm.deal.list", { filter: { CONTACT_ID: contactId }, select: ["ID", "UF_CRM_YA_CID"] }, undefined, 0, "customer360");
+						for (const d of (Array.isArray(ds) ? ds : [])) {
+							if (String(d.UF_CRM_YA_CID || "").trim()) continue;
+							if (!dryRun) await this.callBitrix24Method(portalDomain, "crm.deal.update", { id: Number(d.ID), fields: { UF_CRM_YA_CID: cid, UF_CRM_YA_COUNTER_ID: ymCounterId } }, undefined, 0, "customer360");
+							r.wrote.deals++;
+						}
+					}
+				} catch (e: any) { r.note += `; lead ${leadId} err: ${e?.message || e}`; }
+			}
+			out.results.push(r);
+		}
+		return out;
+	}
+
 	async sendToPlatform(message: Bitrix24PlatformMessage, instance: Instance & { user: User }): Promise<void> {
 		this.logger.info(`Sending message to Bitrix24 for instance ${instance.idInstance}`);
 		this.logger.info("Instance", instance);
