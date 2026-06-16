@@ -18,7 +18,7 @@
   contact», `_maybeLinkOrphanLead` (ONCRMLEADADD) тоже выходит, а
   `backfillSendLead` к органическому входящему не подключён. ClientID проваливался
   мимо всех трёх механизмов. По логам с 13.06: 4 метки, записан 1, потеряно 3.
-- **Фикс** (sha `ef1c276`): стэш ClientID по chatId (`_pendingYmClientId`,
+- **Фикс** (sha `f7a78f5`): стэш ClientID по chatId (`_pendingYmClientId`,
   TTL 10м) в `sendToPlatform` + дозапись `UF_CRM_YA_CID`+counter прямо в лид
   через `_maybeLinkOrphanLead` (контакт не нужен, идемпотентно). Хук в
   orphan-linker, а не в `backfillSendLead`: тот ищет лид по TITLE, а у
