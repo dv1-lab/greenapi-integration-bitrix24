@@ -5,7 +5,7 @@
 (`ARCHITECTURE.md`, `INSTAGRAM_FLOW.md`, `OPEN_LINE_LIFECYCLE.md` и т.д.) —
 здесь компактный recipe, без «почему так».
 
-Последнее обновление: 2026-05-26 (B24 pinned post thumbnail + message_delivery_status emit для outgoing-pending, sha c733403/039c5b3).
+Последнее обновление: 2026-06-16 (Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET).
 
 ---
 
@@ -293,6 +293,8 @@ Restic → Я.Диск ежедневно 04:00 UTC.
 | `/webhooks/telegram-support` | POST | то же для @begovoy1support_bot |
 | `/webhooks/internal/i2crm-replay` | POST | manual replay pending событий из I2crmEventLog |
 | `/webhooks/internal/refresh-tg-bot-pinned` | POST | пересоздать pinned-карточку клиента в TG-зеркале |
+| `/webhooks/internal/backfill-ya-cid` | POST | разовый backfill UF_CRM_YA_CID из истории чатов (body: lineIds, sinceIso, dryRun, delayMs). См. ADR 2026-06-16-ym-clientid-orphan-lead |
+| `/webhooks/internal/set-ya-cid` | POST | точечная запись ClientID в лиды/сделки (body: items[{clientId, leadId\|chatId+channelLabel+sinceIso/untilIso}], dryRun) |
 | `/widget/render` | GET | embedded в карточке B24 (placement) — HTML widget |
 | `/widget/send` | POST | send first message (WA/MAX/TG via GreenAPI, IG via i2crm) |
 | `/widget/instances` | GET | список authorized GreenAPI инстансов для select-box |
