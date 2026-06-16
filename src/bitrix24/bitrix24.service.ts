@@ -3395,6 +3395,9 @@ export class Bitrix24Service extends BaseAdapter<
 			const parsed = this._parseSessionUserCode(userCode);
 			if (parsed) line = parsed.line;
 			try {
+				// Пауза между B24-запросами — чтобы фоновый backfill не выбирал
+				// лимит портала и не задерживал ответы операторов (инцидент 16.06).
+				if (this._backfillDelayMs > 0) await new Promise((r) => setTimeout(r, this._backfillDelayMs));
 				// USER_CODE → CHAT_ID (нет в activity, только через im.chat.get).
 				const chat: any = await this.callBitrix24Method(
 					portalDomain, "im.chat.get",
@@ -3428,14 +3431,18 @@ export class Bitrix24Service extends BaseAdapter<
 	 *  существует и пусто) в привязанный контакт и его открытые сделки.
 	 *  Идемпотентно: только при пустом YA_CID. `dryRun` — только превью, без записи.
 	 *  Через `customer360` (троттлинг, правило OVERLOAD). */
+	private _backfillDelayMs = 0;
+
 	async backfillYaCidFromOpenLines(opts: {
 		lineIds: number[];
 		sinceIso: string;
 		dryRun?: boolean;
 		limit?: number;
+		delayMs?: number;
 	}): Promise<any> {
 		const dryRun = opts.dryRun !== false; // по умолчанию превью
 		const limit = opts.limit && opts.limit > 0 ? opts.limit : 500;
+		this._backfillDelayMs = opts.delayMs && opts.delayMs > 0 ? opts.delayMs : 0;
 		const lineSet = new Set(opts.lineIds.map(Number));
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
 		const portalDomain = users[0]?.portalDomain;
@@ -3542,6 +3549,7 @@ export class Bitrix24Service extends BaseAdapter<
 				}
 
 				summary.matched.push(rec);
+				this.logger.info(`backfill-yacid MATCH lead=${leadId} clientId=${ymClientId} line=${line} contact=${contactId || "-"} deals=[${rec.deals.join(",")}]${dryRun ? " (dry-run)" : ""}`);
 				if (dryRun) continue;
 
 				// Запись: лид

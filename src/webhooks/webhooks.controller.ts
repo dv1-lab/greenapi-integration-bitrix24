@@ -682,6 +682,7 @@ export class WebhooksController {
 				sinceIso,
 				dryRun: body.dryRun !== false,
 				limit: Number(body.limit) || undefined,
+				delayMs: Number(body.delayMs) || undefined,
 			});
 			res.json(result);
 		} catch (error: any) {
