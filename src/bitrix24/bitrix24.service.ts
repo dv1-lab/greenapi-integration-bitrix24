@@ -3610,7 +3610,40 @@ export class Bitrix24Service extends BaseAdapter<
 	 *  Если leadId нет — резолвим лид по контакту (UF_CRM_*_CHAT_ID=chatId) →
 	 *  его незакрытые лиды. clientId валидируется (15-25 цифр). Идемпотентно:
 	 *  пишем только в пустой UF_CRM_YA_CID. dryRun по умолчанию. customer360. */
-	async setYaCidExplicit(items: Array<{ clientId: string; leadId?: number; chatId?: string; channelLabel?: string }>, dryRun = true): Promise<any> {
+	/** Найти лид по chatId через сессии в окне дат: crm.lead.list в [since,until]
+	 *  → для каждого crm.activity.list(IMOPENLINES_SESSION) → USER_CODE chatId.
+	 *  Только activity.list (без чтения чатов) — легко. Возвращает leadId-ы. */
+	private async _findLeadsByChatId(portalDomain: string, chatId: string, sinceIso: string, untilIso: string): Promise<number[]> {
+		const found: number[] = [];
+		let start = 0;
+		for (let page = 0; page < 20; page++) {
+			let leads: any;
+			try {
+				leads = await this.callBitrix24Method(portalDomain, "crm.lead.list",
+					{ filter: { ">=DATE_CREATE": sinceIso, "<=DATE_CREATE": untilIso }, select: ["ID"], order: { DATE_CREATE: "ASC" }, start },
+					undefined, 0, "customer360");
+			} catch { break; }
+			const batch = Array.isArray(leads) ? leads : [];
+			if (batch.length === 0) break;
+			for (const l of batch) {
+				const leadId = Number(l.ID);
+				try {
+					const acts: any = await this.callBitrix24Method(portalDomain, "crm.activity.list",
+						{ filter: { OWNER_ID: leadId, OWNER_TYPE_ID: 1, PROVIDER_ID: "IMOPENLINES_SESSION" }, select: ["ID", "PROVIDER_PARAMS"] },
+						undefined, 0, "customer360");
+					for (const a of (Array.isArray(acts) ? acts : [])) {
+						const p = this._parseSessionUserCode(a?.PROVIDER_PARAMS?.USER_CODE);
+						if (p && p.chatId === chatId) { found.push(leadId); break; }
+					}
+				} catch { /* skip */ }
+			}
+			if (batch.length < 50) break;
+			start += 50;
+		}
+		return Array.from(new Set(found));
+	}
+
+	async setYaCidExplicit(items: Array<{ clientId: string; leadId?: number; chatId?: string; channelLabel?: string; sinceIso?: string; untilIso?: string }>, dryRun = true): Promise<any> {
 		const users = await (this.prisma as any).user.findMany({ take: 1 });
 		const portalDomain = users[0]?.portalDomain;
 		if (!portalDomain) return { ok: false, reason: "no authorized portal" };
@@ -3639,6 +3672,12 @@ export class Bitrix24Service extends BaseAdapter<
 						r.note = `contact ${contactId}`;
 					} else { r.note = `контакт по ${uf}=${it.chatId} не найден`; }
 				} catch (e: any) { r.note = `resolve failed: ${e?.message || e}`; }
+				// Fallback: контакт не нашёлся (new-client без UF) — ищем лид по
+				// сессии в окне дат.
+				if (leadIds.length === 0 && it.sinceIso && it.untilIso) {
+					leadIds = await this._findLeadsByChatId(portalDomain, it.chatId, it.sinceIso, it.untilIso);
+					r.note += `; по сессии в окне: ${leadIds.length} лид(ов)`;
+				}
 			} else { r.note = "skip: нет ни leadId, ни (chatId+channelLabel)"; }
 
 			r.leadIds = leadIds;
