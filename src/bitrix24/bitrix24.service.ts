@@ -3362,10 +3362,12 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/** Достаёт Я.Метрика ClientID из истории чата открытой линии лида.
-	 *  Источник — `IMOPENLINES_SESSION` активность лида: её `ASSOCIATED_ENTITY_ID`
-	 *  = B24 chat id, диалог читается через `im.dialog.messages.get`
-	 *  (DIALOG_ID=`chat<id>`). Метку извлекает `extractYmClientId`. Заодно
-	 *  возвращает line (из USER_CODE) для фильтра по нужным открытым линиям. */
+	 *  Цепочка: `IMOPENLINES_SESSION` активность лида → её `PROVIDER_PARAMS.USER_CODE`
+	 *  → `im.chat.get(ENTITY_TYPE=LINES, ENTITY_ID=USER_CODE)` даёт B24 CHAT_ID
+	 *  → `im.dialog.messages.get(DIALOG_ID=chat<CHAT_ID>)` → `extractYmClientId`.
+	 *  (CHAT_ID нет ни в activity, ни в session-id — только через im.chat.get.)
+	 *  im-методы — через social-app (у customer360 нет scope `im`). Возвращает
+	 *  line (из USER_CODE) для фильтра по нужным открытым линиям. */
 	private async _ymClientIdFromLeadChat(
 		portalDomain: string, leadId: number,
 	): Promise<{ ymClientId?: string; line?: number }> {
@@ -3375,7 +3377,7 @@ export class Bitrix24Service extends BaseAdapter<
 				portalDomain, "crm.activity.list",
 				{
 					filter: { OWNER_ID: leadId, OWNER_TYPE_ID: 1, PROVIDER_ID: "IMOPENLINES_SESSION" },
-					select: ["*", "PROVIDER_PARAMS", "SETTINGS"],
+					select: ["ID", "PROVIDER_PARAMS"],
 					order: { ID: "ASC" },
 				},
 				undefined, 0, "customer360",
@@ -3386,15 +3388,22 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		const list = Array.isArray(acts) ? acts : [];
 		let line: number | undefined;
+		const seenChats = new Set<string>();
 		for (const a of list) {
-			this.logger.info(`backfill-yacid DEBUG activity lead=${leadId}: ${JSON.stringify(a).slice(0, 1800)}`);
-			const parsed = this._parseSessionUserCode(a?.PROVIDER_PARAMS?.USER_CODE);
+			const userCode = String(a?.PROVIDER_PARAMS?.USER_CODE || "").trim();
+			if (!userCode) continue;
+			const parsed = this._parseSessionUserCode(userCode);
 			if (parsed) line = parsed.line;
-			const chatB24Id = String(a?.ASSOCIATED_ENTITY_ID || "").trim();
-			if (!chatB24Id) continue;
 			try {
-				// im.dialog.messages.get — scope `im` есть только у social-app
-				// (customer360 даёт 401). Это редкий разовый read, не горячий путь.
+				// USER_CODE → CHAT_ID (нет в activity, только через im.chat.get).
+				const chat: any = await this.callBitrix24Method(
+					portalDomain, "im.chat.get",
+					{ ENTITY_TYPE: "LINES", ENTITY_ID: userCode },
+					undefined, 0, "social",
+				);
+				const chatB24Id = String(chat?.ID || "").trim();
+				if (!chatB24Id || seenChats.has(chatB24Id)) continue;
+				seenChats.add(chatB24Id);
 				const resp: any = await this.callBitrix24Method(
 					portalDomain, "im.dialog.messages.get",
 					{ DIALOG_ID: `chat${chatB24Id}`, LIMIT: 200 },
@@ -3406,7 +3415,7 @@ export class Bitrix24Service extends BaseAdapter<
 					if (ym) return { ymClientId: ym, line };
 				}
 			} catch (e: any) {
-				this.logger.debug(`backfill-yacid: dialog.messages.get chat${chatB24Id} failed: ${e?.message || e}`);
+				this.logger.debug(`backfill-yacid: chat read lead=${leadId} userCode=${userCode} failed: ${e?.message || e}`);
 			}
 		}
 		return { line };
