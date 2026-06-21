@@ -183,6 +183,17 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	createGreenApiClient(instance: any) {
+		const client = super.createGreenApiClient(instance);
+		const omni = (process.env.OMNI_SURFACE_INSTANCES || "").split(",").map((s) => s.trim()).filter(Boolean);
+		if (omni.includes(String(instance.idInstance)) && process.env.OMNI_SURFACE_URL) {
+			const base = process.env.OMNI_SURFACE_URL.replace(/\/$/, "");
+			(client as any).baseUrl = base;
+			(client as any).client = axios.create({ baseURL: `${base}/waInstance${instance.idInstance}` });
+		}
+		return client;
+	}
+
 	private async refreshAccessToken(user: User, minTtlMs = 30_000): Promise<string> {
 		if (!user.refreshToken) {
 			throw new IntegrationError("No refresh token available", "UNAUTHORIZED");
