@@ -108,8 +108,12 @@ GreenAPI кабинеты, i2crm подключение, customer-service.
 | `GREENAPI_API_URL` | base URL Green API |
 | `GREENAPI_ID_INSTANCE` | default idInstance |
 | `GREENAPI_TOKEN_INSTANCE` | default apiToken |
+| `OMNI_SURFACE_INSTANCES` | CSV idInstance-ов, перенаправляемых на ядро omnisocial вместо green-api.com (поверхность B24). Пусто = выключено |
+| `OMNI_SURFACE_URL` | base URL ядра omnisocial (`https://omnisocial.9wb.ru/api/green`) для этих инстансов |
 
 Реальные инстансы — в таблице `Instance` MySQL adapter. См. §6.
+**omnisocial-поверхность (2026-06-21):** инстанс `4099467` (TG +79951145590) → линия 208,
+перенаправлен на ядро omnisocial (env-gated, commit 291e3e9). ADR `2026-06-21-omnisocial-surface-redirect`.
 
 **i2crm (Instagram):**
 | Имя | Назначение |
