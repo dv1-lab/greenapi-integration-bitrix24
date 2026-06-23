@@ -776,6 +776,27 @@ export class Bitrix24Service extends BaseAdapter<
 		});
 	}
 
+	/**
+	 * Включить/выключить коннектор на линии (imconnector.activate ACTIVE 1/0).
+	 * Для деактивации (active=false) data.set не делаем — только снимаем флаг.
+	 * Возвращает статус после операции для подтверждения. Используется для
+	 * вывода старого wa_tg_bridge с переехавших на social линий (#4).
+	 */
+	async setConnectorActive(
+		line: number,
+		connectorId: string,
+		active: boolean,
+	): Promise<{ CONFIGURED?: boolean; STATUS?: boolean; ACTIVE_STATUS?: boolean }> {
+		const portalDomain =
+			this.configService.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
+		await this.callBitrix24Method(portalDomain, "imconnector.activate", {
+			CONNECTOR: connectorId,
+			LINE: line,
+			ACTIVE: active ? 1 : 0,
+		});
+		return this.getConnectorStatus(portalDomain, line, connectorId);
+	}
+
 	// Простой мьютекс на phone, чтобы два одновременных webhook'а от Green API не
 	// создали два дублирующих лида до того как первый успеет завершить crm.lead.add.
 	private readonly _ensureLeadLocks = new Map<string, Promise<EnsureLeadResult>>();

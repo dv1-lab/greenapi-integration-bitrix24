@@ -381,6 +381,35 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint: включить/выключить коннектор на линии (imconnector
+	// .activate ACTIVE 1/0). Для вывода старого wa_tg_bridge с переехавших на
+	// social линий (#4). body: { line:number, connector:string, active:boolean }.
+	// Auth: X-Hint-Secret.
+	@Post("internal/connector-set-active")
+	@HttpCode(HttpStatus.OK)
+	async connectorSetActive(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { line?: number; connector?: string; active?: boolean };
+		const line = Number(body.line);
+		const connector = String(body.connector || "").trim();
+		if (!line || !connector || typeof body.active !== "boolean") {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "line, connector, active(boolean) required" });
+			return;
+		}
+		try {
+			const status = await this.bitrix24Service.setConnectorActive(line, connector, body.active);
+			res.json({ line, connector, active: body.active, status });
+		} catch (error: any) {
+			this.logger.error(`connector-set-active failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: добавить timeline-comment в открытый лид/сделку клиента
 	// (по phone). Используется bridge для avatar_changed события (Customer-360
 	// Этап 5): PHOTO в B24 НЕ меняем, только оставляем след в timeline. Auth:
