@@ -72,6 +72,19 @@ export class WebhooksController {
 			return;
 		}
 
+		// Omni-зеркало: исходящее из веб-инбокса кабинета или TG-топика, присланное
+		// фасадом omnisocial НАПРЯМУЮ с полем omniMirror ∈ {cabinet, bridge}.
+		// Триггер именно omniMirror (НЕ omniSource — тот несёт мостовое эхо, которое
+		// мост форвардит сюда; по нему был дубль B24-исходящих, см. REGRESSIONS 23.06).
+		if (webhook.typeWebhook === "outgoingMessageReceived" && (webhook as any).omniMirror) {
+			try {
+				await this.bitrix24Service.handleOutgoingFromCabinet(webhook);
+			} catch (error: any) {
+				this.logger.warn(`omni mirror failed: ${error.message}`);
+			}
+			return;
+		}
+
 		// Outgoing-from-device: менеджер написал клиенту прямо из приложения
 		// мессенджера (Telegram/MAX офисного аккаунта), минуя B24. Зеркалим в
 		// открытую линию как is_self_message, чтобы ответ был виден в B24-диалоге.

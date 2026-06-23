@@ -2341,6 +2341,89 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Зеркало в B24 исходящего из наших omnisocial-поверхностей (веб-инбокс
+	 * кабинета или TG-топик моста). Фасад шлёт синтетический outgoingMessageReceived
+	 * НАПРЯМУЮ в этот вебхук с полем `omniMirror` ∈ {cabinet, bridge}.
+	 *
+	 * ВАЖНО: триггер — именно `omniMirror`, а НЕ `omniSource`. `omniSource` несёт
+	 * фасадное эхо в мост (для prefix «↗️ из кабинета»), которое мост форвардит
+	 * сюда же — если триггерить по нему, B24-собственные исходящие задвоятся
+	 * (инцидент 23.06, REGRESSIONS). `omniMirror` ставит ТОЛЬКО прямой фан фасада
+	 * для cabinet/bridge-origin; для b24-origin фасад его НЕ ставит → нет дубля.
+	 */
+	async handleOutgoingFromCabinet(webhook: any): Promise<void> {
+		const idInstance = String(webhook?.instanceData?.idInstance || "");
+		if (!idInstance) return;
+		let inst: any;
+		try {
+			inst = await (this.prisma as any).instance.findUnique({
+				where: { idInstance: BigInt(idInstance) },
+				include: { user: true },
+			});
+		} catch {
+			return;
+		}
+		if (!inst || inst.bitrixLine == null) return;
+		const provider = String((inst.settings as any)?.provider || "wa").toLowerCase();
+
+		const senderData = webhook?.senderData || {};
+		const rawChatId = String(senderData?.chatId || "");
+		if (!rawChatId || rawChatId.endsWith("@g.us")) return; // группы skip
+		const clientChatId = rawChatId.replace(/@c\.us$/, "");
+		if (!clientChatId) return;
+		// userKey совпадает с префиксом ВХОДЯЩИХ канала (иначе B24 заведёт 2-го chat-user):
+		// wa → wa_<phone>, прочие → sc_<chat>.
+		const userKey = provider === "wa" ? `wa_${clientChatId}` : `sc_${clientChatId}`;
+
+		const messageData = webhook?.messageData || {};
+		const mtype = String(messageData?.typeMessage || "");
+		let text = "";
+		if (mtype === "textMessage") {
+			text = String(messageData?.textMessageData?.textMessage || "");
+		} else if (mtype === "extendedTextMessage") {
+			text = String(messageData?.extendedTextMessageData?.text || "");
+		} else {
+			const fdata = messageData?.fileMessageData || {};
+			text = `[${mtype.replace("Message", "") || "media"}]`
+				+ (fdata.caption ? ` ${fdata.caption}` : "");
+		}
+		text = text.slice(0, 4000);
+		if (!text) return;
+
+		const origin = String(webhook?.omniMirror || "cabinet");
+		const portalDomain = inst.user?.portalDomain
+			|| this.configService.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
+		const displayName = String(senderData?.chatName || senderData?.senderName || clientChatId).trim() || clientChatId;
+
+		const payload = {
+			CONNECTOR: "social_connector",
+			LINE: Number(inst.bitrixLine),
+			MESSAGES: [{
+				user: { id: userKey, name: displayName },
+				message: {
+					id: String(webhook?.idMessage || Date.now()),
+					date: Math.floor(Date.now() / 1000),
+					text,
+				},
+				chat: { id: userKey, name: displayName },
+				extra: { is_self_message: true },
+			}],
+		};
+		try {
+			const r: any = await this.sendImconnectorMessage(portalDomain, payload);
+			if (r?.error) {
+				this.logger.warn(`outgoing-from-${origin} mirror: b24 ${r.error}`);
+			} else {
+				this.logger.info(
+					`outgoing-from-${origin}: mirrored to line ${inst.bitrixLine} (${provider}, chat ${clientChatId})`,
+				);
+			}
+		} catch (e: any) {
+			this.logger.warn(`outgoing-from-cabinet mirror failed: ${e?.message || e}`);
+		}
+	}
+
+	/**
 	 * Обработчик outgoingAPIMessageReceived от Green API — оператор написал
 	 * клиенту с МОБИЛЬНОГО WhatsApp (не из B24). Цель — оставить след в
 	 * B24 чтобы в карточке клиента было видно факт ответа.
