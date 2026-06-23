@@ -352,6 +352,35 @@ export class WebhooksController {
 		}
 	}
 
+	// Internal endpoint (read-only): матрица ACTIVE-статусов коннекторов по
+	// открытым линиям. Для аудита — какой коннектор активен на каждой линии
+	// (остался ли wa_tg_bridge после миграции на social_connector). Ничего не
+	// меняет. body: { lines?: number[], connectors?: string[] }. Auth: X-Hint-Secret.
+	@Post("internal/connector-status")
+	@HttpCode(HttpStatus.OK)
+	async connectorStatus(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		if (expected && given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as { lines?: number[]; connectors?: string[] };
+		const lines = Array.isArray(body.lines)
+			? body.lines.map(Number).filter(Boolean)
+			: undefined;
+		const connectors = Array.isArray(body.connectors)
+			? body.connectors.map(String).filter(Boolean)
+			: undefined;
+		try {
+			const result = await this.bitrix24Service.diagnoseConnectors(lines, connectors);
+			res.json(result);
+		} catch (error: any) {
+			this.logger.error(`connector-status failed: ${error.message}`);
+			res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: добавить timeline-comment в открытый лид/сделку клиента
 	// (по phone). Используется bridge для avatar_changed события (Customer-360
 	// Этап 5): PHOTO в B24 НЕ меняем, только оставляем след в timeline. Auth:

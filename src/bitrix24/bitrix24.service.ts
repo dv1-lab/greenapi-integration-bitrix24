@@ -720,6 +720,33 @@ export class Bitrix24Service extends BaseAdapter<
 	}
 
 	/**
+	 * Read-only диагностика: матрица ACTIVE-статусов коннекторов по линиям.
+	 * Используется для аудита какой коннектор активен на каждой open-line
+	 * (например, остался ли wa_tg_bridge активным после миграции на social).
+	 * Ничего не меняет — только imconnector.list + imconnector.status.
+	 */
+	async diagnoseConnectors(
+		lines: number[] = [148, 174, 178, 182, 204],
+		connectors: string[] = ["social_connector", "wa_tg_bridge"],
+	): Promise<{ portalDomain: string; registered: string[]; matrix: any[] }> {
+		const portalDomain =
+			this.configService.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
+		const registered = await this.listConnectors(portalDomain).catch(() => [] as string[]);
+		const matrix: any[] = [];
+		for (const line of lines) {
+			for (const connector of connectors) {
+				try {
+					const st = await this.getConnectorStatus(portalDomain, line, connector);
+					matrix.push({ line, connector, ...st });
+				} catch (e: any) {
+					matrix.push({ line, connector, error: e?.message || String(e) });
+				}
+			}
+		}
+		return { portalDomain, registered, matrix };
+	}
+
+	/**
 	 * Активирует коннектор на открытой линии: imconnector.activate + data.set.
 	 * Идемпотентно — повторный вызов на уже активной линии безвреден. Adapter
 	 * штатно активирует линию только при настройке через SETTING_CONNECTOR;
