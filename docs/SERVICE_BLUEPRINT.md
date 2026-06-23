@@ -5,7 +5,7 @@
 (`ARCHITECTURE.md`, `INSTAGRAM_FLOW.md`, `OPEN_LINE_LIFECYCLE.md` и т.д.) —
 здесь компактный recipe, без «почему так».
 
-Последнее обновление: 2026-06-16 (Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET).
+Последнее обновление: 2026-06-24 (read-only/admin эндпоинты `/webhooks/internal/connector-{status,set-active}` для аудита/вывода коннекторов, sha 8f01bfe+192bfe1; wa_tg_bridge деактивирован на всех 5 линиях). Ранее 2026-06-16: Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET.
 
 ---
 
@@ -299,6 +299,8 @@ Restic → Я.Диск ежедневно 04:00 UTC.
 | `/webhooks/internal/refresh-tg-bot-pinned` | POST | пересоздать pinned-карточку клиента в TG-зеркале |
 | `/webhooks/internal/backfill-ya-cid` | POST | разовый backfill UF_CRM_YA_CID из истории чатов (body: lineIds, sinceIso, dryRun, delayMs). См. ADR 2026-06-16-ym-clientid-orphan-lead |
 | `/webhooks/internal/set-ya-cid` | POST | точечная запись ClientID в лиды/сделки (body: items[{clientId, leadId\|chatId+channelLabel+sinceIso/untilIso}], dryRun) |
+| `/webhooks/internal/connector-status` | POST | read-only: матрица ACTIVE-статусов коннекторов по линиям (imconnector.list + status). body: {lines?, connectors?}. Аудит «кто активен на линии». sha 8f01bfe |
+| `/webhooks/internal/connector-set-active` | POST | вкл/выкл коннектора на линии (imconnector.activate ACTIVE 1/0). body: {line, connector, active}. Вывод старого wa_tg_bridge с переехавших линий. sha 192bfe1 |
 | `/widget/render` | GET | embedded в карточке B24 (placement) — HTML widget |
 | `/widget/send` | POST | send first message (WA/MAX/TG via GreenAPI, IG via i2crm) |
 | `/widget/instances` | GET | список authorized GreenAPI инстансов для select-box |
