@@ -3846,7 +3846,7 @@ export class Bitrix24Service extends BaseAdapter<
 					// (<shard>.api.green-api.com/download/...) — висит ~20 c и
 					// отвечает «Переданы не все необходимые данные». Скачиваем файл
 					// сами и отдаём B24 ссылку через social.9wb.ru (его B24 тянет).
-					if (url && /\.api\.green-api\.com\//i.test(url) && appUrl) {
+					if (url && (/\.api\.green-api\.com\//i.test(url) || /facade-os\.9wb\.ru\//i.test(url)) && appUrl) {
 						try {
 							const resp = await axios.get(url, {
 								responseType: "arraybuffer",
