@@ -2378,17 +2378,42 @@ export class Bitrix24Service extends BaseAdapter<
 		const messageData = webhook?.messageData || {};
 		const mtype = String(messageData?.typeMessage || "");
 		let text = "";
+		let files: { url: string; name: string }[] | undefined;
 		if (mtype === "textMessage") {
 			text = String(messageData?.textMessageData?.textMessage || "");
 		} else if (mtype === "extendedTextMessage") {
 			text = String(messageData?.extendedTextMessageData?.text || "");
 		} else {
+			// Медиа: фасад прислал downloadUrl на facade-os. B24-облако facade-os не
+			// тянет (IP-фильтр) → скачиваем сами и переотдаём через social.9wb.ru,
+			// как Фикс B для входящих.
 			const fdata = messageData?.fileMessageData || {};
-			text = `[${mtype.replace("Message", "") || "media"}]`
-				+ (fdata.caption ? ` ${fdata.caption}` : "");
+			text = String(fdata.caption || "");
+			const dl = String(fdata.downloadUrl || "");
+			const name = String(fdata.fileName || "attachment");
+			if (dl) {
+				let fileUrl = dl;
+				const appUrl = (this.configService.get<string>("APP_URL") || "").replace(/\/+$/, "");
+				if (/facade-os\.9wb\.ru\//i.test(dl) && appUrl) {
+					try {
+						const resp = await axios.get(dl, {
+							responseType: "arraybuffer", timeout: 25000, maxContentLength: 50 * 1024 * 1024,
+						});
+						const ct = String(resp.headers["content-type"] || fdata.mimeType || "application/octet-stream");
+						const mediaId = this.mediaCache.store(Buffer.from(resp.data), ct);
+						const ext = (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || "bin").toLowerCase();
+						fileUrl = `${appUrl}/media/${mediaId}.${ext}`;
+					} catch (e: any) {
+						this.logger.warn(`omni mirror media download failed (${dl}): ${e?.message || e}`);
+					}
+				}
+				files = [{ url: fileUrl, name }];
+			} else {
+				text = `[${mtype.replace("Message", "") || "media"}]` + (text ? ` ${text}` : "");
+			}
 		}
 		text = text.slice(0, 4000);
-		if (!text) return;
+		if (!text && !files) return;
 
 		const origin = String(webhook?.omniMirror || "cabinet");
 		const portalDomain = inst.user?.portalDomain
@@ -2404,6 +2429,7 @@ export class Bitrix24Service extends BaseAdapter<
 					id: String(webhook?.idMessage || Date.now()),
 					date: Math.floor(Date.now() / 1000),
 					text,
+					...(files ? { files } : {}),
 				},
 				chat: { id: userKey, name: displayName },
 				extra: { is_self_message: true },
