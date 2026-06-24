@@ -160,6 +160,30 @@ im-методы — через social-app (customer360 без scope `im`/`imopen
 `omnisocial/docs/superpowers/specs/2026-06-22-boevye-channels-migration.md`.
 До миграции метки копятся; потерянные дозаписать бэкфиллом после.
 
+## Обновление 2026-06-24 — WhatsApp ВКЛЮЧЁН (в adapter)
+
+Реализован захват ClientID для WhatsApp, ранее отложенный (см. апдейт 22.06).
+Развилку «на Green API или в рамках миграции omnisocial» снял факт: после
+миграции 23.06 WA-входящие всё равно проходят через ЭТОТ adapter
+(`sendToPlatform`) — omnisocial сменил лишь транспорт фронт-фида, точка входа в
+B24 та же. Поэтому фикс здесь = и есть «в рамках миграции». Решение Дмитрия
+2026-06-24: делать.
+
+Механизм (аналог TG/MAX, но ключ стэша — телефон):
+- `sendToPlatform`: при WA-входящем с меткой стэшим ClientID по ключу
+  `wa_<digits>` — отдельный от TG/MAX user_id (без коллизии ключей).
+- `_maybeLinkOrphanLead` шаг 0: chatId WA резолвится в голые цифры телефона;
+  если по chatId стэша нет и `channelLabel==="WhatsApp"` — пробуем
+  `wa_<digits(phoneFromTitle||chatId)>`.
+- Идемпотентность/TTL/OVERLOAD — как у TG/MAX (запись только при пустом
+  `UF_CRM_YA_CID`, appKind `customer360`, лишний update только когда метка была).
+
+Тесты: `bitrix24.service.spec.ts` → describe «WhatsApp: дозапись YA_CID по ключу
+wa_<digits>» (запись + чужой телефон не пишет). TG/MAX-тесты не менялись, 39 зелёных.
+
+Бэкфилл потерянных WA-лидов (363070, 363104 + накопленные с 22.06) — через
+`/webhooks/internal/backfill-ya-cid`, отдельная операция (не часть код-фикса).
+
 ## Связанные
 
 - ADR `2026-06-13-ym-clientid-to-ya-cid` — предыдущий слой (регекс + поле).

@@ -3292,7 +3292,15 @@ export class Bitrix24Service extends BaseAdapter<
 		// открытой линией — пишем UF_CRM_YA_CID прямо в него, контакт для этого не
 		// нужен. Только если поле пусто — не перетираем ранний ClientID. Счётчик
 		// 45469563 (тот же, куда пишет форма сайта). См. ADR 2026-06-16-ym-clientid-orphan-lead.
-		const stashedYm = this.takePendingYmClientId(chatId);
+		let stashedYm = this.takePendingYmClientId(chatId);
+		// WhatsApp: стэш положен по ключу wa_<digits> (см. sendToPlatform), а chatId
+		// для WA резолвится в голые цифры телефона — поэтому по chatId выше не
+		// найдём. Пробуем WA-ключ из phoneFromTitle (надёжнее) либо chatId.
+		// TG/MAX не затрагиваются (gate по channelLabel).
+		if (!stashedYm && channelLabel === "WhatsApp") {
+			const waDigits = String(phoneFromTitle || chatId).replace(/\D/g, "");
+			if (waDigits) stashedYm = this.takePendingYmClientId(`wa_${waDigits}`);
+		}
 		if (stashedYm && !String(snap?.UF_CRM_YA_CID || "").trim()) {
 			try {
 				await this.callBitrix24Method(
@@ -3949,6 +3957,14 @@ export class Bitrix24Service extends BaseAdapter<
 				// ClientID. Стэшим по chatId — лид создаст открытая линия, а
 				// _maybeLinkOrphanLead (ONCRMLEADADD) допишет UF_CRM_YA_CID.
 				if (ymClientId && chatIdForUf) this.stashPendingYmClientId(chatIdForUf, ymClientId);
+				// WhatsApp: chatIdForUf не задаём (у WA нет chat-id-UF, опознание по
+				// телефону). Новый клиент → ensureOpenLeadForPhone ниже выйдет без
+				// записи ClientID (контакта ещё нет). Стэшим по ключу wa_<digits>
+				// (отдельный от TG/MAX user_id — без коллизии), а _maybeLinkOrphanLead
+				// для WA-лида заберёт его по этому же ключу из phoneFromTitle.
+				if (ymClientId && instanceProvider === "wa" && phoneE164) {
+					this.stashPendingYmClientId(`wa_${phoneE164.replace(/\D/g, "")}`, ymClientId);
+				}
 				if (phoneE164 || chatIdForUf) {
 					await this.ensureOpenLeadForPhone(
 						instance.user.portalDomain,

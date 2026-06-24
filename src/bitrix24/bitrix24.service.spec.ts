@@ -549,4 +549,62 @@ describe("Bitrix24Service pending Я.Метрика ClientID", () => {
 			expect(yaWrite).toBeUndefined();
 		});
 	});
+
+	describe("WhatsApp: дозапись YA_CID по ключу wa_<digits>", () => {
+		// TITLE WA-открытой линии: chatId с префиксом wa_ невалиден → chatId
+		// резолвится из активности сессии (голые цифры), phoneFromTitle сохраняется.
+		const snapWA = {
+			ID: "363070",
+			TITLE: "wa_79584983354 - WhatsApp 79584983354",
+			CONTACT_ID: null,
+			UF_CRM_TG_CHAT_ID: "",
+		};
+		const mockActivityWA = () =>
+			jest.spyOn(service as any, "_resolveOrphanChatFromActivity").mockResolvedValue({
+				chatId: "79584983354", channelLabel: "WhatsApp",
+			});
+
+		it("новый WA-клиент без контакта: пишет YA_CID из стэша wa_<phone>", async () => {
+			(service as any).stashPendingYmClientId("wa_79584983354", "1781714395161696032");
+			mockActivityWA();
+			const calls: any[] = [];
+			jest.spyOn(service as any, "callBitrix24Method").mockImplementation(
+				async (_d: string, method: string, params: any) => {
+					calls.push({ method, params });
+					if (method === "crm.contact.list") return [];
+					return {};
+				},
+			);
+			const res = await (service as any)._maybeLinkOrphanLead(
+				"p.bitrix24.ru", 363070, { ...snapWA, UF_CRM_YA_CID: "" },
+			);
+			const yaWrite = calls.find(
+				(c) => c.method === "crm.lead.update" && c.params?.fields?.UF_CRM_YA_CID,
+			);
+			expect(yaWrite).toBeDefined();
+			expect(yaWrite.params.id).toBe(363070);
+			expect(yaWrite.params.fields.UF_CRM_YA_CID).toBe("1781714395161696032");
+			expect(yaWrite.params.fields.UF_CRM_YA_COUNTER_ID).toBe("45469563");
+			expect(res.linked).toBe(false);
+		});
+
+		it("WA стэш под другим телефоном → YA_CID не пишем", async () => {
+			(service as any).stashPendingYmClientId("wa_70000000000", "999");
+			mockActivityWA();
+			const calls: any[] = [];
+			jest.spyOn(service as any, "callBitrix24Method").mockImplementation(
+				async (_d: string, method: string, params: any) => {
+					calls.push({ method, params });
+					if (method === "crm.contact.list") return [];
+					return {};
+				},
+			);
+			await (service as any)._maybeLinkOrphanLead(
+				"p.bitrix24.ru", 363070, { ...snapWA, UF_CRM_YA_CID: "" },
+			);
+			expect(
+				calls.find((c) => c.method === "crm.lead.update" && c.params?.fields?.UF_CRM_YA_CID),
+			).toBeUndefined();
+		});
+	});
 });
