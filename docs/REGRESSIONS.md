@@ -8,6 +8,31 @@
 
 ---
 
+## 2026-06-24 · WhatsApp не писал ym ClientID в UF_CRM_YA_CID — РЕШЕНО
+
+- **sha**: `13a31cb` (фикс + тесты); потерянные дозаписаны бэкфиллом `/webhooks/internal/backfill-ya-cid`.
+- **Симптом**: метка сайта `(номер обращения: <id>)` в первом WhatsApp-сообщении не
+  попадала в поле лида `UF_CRM_YA_CID` (сквозная аналитика). Для Telegram/MAX работало.
+- **Причина**: стэш ClientID (`_pendingYmClientId`) заполнялся только при заданном
+  `chatIdForUf`, а он ставится лишь для max/telegram (`sendToPlatform`). У WA опознание по
+  телефону, своего chat-id-UF нет → стэш не клался, `_maybeLinkOrphanLead` (ONCRMLEADADD)
+  WA-сироту по стэшу не находил. Лид создаёт открытая линия → YA_CID пусто. Миграция на
+  omnisocial 23.06 ни при чём — WA всё равно входит через этот же adapter (`sendToPlatform`).
+- **Фикс**: WA-ветка стэша по ключу `wa_<digits телефона>` (отдельный от TG/MAX user_id —
+  без коллизии); в `_maybeLinkOrphanLead` шаг 0 для WA-лида (chatId = голые цифры) доп.
+  lookup по `wa_<digits(phoneFromTitle||chatId)>`. Идемпотентно (только пустой YA_CID),
+  appKind customer360.
+- **Затронутые файлы**: `bitrix24.service.ts` (стэш в `sendToPlatform`, lookup в
+  `_maybeLinkOrphanLead`), `bitrix24.service.spec.ts` (+2 WA-теста, 39 зелёных).
+- **Verify**: тесты зелёные + `nest build` чистый + adapter поднят (Nest started). Бэкфилл:
+  dryRun нашёл 3 (363368/363104/363070, линия 174), боевой `wrote:{leads:3}`, повторный
+  dryRun `matched:[]` (идемпотентность).
+- **Пере-сломать рискованно**: НЕ выравнивать WA-ключ стэша на голые цифры (как TG/MAX
+  user_id) — будет коллизия ключей между каналами; префикс `wa_` обязателен. Не трогать
+  TG/MAX-строку стэша. ADR `decisions/2026-06-16-ym-clientid-orphan-lead.md` (обновление 24.06).
+
+---
+
 ## 2026-06-24 · «Беговой» отвечал на 8566 — wa_tg_bridge остался активен на линии 204 — РЕШЕНО
 
 - **sha**: `8f01bfe` (диагностический эндпоинт) + `192bfe1` (set-active эндпоинт)
