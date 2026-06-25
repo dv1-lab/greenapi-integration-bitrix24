@@ -2330,7 +2330,10 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		text = text.slice(0, 4000);
 		if (!text) return;
-		text = "↗️ " + text;  // метка исходящего оператора в B24 (не путать с клиентским)
+		{
+			const who = String(webhook?.omniOperator || "").trim();
+			text = who ? `↗️ ${who}: ${text}` : `↗️ ${text}`;  // атрибуция «кто ответил» (Direction A)
+		}
 
 		const portalDomain = inst.user?.portalDomain
 			|| this.configService.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru";
@@ -2463,7 +2466,10 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 		text = text.slice(0, 4000);
 		if (!text && !files) return;
-		if (text) text = "↗️ " + text;  // метка исходящего оператора в B24
+		if (text) {
+			const who = String(webhook?.omniOperator || "").trim();
+			text = who ? `↗️ ${who}: ${text}` : `↗️ ${text}`;  // атрибуция «кто ответил» (Direction A)
+		}
 
 		const origin = String(webhook?.omniMirror || "cabinet");
 		const portalDomain = inst.user?.portalDomain
