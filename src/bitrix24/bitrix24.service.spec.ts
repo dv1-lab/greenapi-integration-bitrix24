@@ -608,3 +608,129 @@ describe("Bitrix24Service pending Я.Метрика ClientID", () => {
 		});
 	});
 });
+
+// =====================================================================
+// handleVkCommentOutgoing — VK-комментарий «!» → личка (Task 7, env-gated)
+// ADR: docs/decisions/2026-07-02-vk-comment-to-direct.md
+// =====================================================================
+import axios from "axios";
+
+describe("Bitrix24Service.handleVkCommentOutgoing (VK ! → DM, env-gated)", () => {
+	const VK_COMMENT_LINE = 108;
+	const VK_PERSONAL_LINE = 110;
+
+	const vkConfig = () => ({
+		get: jest.fn((key: string) => {
+			if (key === "VK_COMMENT_LINE_ID") return String(VK_COMMENT_LINE);
+			if (key === "VK_PERSONAL_LINE_ID") return String(VK_PERSONAL_LINE);
+			return undefined;
+		}),
+	});
+
+	const vkPrisma = () => {
+		const base = mockPrisma();
+		(base as any).instance = {
+			findFirst: jest.fn().mockResolvedValue({
+				idInstance: 999,
+				apiTokenInstance: "test-token",
+				bitrixLine: VK_PERSONAL_LINE,
+			}),
+		};
+		(base as any).getInstancesByUserId = jest.fn().mockResolvedValue([]);
+		return base;
+	};
+
+	const vkWebhook = (text: string, operatorId = 42) => ({
+		event: "ONIMCONNECTORMESSAGEADD",
+		auth: { domain: "test.bitrix24.ru" },
+		data: {
+			LINE: String(VK_COMMENT_LINE),
+			CONNECTOR: "social_connector",
+			MESSAGES: [{
+				chat: { id: "vk_user_123" },
+				message: { text, user_id: operatorId },
+			}],
+		},
+	});
+
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
+
+	it("Тест 1: «! привет» → imconnector LINE=110 is_self_message=true + transfer TRANSFER_ID=42", async () => {
+		const prisma = vkPrisma();
+		const config = vkConfig();
+		const svc = await buildService({ prisma, config });
+
+		// Мокаем DM-доставку (surface axios.post)
+		const axiosSpy = jest.spyOn(axios, "post").mockResolvedValue({ status: 200, data: { idMessage: "vk_msg_1" } });
+
+		const b24Calls: any[] = [];
+		jest.spyOn(svc as any, "callBitrix24Method").mockImplementation(
+			async (_d: string, method: string, params: any) => {
+				b24Calls.push({ method, params });
+				if (method === "imconnector.send.messages") {
+					return { DATA: { RESULT: [{ session: { CHAT_ID: 777 } }] } };
+				}
+				return {};
+			},
+		);
+
+		try {
+			const r = await (svc as any).handleVkCommentOutgoing(vkWebhook("! привет"), VK_COMMENT_LINE);
+
+			expect(r).not.toBeNull();
+			expect(r.success).toBe(true);
+
+			// Проверяем зеркало с is_self_message и верной LINE
+			const mirror = b24Calls.find((c) => c.method === "imconnector.send.messages");
+			expect(mirror).toBeDefined();
+			expect(mirror.params.LINE).toBe(VK_PERSONAL_LINE);
+			expect(mirror.params.MESSAGES[0].extra.is_self_message).toBe(true);
+			// Текст без «! »
+			expect(mirror.params.MESSAGES[0].message.text).toBe("привет");
+
+			// Проверяем auto-transfer на оператора
+			const transfer = b24Calls.find((c) => c.method === "imopenlines.operator.transfer");
+			expect(transfer).toBeDefined();
+			expect(transfer.params.CHAT_ID).toBe(777);
+			expect(transfer.params.TRANSFER_ID).toBe(42);
+
+			// DM-доставка была вызвана (один раз, на personal инстанс)
+			expect(axiosSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			svc.onModuleDestroy();
+		}
+	});
+
+	it("Тест 2: текст без «!» → handleVkCommentOutgoing возвращает null (публичный путь)", async () => {
+		const svc = await buildService({ config: vkConfig(), prisma: vkPrisma() });
+		try {
+			const r = await (svc as any).handleVkCommentOutgoing(vkWebhook("публичный ответ"), VK_COMMENT_LINE);
+			expect(r).toBeNull();
+		} finally {
+			svc.onModuleDestroy();
+		}
+	});
+
+	it("Тест 3 (env off): VK_COMMENT_LINE_ID пуст → ветка не активируется в handleBitrix24Webhook", async () => {
+		// Дефолтный config → VK_COMMENT_LINE_ID=undefined → vkCommentLineEnv=0 → if(0)=false
+		const prisma = {
+			...mockPrisma(),
+			getInstancesByUserId: jest.fn().mockResolvedValue([]),
+		};
+		(prisma as any).instance = { findFirst: jest.fn() };
+		const svc = await buildService({ prisma: prisma as any });
+		const vkSpy = jest.spyOn(svc as any, "handleVkCommentOutgoing");
+
+		try {
+			const result = await svc.handleBitrix24Webhook(vkWebhook("! привет") as any);
+			// Ветка VK не вошла
+			expect(vkSpy).not.toHaveBeenCalled();
+			// Обычный путь завершился с "нет инстансов"
+			expect(result.success).toBe(false);
+		} finally {
+			svc.onModuleDestroy();
+		}
+	});
+});

@@ -6796,6 +6796,137 @@ export class Bitrix24Service extends BaseAdapter<
 		};
 	}
 
+	/**
+	 * Ветка «!» для ВК-комментариев: оператор пишет «! текст» в открытую линию
+	 * комментариев → текст уходит клиенту в личку (VK personal), а в comment-линию
+	 * не публикуется. Без «!» — возвращает null → обычный surface-forward (стена).
+	 *
+	 * Активируется только при заданных VK_COMMENT_LINE_ID и VK_PERSONAL_LINE_ID.
+	 * При пустых env — метод не вызывается из routing-ветки (см. handleBitrix24Webhook).
+	 *
+	 * ADR: docs/decisions/2026-07-02-vk-comment-to-direct.md
+	 */
+	private async handleVkCommentOutgoing(webhook: Bitrix24WebhookDto, lineNumber: number): Promise<WebhookProcessResult | null> {
+		const messages = webhook.data?.MESSAGES;
+		if (!messages || messages.length === 0) {
+			return { success: false, message: "vk-comment: no MESSAGES in webhook" };
+		}
+		const m = messages[0];
+
+		const text = String(m?.message?.text || "");
+		const operatorId = Number(m?.message?.user_id) || 0;
+		const chatId = String(m?.chat?.id || "");
+
+		if (!chatId) {
+			return { success: false, message: "vk-comment: cannot extract chatId" };
+		}
+
+		// Маркер «!» в начале → увод в личку. Без маркера — обычный публичный путь.
+		const mk = text.match(/^\s*!\s*/);
+		if (!mk) {
+			return null; // не наша ветка — упасть дальше в surface-forward
+		}
+
+		const body = text.slice(mk[0].length);
+		const vkPersonalLine = Number(this.configService.get<string>("VK_PERSONAL_LINE_ID")) || 0;
+		const vkCommentLine = Number(this.configService.get<string>("VK_COMMENT_LINE_ID")) || 0;
+		const portalDomain = webhook.auth?.domain;
+
+		// Реальная доставка DM через surface-инстанс личной линии.
+		// sendMessage идёт на ${OMNI_SURFACE_URL}/waInstance${id}/sendMessage/${token}
+		// (greenApiUrlForInstance резолвит surface-URL по idInstance из env).
+		let dmBlocked = false;
+		try {
+			const personalInst = await (this.prisma as any).instance.findFirst({ where: { bitrixLine: vkPersonalLine } });
+			if (personalInst) {
+				const apiUrl = greenApiUrlForInstance(String(personalInst.idInstance));
+				const r = await axios.post(
+					`${apiUrl}/waInstance${personalInst.idInstance}/sendMessage/${personalInst.apiTokenInstance}`,
+					{ chatId: String(chatId), message: body },
+					{ timeout: 15000, validateStatus: () => true },
+				);
+				if (r.status === 409 && r.data?.messagesBlocked) {
+					dmBlocked = true;
+					this.logger.info(`vk-comment: ЛС закрыты для chatId=${chatId}, мостик`);
+				} else {
+					this.logger.info(`vk-comment: DM отправлено (chatId=${chatId}, status=${r.status})`);
+				}
+			} else {
+				this.logger.warn(`vk-comment: инстанс личной линии (bitrixLine=${vkPersonalLine}) не найден`);
+			}
+		} catch (e: any) {
+			this.logger.warn(`vk-comment: ошибка доставки DM: ${e.message}`);
+		}
+
+		// Мостик-fallback при закрытых ЛС (409 messagesBlocked от vk-adapter).
+		// POST {OMNI_SURFACE_URL}/vk-bridge/{commentInstanceId}/{token} {chatId}
+		if (dmBlocked) {
+			try {
+				const commentInst = await (this.prisma as any).instance.findFirst({ where: { bitrixLine: vkCommentLine } });
+				const surfaceBase = (process.env.OMNI_SURFACE_URL || "").replace(/\/$/, "");
+				if (commentInst && surfaceBase) {
+					await axios.post(
+						`${surfaceBase}/vk-bridge/${commentInst.idInstance}/${commentInst.apiTokenInstance}`,
+						{ chatId: String(chatId) },
+						{ timeout: 15000 },
+					);
+					this.logger.info(`vk-comment: мостик vk-bridge вызван (chatId=${chatId})`);
+				} else {
+					this.logger.warn(`vk-comment: мостик недоступен (inst=${!!commentInst}, surface=${!!surfaceBase})`);
+				}
+			} catch (e: any) {
+				this.logger.warn(`vk-comment: мостик vk-bridge failed: ${e.message}`);
+			}
+		}
+
+		// Зеркало для оператора: создаём личка-сессию в B24 с is_self_message=true.
+		// B24 показывает текст как «отправлено бизнесом», без повторной доставки.
+		let mirrorChatId = 0;
+		try {
+			const mirrorResp: any = await this.callBitrix24Method(portalDomain, "imconnector.send.messages", {
+				CONNECTOR: "social_connector",
+				LINE: vkPersonalLine,
+				MESSAGES: [{
+					user: { id: chatId, name: chatId },
+					message: {
+						id: `mirror_vk_${Date.now()}`,
+						date: Math.floor(Date.now() / 1000),
+						text: body,
+					},
+					chat: { id: chatId, name: chatId },
+					extra: { is_self_message: true },
+				}],
+			});
+			mirrorChatId = Number(
+				mirrorResp?.DATA?.RESULT?.[0]?.session?.CHAT_ID ||
+				mirrorResp?.result?.DATA?.RESULT?.[0]?.session?.CHAT_ID || 0,
+			);
+			this.logger.info(`vk-comment: зеркало создано (chatId=${chatId}, mirrorChatId=${mirrorChatId})`);
+		} catch (e: any) {
+			this.logger.warn(`vk-comment: зеркало failed: ${e.message}`);
+		}
+
+		// Auto-transfer сессии на оператора, написавшего «!» (как i2crm IG).
+		if (mirrorChatId && operatorId) {
+			try {
+				await this.callBitrix24Method(portalDomain, "imopenlines.operator.transfer", {
+					CHAT_ID: mirrorChatId,
+					TRANSFER_ID: operatorId,
+					MODE: "USER",
+				});
+				this.logger.info(`vk-comment: chat ${mirrorChatId} → operator ${operatorId}`);
+			} catch (e: any) {
+				this.logger.warn(`vk-comment: operator.transfer failed: ${e.message}`);
+			}
+		}
+
+		return {
+			success: true,
+			message: "VK comment redirected to DM",
+			data: { chatId, operatorId },
+		};
+	}
+
 	async handleBitrix24Webhook(webhook: Bitrix24WebhookDto): Promise<WebhookProcessResult> {
 		this.logger.info(`Handling Bitrix24 webhook: ${webhook.event}`);
 
@@ -6878,6 +7009,17 @@ export class Bitrix24Service extends BaseAdapter<
 					);
 				}
 				return result;
+			}
+
+			// Branch: VK-комментарий с «!» → перенаправление в личку (env-gated).
+			// При пустом VK_COMMENT_LINE_ID — ветка неактивна, поведение не меняется.
+			// ADR: docs/decisions/2026-07-02-vk-comment-to-direct.md
+			const vkCommentLineEnv = Number(this.configService.get<string>("VK_COMMENT_LINE_ID")) || 0;
+			if (vkCommentLineEnv && lineNumber === vkCommentLineEnv) {
+				this.logger.info(`Routing outbound to VK comment pipeline (line=${lineNumber})`);
+				const handled = await this.handleVkCommentOutgoing(webhook, lineNumber);
+				if (handled) return handled;
+				// без «!» — падаем в обычный surface-forward (публичный wall.createComment)
 			}
 
 			const instances = await this.prisma.getInstancesByUserId(domain);
