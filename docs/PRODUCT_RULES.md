@@ -200,6 +200,19 @@ UF_CRM_*_CHAT_ID на контакте — клей между каналами:
 клиенту в **Direct** (приватно), не публичным комментом. Adapter
 переключает `type=direct`, плюс создаёт зеркальную Direct open-line.
 
+### 3.5. Префикс `!` для ВКонтакте (коммент → личка, surface-канал)
+
+Аналог §3.4 для ВК-канала omnisocial (surface, не i2crm). Префикс `!`
+в ВК-Comment-чате (линия `VK_COMMENT_LINE_ID`) → ответ уходит клиенту
+**в личку** (`messages.send` через личка surface-инстанс), не публичным
+комментом; создаётся зеркальная личка-сессия (линия `VK_PERSONAL_LINE_ID`)
+и передаётся оператору-инициатору (`imopenlines.operator.transfer`).
+При закрытых ЛС (VK `isMessagesFromGroupAllowed` = 0) — вместо лички
+публичный **мостик** `vk.me/club{group_id}`. Склейка комментов и лички
+в один лид — по одинаковому голому VK user_id (`chat.id`) на обеих
+линиях + `CRM_CHAT_TRACKER=Y` (как IG 18/22). Реализация env-gated,
+ADR [`2026-07-02-vk-comment-to-direct`](./decisions/2026-07-02-vk-comment-to-direct.md).
+
 ---
 
 ## 4. Customer-360 и аналитика
