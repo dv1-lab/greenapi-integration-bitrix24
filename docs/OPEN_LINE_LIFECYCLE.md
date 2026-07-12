@@ -65,6 +65,24 @@ Session — это **не chat**. Chat живёт всегда (один на к
    добавил `@c.us` для MAX → Green API не доставит, ответ 200 OK, диалога нет.
    - Где смотреть: `widget.controller.ts:341-343` (ветка `provider === "max"`).
 
+### 3.1 Write-first из холодного лида — привязка к placement entity (sha `b9e56a9`, 2026-07-12)
+
+Раньше widget `/widget/send` не знал, из какой карточки (lead/deal) его открыли —
+`ensureOpenLeadForPhone` матчил только КОНТАКТЫ, и холодный лид без контакта
+плодил несвязанный лид-дубль от imconnector.
+
+Сейчас: фронт виджета шлёт `entityType`+`entityId` из placement (карточка, из
+которой открыли «написать первым»). `writeChatIdToEntity` пишет резолвнутый
+chatId в `UF_CRM_{TG|MAX|IG}_CHAT_ID` исходной сущности. `placementEntity`
+становится приоритетным `openEntity` для `backfillSendLead` — он закрывает
+imconnector-дубль как «[Дубликат → lead N]» и подтягивает phone/имя/timeline
+в исходный лид. Работает без контакта.
+
+**ОТКРЫТО:** это ЧАСТИЧНОЕ решение — сам open-line чат остаётся на
+лиде-дубле, а не переезжает в исходный лид (перенос `IMOPENLINES_SESSION` на
+исходную сущность — прямых REST-методов в B24 нет, требует research). См.
+[`REGRESSIONS.md` 2026-07-12](./REGRESSIONS.md).
+
 ## 4. Где каждый канал создаёт session
 
 | Канал | chat.id формат incoming | chat.id формат outgoing-widget | Файл |
