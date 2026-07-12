@@ -1395,21 +1395,39 @@ const B24_AUTH = ${authJs};
     let chatIdOverride;
     const inst = INSTANCE_BY_ID[idInstance];
     const instProvider = inst ? (inst.provider || "wa").toLowerCase() : "wa";
-    if (instProvider === "telegram" && entityChatIds.telegram) {
-      chatIdOverride = entityChatIds.telegram;
-      dbg("using UF_CRM_TG_CHAT_ID", chatIdOverride);
-    } else if (instProvider === "max" && entityChatIds.max) {
-      chatIdOverride = entityChatIds.max;
-      dbg("using UF_CRM_MAX_CHAT_ID", chatIdOverride);
+    const selLine = inst && inst.bitrixLine != null ? String(inst.bitrixLine) : null;
+    // TG/MAX chatId привязан к КОНКРЕТНОМУ аккаунту. chatId, добытый одним
+    // аккаунтом, нельзя слать с другого — целевой аккаунт этого user_id «не
+    // знает» (Telethon "Could not find the input entity" → 500, кейс офисного
+    // Telegram линии 204 против основного 178). Приоритет — chatId ЭТОЙ же линии
+    // (из IMOPENLINES_SESSION), UF-поле берём только если у провайдера один
+    // аккаунт и chatId не засвечен под другой линией.
+    function providerCount(p) {
+      var n = 0; for (var id in INSTANCE_BY_ID) {
+        if ((INSTANCE_BY_ID[id].provider || "wa").toLowerCase() === p) n++;
+      } return n;
+    }
+    function safeChatIdForLine(ufChatId, provider) {
+      var lineScoped = selLine ? MAX_CHATS_BY_LINE[selLine] : null;
+      if (lineScoped) return lineScoped;                 // подтверждён этот аккаунт
+      if (!ufChatId) return null;
+      if (providerCount(provider) > 1) return null;      // >1 аккаунта — не рисковать чужим id
+      for (var ln in MAX_CHATS_BY_LINE) {                // засвечен под другой линией → чужой
+        if (ln !== selLine && MAX_CHATS_BY_LINE[ln] === ufChatId) return null;
+      }
+      return ufChatId;                                   // единственный аккаунт → UF безопасен
+    }
+    if (instProvider === "telegram") {
+      chatIdOverride = safeChatIdForLine(entityChatIds.telegram, "telegram");
+      if (chatIdOverride) dbg("using TG chatId (line " + selLine + ")", chatIdOverride);
+      else if (entityChatIds.telegram) dbg("skip TG UF chatId — другой аккаунт, резолвим заново", { uf: entityChatIds.telegram, selLine: selLine });
+    } else if (instProvider === "max") {
+      chatIdOverride = safeChatIdForLine(entityChatIds.max, "max");
+      if (chatIdOverride) dbg("using MAX chatId (line " + selLine + ")", chatIdOverride);
+      else if (entityChatIds.max) dbg("skip MAX UF chatId — другой аккаунт, резолвим заново", { uf: entityChatIds.max, selLine: selLine });
     } else if (instProvider === "instagram" && entityChatIds.instagram) {
       chatIdOverride = entityChatIds.instagram;
       dbg("using UF_CRM_IG_CHAT_ID", chatIdOverride);
-    } else if (inst && instProvider !== "wa" && instProvider !== "instagram" && inst.bitrixLine != null) {
-      const known = MAX_CHATS_BY_LINE[String(inst.bitrixLine)];
-      if (known) {
-        chatIdOverride = known;
-        dbg("using existing chatId from activities", known);
-      }
     }
     if (!text) {
       showStatus("Введите текст сообщения", false);
