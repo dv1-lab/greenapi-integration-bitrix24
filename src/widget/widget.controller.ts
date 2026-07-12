@@ -206,7 +206,7 @@ export class WidgetController {
 	@Post("send")
 	async send(
 		@Req() req: Request,
-		@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string; entityType?: string; entityId?: string },
+		@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string; entityType?: string; entityId?: string; clientName?: string },
 	) {
 		assertWidgetAuth(req, body, this.config);
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
@@ -439,9 +439,14 @@ export class WidgetController {
 		// лида и подпись chat-user'а были читаемые («Олег - Telegram 79584983354»
 		// вместо «396522892 - …»). mirrorToBitrix требует name без пробелов —
 		// берём только NAME (LAST_NAME проставит backfill через crm.lead.update).
-		const displayNameForMirror = resolvedContactName && !/\s/.test(resolvedContactName)
+		// Имя клиента из карточки (fallback, когда контакт не резолвится —
+		// холодный лид). Иначе имя диалога = chatId («161220770»). Первое слово
+		// без пробелов: B24 иначе делит по пробелу на NAME/LAST_NAME.
+		const clientNameFromCard = (body.clientName || "")
+			.replace(/[<>&"']/g, "").trim().split(/\s+/)[0] || "";
+		const displayNameForMirror = (resolvedContactName && !/\s/.test(resolvedContactName))
 			? resolvedContactName
-			: undefined;
+			: (clientNameFromCard || undefined);
 
 		const mirrored = await this.mirrorToBitrix(
 			mirrorKey, text, idMessage,
@@ -1289,6 +1294,9 @@ const B24_AUTH = ${authJs};
       if (res.error()) { dbg(method + " error", res.error_description()); loadPrefAndRender(); return; }
       const data = res.data() || {};
       dbg(method + ".PHONE", data.PHONE);
+      // Имя клиента из карточки → имя диалога open-line (иначе B24 покажет chatId).
+      // У сделки NAME нет (есть TITLE) — для неё имя добираем из контакта ниже.
+      if (entityCtx) entityCtx.name = (data.NAME || "").toString().trim();
       collectPhonesFromCrmRow(data, ENTITY_TYPE === "LEAD" ? "лид" : ENTITY_TYPE === "DEAL" ? "сделка" : "контакт");
       collectUsernames(data);
       dbg("UF usernames", entityUsernames);
@@ -1300,6 +1308,7 @@ const B24_AUTH = ${authJs};
           if (r2.error()) { dbg("contact error", r2.error_description()); loadPrefAndRender(); applyUsernameFromUf(); return; }
           const d2 = r2.data() || {};
           dbg("contact.PHONE", d2.PHONE);
+          if (entityCtx && (d2.NAME || "").toString().trim()) entityCtx.name = (d2.NAME || "").toString().trim();
           collectPhonesFromCrmRow(d2, "контакт");
           collectUsernames(d2);
           loadPrefAndRender();
@@ -1425,6 +1434,7 @@ const B24_AUTH = ${authJs};
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone, text, idInstance, chatIdOverride, usernameOverride,
           entityType: entityCtx && entityCtx.type, entityId: entityCtx && entityCtx.id,
+          clientName: entityCtx && entityCtx.name,
           authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
