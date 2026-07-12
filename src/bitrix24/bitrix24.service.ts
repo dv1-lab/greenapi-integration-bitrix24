@@ -1141,6 +1141,44 @@ export class Bitrix24Service extends BaseAdapter<
 		}
 	}
 
+	/** Пишет резолвнутый chatId мессенджера в UF_CRM_{TG|MAX|IG}_CHAT_ID той CRM-сущности
+	 *  (лид/сделка/контакт), из которой оператор жмёт «написать первым». Даёт дедупу
+	 *  по UF точку привязки: для холодного ЛИДА без контакта B24 иначе плодит несвязанный
+	 *  дубль — phone в TG/MAX privacy не отдаётся, а chatId знаем только мы. Пишем лишь
+	 *  в пустое поле, не затирая существующее (защита от подмены чужого chatId). */
+	async writeChatIdToEntity(
+		portalDomain: string,
+		entityType: string,   // "LEAD" | "DEAL" | "CONTACT"
+		entityId: number,
+		channelLabel: string, // "Telegram" | "MAX" | "Instagram"
+		chatId: string,
+	): Promise<void> {
+		const ufMap: Record<string, string> = {
+			"Telegram": "UF_CRM_TG_CHAT_ID",
+			"MAX": "UF_CRM_MAX_CHAT_ID",
+			"Instagram": "UF_CRM_IG_CHAT_ID",
+		};
+		const uf = ufMap[channelLabel];
+		if (!uf || !chatId || !entityId) return;
+		const getMethod = entityType === "CONTACT" ? "crm.contact.get"
+			: entityType === "DEAL" ? "crm.deal.get" : "crm.lead.get";
+		const updateMethod = entityType === "CONTACT" ? "crm.contact.update"
+			: entityType === "DEAL" ? "crm.deal.update" : "crm.lead.update";
+		try {
+			const cur: any = await this.callBitrix24Method(portalDomain, getMethod, { id: entityId });
+			const existing = cur && cur[uf] ? String(cur[uf]) : "";
+			if (existing === chatId) return;                    // уже стоит
+			if (existing && existing !== chatId) {              // конфликт — не затираем
+				this.logger.warn(`writeChatIdToEntity: ${entityType} ${entityId} ${uf} уже = ${existing}, новый ${chatId} — пропуск`);
+				return;
+			}
+			await this.callBitrix24Method(portalDomain, updateMethod, { id: entityId, fields: { [uf]: chatId } });
+			this.logger.info(`writeChatIdToEntity: ${entityType} ${entityId} ${uf} = ${chatId}`);
+		} catch (e: any) {
+			this.logger.warn(`writeChatIdToEntity failed (${entityType} ${entityId}): ${e?.message || e}`);
+		}
+	}
+
 	/**
 	 * Ищет открытую CRM-сущность у контакта: сначала открытую сделку
 	 * (CLOSED=N), потом открытый лид (статус не F/S). Используется в widget

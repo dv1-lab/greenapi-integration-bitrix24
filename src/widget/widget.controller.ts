@@ -206,7 +206,7 @@ export class WidgetController {
 	@Post("send")
 	async send(
 		@Req() req: Request,
-		@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string },
+		@Body() body: { phone?: string; text?: string; authId?: string; domain?: string; idInstance?: string; chatIdOverride?: string; usernameOverride?: string; entityType?: string; entityId?: string },
 	) {
 		assertWidgetAuth(req, body, this.config);
 		const phone = (body.phone || "").replace(/[^\d]/g, "");
@@ -423,6 +423,18 @@ export class WidgetController {
 			}
 		}
 
+		// Исходная CRM-сущность из placement (откуда оператор жмёт «написать первым»).
+		// Для холодного ЛИДА/сделки без контакта именно она — цель привязки: B24
+		// матчить нечем (phone в TG/MAX privacy не отдаётся, chatId знаем только мы),
+		// поэтому imconnector-дубль вяжем прямо к ней. Приоритет у явной сущности из
+		// карточки над найденной по контакту — оператор жмёт именно из неё.
+		let placementEntity: { kind: "deal" | "lead"; id: number } | null = null;
+		if ((body.entityType === "LEAD" || body.entityType === "DEAL") && body.entityId) {
+			const eid = parseInt(body.entityId, 10);
+			if (eid) placementEntity = { kind: body.entityType === "DEAL" ? "deal" : "lead", id: eid };
+		}
+		const effectiveOpenEntity = placementEntity || openEntity;
+
 		// displayName для mirror: имя из карточки контакта, чтобы TITLE свежего
 		// лида и подпись chat-user'а были читаемые («Олег - Telegram 79584983354»
 		// вместо «396522892 - …»). mirrorToBitrix требует name без пробелов —
@@ -442,26 +454,38 @@ export class WidgetController {
 			? mirrored.chatId
 			: undefined;
 
+		// Пишем резолвнутый chatId в UF исходной CRM-сущности (откуда жмут «написать
+		// первым»), чтобы дедуп по UF привязал эту и будущие open-line к ней, а не
+		// плодил дубль. Только TG/MAX (chatIdForUf), асинхронно — оператор не ждёт.
+		if (chatIdForUf && body.entityType && body.entityId && inst.user?.portalDomain) {
+			const entityIdNum = parseInt(body.entityId, 10);
+			if (entityIdNum) {
+				this.bitrix24.writeChatIdToEntity(
+					inst.user.portalDomain, body.entityType, entityIdNum, channelLabel, chatIdForUf,
+				).catch((e: any) => this.logger.warn(`[widget] writeChatIdToEntity failed: ${e?.message || e}`));
+			}
+		}
+
 		// Timeline-comment в открытую сделку/лид — отдельно от backfill,
 		// потому что в open entity мы пишем сразу, не дожидаясь пока B24
 		// создаст imconnector-лид (это 0-15с).
-		if (openEntity && inst.user?.portalDomain) {
+		if (effectiveOpenEntity && inst.user?.portalDomain) {
 			const commentText =
 				`📩 Отправлено в ${channelLabel}:\n${text}` +
 				(idMessage ? `\n\n[green-api ${idMessage}]` : "");
 			this.bitrix24.addTimelineComment(
-				inst.user.portalDomain, openEntity.kind, openEntity.id, commentText,
+				inst.user.portalDomain, effectiveOpenEntity.kind, effectiveOpenEntity.id, commentText,
 			).catch((e: any) => {
 				this.logger.warn(`[widget] addTimelineComment failed (non-fatal): ${e?.message || e}`);
 			});
 		}
 
 		// Backfill свежесозданного imconnector-лида. Асинхронно — оператор не ждёт.
-		// Запускается только если нашли контакт; иначе лид остаётся несвязанным
-		// (B24 сам предложит дедуп при следующем редактировании).
-		// Когда openEntity задан — backfill закроет лид как «Дубликат» с
-		// UF_CRM_LEAD_ID на открытую сущность вместо обычной привязки.
-		if (resolvedContactId && lineForMirror && inst.user?.portalDomain) {
+		// Запускается если нашли контакт ИЛИ есть исходная сущность из placement
+		// (холодный лид без контакта — тогда backfill свяжет дубль с этим лидом).
+		// Когда effectiveOpenEntity задан — backfill закроет лид как «Дубликат» с
+		// UF_CRM_LEAD_ID на исходную сущность вместо обычной привязки к контакту.
+		if ((resolvedContactId || placementEntity) && lineForMirror && inst.user?.portalDomain) {
 			const userKey = provider === "wa"
 				? `wa_${mirrorKey}`
 				: `sc_${mirrorKey}`;
@@ -475,7 +499,7 @@ export class WidgetController {
 				contactLastName: resolvedContactLastName,
 				channelLabel,
 				displayNameInMirror: displayNameForMirror,
-				openEntity: openEntity || undefined,
+				openEntity: effectiveOpenEntity || undefined,
 			}).catch((e: any) => {
 				this.logger.warn(`[widget] backfillSendLead failed (non-fatal): ${e?.message || e}`);
 			});
@@ -1386,7 +1410,9 @@ const B24_AUTH = ${authJs};
       const r = await fetch("/widget/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, text, idInstance, chatIdOverride, usernameOverride, authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
+        body: JSON.stringify({ phone, text, idInstance, chatIdOverride, usernameOverride,
+          entityType: entityCtx && entityCtx.type, entityId: entityCtx && entityCtx.id,
+          authId: B24_AUTH.authId, domain: B24_AUTH.domain }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
