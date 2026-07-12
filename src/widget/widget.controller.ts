@@ -447,6 +447,10 @@ export class WidgetController {
 			mirrorKey, text, idMessage,
 			body.authId, body.domain, lineForMirror, provider,
 			displayNameForMirror,
+			// Реальный телефон из карточки лида → B24 привяжет open-line к
+			// исходному лиду по номеру (как WA), без дубля. Пусто → payload без
+			// phone, работает старый путь (backfill пометит дубль как раньше).
+			phoneE164 || undefined,
 		);
 		// Извлекаем chatId open-line диалога из ответа B24 (DATA.RESULT[0].session.CHAT_ID).
 		// Используется в autoTakeSession как fast-path вместо retry-loop по im.recent.list.
@@ -812,6 +816,7 @@ export class WidgetController {
 		authId?: string, domain?: string, lineOverride?: number,
 		provider: string = "wa",
 		displayNameOverride?: string,
+		phoneOverride?: string,
 	): Promise<boolean | string | { ok: true; chatId?: number; sessionId?: number }> {
 		const line = lineOverride ?? Number(this.config.get<string>("BITRIX_LINE_ID"));
 		if (!line) return false; // нет линии — пропускаем
@@ -820,6 +825,14 @@ export class WidgetController {
 		// Для MAX/Telegram idKey = chatId (внутренний user_id), телефона нет.
 		const isPhoneLike = provider === "wa" && /^\d{10,15}$/.test(idKey);
 		const phoneE164 = isPhoneLike ? `+${idKey}` : null;
+		// Телефон в user.phone payload'а. WA — из idKey. MAX/Telegram — из
+		// phoneOverride (реальный номер из карточки лида при «написать первым»):
+		// даёт B24 привязать сессию к исходному лиду по номеру штатным дедупом
+		// (CRM_CHAT_TRACKER=Y), как у WhatsApp, вместо создания лида-дубля. idKey
+		// у MAX/TG — chatId, в user.phone его класть нельзя (мусорный «телефон»),
+		// поэтому берём только валидный E.164 из override.
+		const phoneForPayload = phoneE164
+			?? (phoneOverride && /^\+\d{10,15}$/.test(phoneOverride) ? phoneOverride : null);
 		// Префикс должен совпадать с тем что adapter ставит при входящих:
 		//   WA → wa_ (там идентификатор реально телефон).
 		//   MAX и Telegram → sc_. Раньше Telegram использовал wa_ для legacy
@@ -854,7 +867,7 @@ export class WidgetController {
 					? `IG ${igClientId}`
 					: idKey);
 		const userBlock: any = { id: userKey, name: displayName };
-		if (phoneE164) userBlock.phone = phoneE164;
+		if (phoneForPayload) userBlock.phone = phoneForPayload;
 		const payload = {
 			CONNECTOR: "social_connector",
 			LINE: Number(line),
