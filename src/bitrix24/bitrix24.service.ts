@@ -1691,9 +1691,15 @@ export class Bitrix24Service extends BaseAdapter<
 		// `backfillSendLead` решает ту же проблему, но только для widget-пути.
 		// Здесь — приземляем orphan через ONCRMLEADADD. Errors внутри не должны
 		// сорвать дальнейший Customer-360 sync.
+		// Чат orphan-лида из linker'а — идёт в resolveAlias-каскад ниже, чтобы
+		// TG/MAX-лид без телефона сел на клиента переписки, а не на двойника.
+		let orphanChat: { channel: string; chatId: string } | null = null;
 		if (entity === "lead" && action === "added") {
 			try {
-				await this._maybeLinkOrphanLead(portalDomain, entityId, snap);
+				const linkRes = await this._maybeLinkOrphanLead(portalDomain, entityId, snap);
+				if (linkRes?.chatId && linkRes?.chatChannel) {
+					orphanChat = { channel: linkRes.chatChannel, chatId: linkRes.chatId };
+				}
 			} catch (e: any) {
 				this.logger.warn(`orphan-link lead ${entityId} failed: ${e?.message || e}`);
 			}
@@ -1720,10 +1726,23 @@ export class Bitrix24Service extends BaseAdapter<
 		// по ig_client — тогда B24 IG-лид садится на того же клиента Customer-360,
 		// что и события IG-сообщений из handleI2crm* (единая личность канала).
 		const igChatId = String(snap.UF_CRM_IG_CHAT_ID || "").trim();
+		// TG/MAX-лиды без телефона (open-line от Wappi/SC-коннектора): резолвим
+		// по chat id — из UF_CRM_TG/MAX_CHAT_ID, а если UF пуст (свежий orphan) —
+		// из распарсенного linker'ом чата. Иначе лид падал на b24_lead-alias и
+		// в Customer-360 появлялся клиент-двойник без переписки (разбор 16.07.2026,
+		// ADR 2026-07-17-lead-resolve-by-chat-id).
+		const tgChatId =
+			String(snap.UF_CRM_TG_CHAT_ID || "").trim() ||
+			(orphanChat?.channel === "Telegram" ? orphanChat.chatId : "");
+		const maxChatId =
+			String(snap.UF_CRM_MAX_CHAT_ID || "").trim() ||
+			(orphanChat?.channel === "MAX" ? orphanChat.chatId : "");
 		let resolveAlias: { type: string; value: string } | null = null;
 		if (phone) resolveAlias = { type: "phone", value: phone };
 		else if (email) resolveAlias = { type: "email", value: email };
 		else if (igChatId) resolveAlias = { type: "ig_client", value: igChatId };
+		else if (tgChatId) resolveAlias = { type: "tg_user", value: tgChatId };
+		else if (maxChatId) resolveAlias = { type: "max_chat", value: maxChatId };
 		else if (entity === "lead") resolveAlias = { type: "b24_lead", value: String(entityId) };
 		else if (entity === "contact") resolveAlias = { type: "b24_contact", value: String(entityId) };
 		else if (entity === "deal") {
@@ -3299,7 +3318,20 @@ export class Bitrix24Service extends BaseAdapter<
 		portalDomain: string,
 		leadId: number,
 		snap: any,
-	): Promise<{ linked: boolean; reason?: string; contactId?: number; openEntity?: { kind: "deal" | "lead"; id: number } }> {
+	): Promise<{
+		linked: boolean;
+		reason?: string;
+		contactId?: number;
+		openEntity?: { kind: "deal" | "lead"; id: number };
+		// Распарсенный чат orphan-лида (TITLE или activity). Возвращаем всегда,
+		// когда удалось распарсить — даже при linked=false: handleB24CrmEvent
+		// использует его для resolveAlias (tg_user/max_chat), чтобы лид сел на
+		// ТОГО ЖЕ клиента Customer-360, что и переписка bridge_tg/bridge_max.
+		// Без этого лид без телефона падал на b24_lead-alias → клиент-двойник
+		// (кейс лида #364682, разбор 16.07.2026).
+		chatChannel?: string;
+		chatId?: string;
+	}> {
 		const hasContact = snap?.CONTACT_ID && Number(snap.CONTACT_ID) > 0;
 		const hasChatIdUf = ["UF_CRM_TG_CHAT_ID", "UF_CRM_MAX_CHAT_ID", "UF_CRM_IG_CHAT_ID"]
 			.some((f) => String(snap?.[f] || "").trim());
@@ -3427,7 +3459,7 @@ export class Bitrix24Service extends BaseAdapter<
 			this.logger.info(
 				`orphan-link lead=${leadId} channel=${channelLabel} chatId=${chatId} phone=${phoneFromTitle || "—"}: no existing contact, leaving as new client`,
 			);
-			return { linked: false, reason: "no existing contact" };
+			return { linked: false, reason: "no existing contact", chatChannel: channelLabel, chatId };
 		}
 
 		const contactId = Number(contact.ID);
@@ -3478,7 +3510,7 @@ export class Bitrix24Service extends BaseAdapter<
 		this.logger.info(
 			`orphan-link lead=${leadId} channel=${channelLabel} chatId=${chatId} → ${action} (${Object.keys(updateFields).join(",")})`,
 		);
-		return { linked: true, contactId, openEntity: openEntity || undefined };
+		return { linked: true, contactId, openEntity: openEntity || undefined, chatChannel: channelLabel, chatId };
 	}
 
 	// ===== ONCRMLEADCONVERT propagator (task #69) =========================

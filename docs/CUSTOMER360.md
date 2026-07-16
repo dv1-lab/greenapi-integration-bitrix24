@@ -56,6 +56,10 @@ Adapter — это NestJS-сервис на my-server (`/home/dv/greenapi-b24/`,
 Особенности:
 - Для **contact** проверяет `NAME || LAST_NAME` непусто — иначе skip (B24 валидирует обязательность). Лиды имеют TITLE, валидации нет.
 - Fallback на email если нет phone, потом `b24_lead`/`b24_contact` alias.
+  В `handleB24CrmEvent` каскад шире: phone → email → `ig_client`
+  (UF_CRM_IG_CHAT_ID) → `tg_user` (UF_CRM_TG_CHAT_ID или чат orphan-linker'а)
+  → `max_chat` (UF_CRM_MAX_CHAT_ID или linker) → `b24_lead`/`b24_contact`.
+  См. ADR `2026-07-17-lead-resolve-by-chat-id`.
 - После find_or_create добавляет b24_* alias к customer'у.
 
 ### `registerB24CrmEvents(handlerBaseUrl)`
