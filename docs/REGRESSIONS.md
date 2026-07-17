@@ -8,6 +8,17 @@
 
 ---
 
+## 2026-07-17 · TG/MAX-лид без телефона создавал клиента-двойника в Customer-360 (лид и переписка врозь)
+
+- **Симптом:** в карточке клиента дашборда у TG-клиента «Нет связанных сущностей B24», хотя лид в B24 создан в момент его сообщения (кейс лида #364682). Переписка на одном customer-uuid, лид — на другом.
+- **Корень:** резолв-каскад `handleB24CrmEvent` (ONCRMLEADADD): phone → email → ig_client → **b24_lead**. У open-line-лида TG/MAX нет телефона/почты → падал на `b24_lead`-alias → customer-service создавал НОВОГО клиента. При этом orphan-linker УЖЕ извлекал chatId клиента (TITLE/activity) — но использовал его только для поиска B24-контакта. Для IG связка была (UF_CRM_IG_CHAT_ID→ig_client), TG/MAX пропущены.
+- **Фикс (sha `2c40dac` + ADR `2026-07-17-lead-resolve-by-chat-id`):** каскад расширен `…→ tg_user → max_chat → b24_lead`; источники — `snap.UF_CRM_TG/MAX_CHAT_ID`, а при пустых UF — `chatChannel/chatId` из `_maybeLinkOrphanLead` (теперь возвращает их во всех ветках удачного парса, в т.ч. `no existing contact`).
+- **Затронуто:** `bitrix24.service.ts` (handleB24CrmEvent, _maybeLinkOrphanLead), docs/CUSTOMER360.md.
+- **Данные:** старые пары-огрызки merge'ем (лид #364682 склеен 17.07, merge id 13985). Массовый бэкфилл-линкер старых огрызков — в backlog.
+- **Не повторять:** при добавлении нового канала/UF-поля проверять ВЕСЬ каскад резолва Customer-360, а не только open-line-путь; alias-значения должны совпадать с теми, что шлёт wa-tg-bridge (`tg_user=<user_id>`, `max_chat=<chat_id>`), иначе — двойники.
+
+---
+
 ## 2026-07-12 (вечер) · Write-first: чат в исходном лиде без дубля (phone-dedup) + офисный TG cross-account — РЕШЕНО
 
 > Продолжение записи ниже (`b9e56a9` «ЧАСТИЧНО»). После research выяснен механизм и достигнута цель Дмитрия («чат В исходном лиде, без дубля»).
