@@ -20,9 +20,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup pnpm
+        # Версию берём из packageManager в package.json (pnpm@10.33.2).
+        # Дублировать её здесь нельзя: action падает на «Multiple versions of pnpm specified».
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node
         uses: actions/setup-node@v4
