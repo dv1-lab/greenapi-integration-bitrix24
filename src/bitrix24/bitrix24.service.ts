@@ -2493,9 +2493,9 @@ export class Bitrix24Service extends BaseAdapter<
 		} else if (mtype === "extendedTextMessage") {
 			text = String(messageData?.extendedTextMessageData?.text || "");
 		} else {
-			// Медиа: фасад прислал downloadUrl на facade-os. B24-облако facade-os не
-			// тянет (IP-фильтр) → скачиваем сами и переотдаём через social.9wb.ru,
-			// как Фикс B для входящих.
+			// Медиа: фасад прислал downloadUrl на свой домен (facade-os.9wb.ru или
+			// api.omnisocial.ru). B24-облако их не тянет (IP-фильтр) → скачиваем сами
+			// и переотдаём через social.9wb.ru, как Фикс B для входящих.
 			const fdata = messageData?.fileMessageData || {};
 			text = String(fdata.caption || "");
 			const dl = String(fdata.downloadUrl || "");
@@ -2503,7 +2503,7 @@ export class Bitrix24Service extends BaseAdapter<
 			if (dl) {
 				let fileUrl = dl;
 				const appUrl = (this.configService.get<string>("APP_URL") || "").replace(/\/+$/, "");
-				if (/facade-os\.9wb\.ru\//i.test(dl) && appUrl) {
+				if (/(facade-os\.9wb\.ru|api\.omnisocial\.ru)\//i.test(dl) && appUrl) {
 					try {
 						const resp = await axios.get(dl, {
 							responseType: "arraybuffer", timeout: 25000, maxContentLength: 50 * 1024 * 1024,
@@ -4097,7 +4097,7 @@ export class Bitrix24Service extends BaseAdapter<
 					// (<shard>.api.green-api.com/download/...) — висит ~20 c и
 					// отвечает «Переданы не все необходимые данные». Скачиваем файл
 					// сами и отдаём B24 ссылку через social.9wb.ru (его B24 тянет).
-					if (url && (/\.api\.green-api\.com\//i.test(url) || /facade-os\.9wb\.ru\//i.test(url)) && appUrl) {
+					if (url && (/\.api\.green-api\.com\//i.test(url) || /(facade-os\.9wb\.ru|api\.omnisocial\.ru)\//i.test(url)) && appUrl) {
 						try {
 							const resp = await axios.get(url, {
 								responseType: "arraybuffer",
