@@ -503,8 +503,8 @@ graph LR
 ## 📚 Связано
 
 - `prisma/schema.prisma` — adapter (этот репо)
-- `~/claude_code/pervyi-begovoy/services/customer-service/prisma/schema.prisma`
-- `~/claude_code/pervyi-begovoy/services/customer-service/clickhouse/001_customer_events.sql`
+- `~/claude_code/1begovoy/pervyi-begovoy/services/customer-service/prisma/schema.prisma`
+- `~/claude_code/1begovoy/pervyi-begovoy/services/customer-service/clickhouse/001_customer_events.sql`
 - `CUSTOMER360.md` — flow событий
 - `ARCHITECTURE.md §7.5` — формат заголовков карточек клиентов
 - `GLOSSARY.md` — точное значение терминов «customer» / «лид» / «alias»
