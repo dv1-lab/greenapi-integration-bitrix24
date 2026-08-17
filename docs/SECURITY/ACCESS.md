@@ -94,7 +94,7 @@ backup-person для критичной категории (🔴).
 ## Связано
 
 - `decisions/2026-05-26-access-matrix-spof-mitigation.md` — ADR
-- `~/claude_code/server-ubuntu-setup/SECRETS.md` — авторитетный список
+- `~/claude_code/infra/server-ubuntu-setup/SECRETS.md` — авторитетный список
   секретов (что лежит, где master, какой chmod)
 - `RUNBOOKS/secret-leak-recovery.md` — что делать при утечке
 - `RUNBOOKS/incident-response.md` — incident response (включает

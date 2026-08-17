@@ -16,7 +16,7 @@
 
 ```bash
 # С мака — нужный файл
-scp /Users/Dmitry/claude_code/pervyi-begovoy/bots/wa-tg-bridge/src/wa_tg_bridge/<file>.py \
+scp /Users/Dmitry/claude_code/1begovoy/pervyi-begovoy/bots/wa-tg-bridge/src/wa_tg_bridge/<file>.py \
     my-server:/home/dv/wa-tg-bridge/src/wa_tg_bridge/<file>.py
 
 ssh my-server "sudo systemctl restart wa-tg-bridge"
@@ -24,7 +24,7 @@ ssh my-server "sudo systemctl restart wa-tg-bridge"
 
 Или весь модуль:
 ```bash
-rsync -avz /Users/Dmitry/claude_code/pervyi-begovoy/bots/wa-tg-bridge/src/ \
+rsync -avz /Users/Dmitry/claude_code/1begovoy/pervyi-begovoy/bots/wa-tg-bridge/src/ \
   my-server:/home/dv/wa-tg-bridge/src/
 ssh my-server "sudo systemctl restart wa-tg-bridge"
 ```

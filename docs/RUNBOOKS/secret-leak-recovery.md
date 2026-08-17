@@ -129,5 +129,5 @@ curl "<OLD_WEBHOOK_URL>crm.lead.list" -d "filter[]=1"
 
 - `RUNBOOKS/rotate-greenapi-token.md`
 - `RUNBOOKS/incident-response.md`
-- `~/claude_code/server-ubuntu-setup/SECRETS.md` — авторитетный список
+- `~/claude_code/infra/server-ubuntu-setup/SECRETS.md` — авторитетный список
 - Глобальный `~/.claude/CLAUDE.md §7. Секреты` — правила

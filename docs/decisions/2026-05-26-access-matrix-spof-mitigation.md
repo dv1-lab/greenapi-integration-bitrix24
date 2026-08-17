@@ -128,6 +128,6 @@ backup-person:
 ## Связано
 
 - `SECURITY/ACCESS.md` — access matrix
-- `~/claude_code/server-ubuntu-setup/SECRETS.md` — инвентарь секретов
+- `~/claude_code/infra/server-ubuntu-setup/SECRETS.md` — инвентарь секретов
 - `RUNBOOKS/incident-response.md` — куда backup-person смотрит при инциденте
 - `RUNBOOKS/secret-leak-recovery.md` — что делать при утечке
