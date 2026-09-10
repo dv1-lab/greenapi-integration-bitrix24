@@ -1377,6 +1377,10 @@ export class Bitrix24Service extends BaseAdapter<
 		postUrl?: string;
 		mediaId?: string;
 		commentId?: string;
+		// Кто отправил (только для direction="out"): портал и id оператора B24.
+		// Имя резолвим здесь, а не у вызывающего, — эмиттер и так фоновый.
+		portalDomain?: string;
+		operatorUserId?: string;
 	}): Promise<void> {
 		const fc = await this._csFindOrCreate("ig_client", opts.clientId, "adapter-ig");
 		const payload: Record<string, any> = {
@@ -1410,6 +1414,15 @@ export class Bitrix24Service extends BaseAdapter<
 			summary: (opts.text || "").slice(0, 300) || "(вложение)",
 			payload,
 		};
+		// Кто ответил. Без этого лента Customer-360 показывала все исходящие
+		// Instagram безымянными (замер 11.09.2026 — 478 сообщений за пять дней
+		// и ни одного с оператором), и владелец не мог понять, кто из менеджеров
+		// разговаривал с клиентом. У WhatsApp имя приходит подсказкой в мост,
+		// здесь тот же портал под рукой — резолвим напрямую.
+		if (opts.direction === "out" && opts.portalDomain && opts.operatorUserId) {
+			const who = await this.getOperatorName(opts.portalDomain, opts.operatorUserId);
+			if (who) body.operator = `${who} · из Bitrix24`;
+		}
 		if (fc?.uuid) {
 			body.customerUuid = fc.uuid;
 			if (opts.username) {
@@ -6568,6 +6581,8 @@ export class Bitrix24Service extends BaseAdapter<
 			messageId: externalMessageId ? String(externalMessageId) : undefined,
 			mediaId: baseBody.media ? String(baseBody.media) : undefined,
 			commentId: baseBody.comment ? String(baseBody.comment) : undefined,
+			portalDomain: webhook.auth?.domain,
+			operatorUserId: m?.message?.user_id ? String(m.message.user_id) : undefined,
 		});
 		// Customer-360: delivery_status=sent сразу после успешного target/feedback.
 		// IG (через i2crm) не присылает webhook delivery confirmation для нашего
