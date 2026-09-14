@@ -1,55 +1,26 @@
-# Stage 1: Donor для node_modules (включая Prisma engines из pnpm-store).
-# Когда binaries.prisma.sh + registry.npmjs.org недоступны с my-server
-# (см. REGRESSIONS 26.05.2026) — берём весь готовый `/app/node_modules`
-# из последнего успешно собранного image. Валидно пока не менялись
-# `package.json` + `pnpm-lock.yaml` (deps не добавлялись).
-# Если donor отсутствует (первый build на новом сервере) — Docker откатится
-# на пересборку с нуля через `pnpm install` (требует доступ к npm + Prisma CDN).
-FROM source-adapter:latest AS deps-donor
-
-# Stage 2: Основной build.
-# Используем Google зеркало Docker Hub вместо прямого `node:20-alpine`.
-# Причина (26.05.2026, см. REGRESSIONS): прямые запросы к registry-1.docker.io
-# с my-server (Стокгольм) периодически дают TLS handshake timeout / ECONNRESET —
-# либо у hip.hosting проблемы с маршрутизацией к Cloudflare CDN, либо
-# transient проблема Docker Hub. mirror.gcr.io — Google public pull-through
-# cache, тянет тот же образ что и Docker Hub, работает стабильнее.
-# Если когда-нибудь будет нужен оригинал — заменить на `node:20-alpine`.
+# Коннектор Битрикс24 (NestJS + Prisma + MySQL) — сборка с нуля.
+# Годится для любого сервера, в том числе при восстановлении на новом.
+# Быстрый вариант из готового образа на уже работающем сервере — Dockerfile.donor.
+#
+# Зеркало Google вместо прямого Docker Hub: с наших серверов Docker Hub временами
+# отвечает TLS handshake timeout (REGRESSIONS 26.05.2026).
 FROM mirror.gcr.io/library/node:20-alpine
 
-# pnpm@10 — pinned через packageManager в package.json.
-# pnpm 11+ имеет minimum-release-age=24h по умолчанию, ломает Docker builds
-# (см. memory feedback_pnpm_supply_chain_policy).
-RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
+# openssl нужен движку Prisma на alpine.
+# pnpm@10 закреплён: у pnpm 11+ minimum-release-age=24h ломает сборку.
+RUN apk add --no-cache openssl \
+    && corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 WORKDIR /app
 
-# Layer 1: manifest + lockfile (нужны для prisma migrate deploy в runtime).
 COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
-# Layer 2: весь node_modules из donor (включая Prisma engines в pnpm-store).
-# Это обходит и npm registry, и Prisma CDN. Если в `package.json` / lock
-# добавились новые deps — donor неактуальный, нужно fallback на `pnpm install`
-# (см. ниже комментарий про восстановление полноценной сборки).
-COPY --from=deps-donor /app/node_modules /app/node_modules
-
-# Layer 3: код
 COPY . .
-
-# `prisma generate` обязателен ПОСЛЕ COPY кода (включает свежую schema.prisma).
-# Если в schema добавлена новая model — donor `.prisma/client` не знает о ней
-# и runtime даст `Cannot read properties of undefined (reading 'findMany')`.
-# Engines берутся локально из donor (`.pnpm/@prisma+engines@.../`), сеть
-# не используется. Retry-loop оставлен на случай если engines в donor
-# не подойдут и Prisma попробует docнать — тогда нужен binaries.prisma.sh.
-RUN for i in 1 2 3; do \
-        pnpm prisma generate && break || { \
-            echo "prisma generate attempt $i failed, retry in $((i*15))s..."; \
-            sleep $((i*15)); \
-        }; \
-    done && pnpm run build
+# prisma generate — после COPY кода: нужна свежая schema.prisma.
+RUN pnpm prisma generate && pnpm run build
 
 EXPOSE 3000
 
-# Prisma migrate deploy + production start
+# Миграции базы при каждом старте (идемпотентно), затем запуск.
 CMD pnpm prisma migrate deploy && pnpm run start:prod
