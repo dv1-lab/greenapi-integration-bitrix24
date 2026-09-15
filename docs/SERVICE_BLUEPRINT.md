@@ -5,7 +5,7 @@
 (`ARCHITECTURE.md`, `INSTAGRAM_FLOW.md`, `OPEN_LINE_LIFECYCLE.md` и т.д.) —
 здесь компактный recipe, без «почему так».
 
-Последнее обновление: 2026-06-24 (read-only/admin эндпоинты `/webhooks/internal/connector-{status,set-active}` для аудита/вывода коннекторов, sha 8f01bfe+192bfe1; wa_tg_bridge деактивирован на всех 5 линиях). Ранее 2026-06-16: Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET.
+Последнее обновление: 2026-09-15 (основной Dockerfile — сборка с нуля, быстрый вариант — Dockerfile.donor, sha a2a0074). Ранее 2026-06-24 (read-only/admin эндпоинты `/webhooks/internal/connector-{status,set-active}` для аудита/вывода коннекторов, sha 8f01bfe+192bfe1; wa_tg_bridge деактивирован на всех 5 линиях). Ранее 2026-06-16: Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET.
 
 ---
 
@@ -206,17 +206,22 @@ GreenAPI кабинеты, i2crm подключение, customer-service.
 - `/home/dv/greenapi-b24/docker-compose.override.yml` — production override (env_file, volumes, depends_on healthcheck)
 - `/home/dv/greenapi-b24/source/` — git repo `dv1-lab/greenapi-integration-bitrix24` (Dockerfile, src/, prisma/)
 
-**Dockerfile** (в `source/`):
+**Dockerfile** (в `source/`, с 15.09.2026, sha a2a0074) — сборка с нуля, годится для нового сервера:
 ```
-FROM node:20-alpine
+FROM mirror.gcr.io/library/node:20-alpine
+RUN apk add --no-cache openssl && corepack enable && corepack prepare pnpm@10.33.2 --activate
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY . .
-RUN npx prisma generate && npm run build
+RUN pnpm prisma generate && pnpm run build
 EXPOSE 3000
-CMD npx prisma migrate deploy && npm run start:prod
+CMD pnpm prisma migrate deploy && pnpm run start:prod
 ```
+**`Dockerfile.donor`** — быстрая сборка из готового образа `source-adapter:latest` (только на
+server-spb, где он есть; обходит npm и CDN Prisma, если они снова станут недоступны):
+`docker build -f Dockerfile.donor …`. До 15.09 это был основной Dockerfile — на новом сервере
+сборка падала на первой строке.
 
 **docker-compose.yml** (корень):
 ```yaml
