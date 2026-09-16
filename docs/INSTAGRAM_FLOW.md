@@ -351,10 +351,36 @@ Direct-линии для **всех**, кто пришёл с комментар
 | `Bitrix24Service.handleI2crmOutgoing` | исходящее из чата открытой линии B24 → i2crm (путь 6а); пометка `!` на Comment-линии → ответ в Direct (`replyAsDirect`) |
 | `WidgetController.send` (`/widget/send`) | роутинг; `idInstance="i2crm:*"` → `sendInstagramDirect` |
 | `WidgetController.sendInstagramDirect` | виджет → Instagram Direct (путь 6б) |
+| `Bitrix24Service.sendIgDirectExternal` | **путь 6в (16.09.2026)**: ответ из dv-dashboard мимо портала. Тот же POST `target/feedback`, плюс зеркало в линию 18 и своя эмиссия `message_out`. Вход — `/webhooks/internal/send-ig`, auth `X-Hint-Secret`. sha e26a670 |
 | `WidgetController.mirrorToBitrix` | imconnector.send.messages — создание сессии открытой линии |
 | `WidgetController.backfillNewDirectLead` | проставление UF_CRM_IG_* на лиде после Direct |
 | `I2crmTgMirrorService` | зеркало IG-сообщений в TG-группу |
 | модель `I2crmEventLog` (Prisma) | журнал входящих webhook'ов + replay |
+
+### Три пути исходящего в Direct
+
+| Путь | Кто инициирует | Через что |
+|---|---|---|
+| 6а | оператор в чате открытой линии B24 | `handleI2crmOutgoing` |
+| 6б | оператор в виджете портала | `WidgetController.sendInstagramDirect` |
+| 6в | менеджер в dv-dashboard | `sendIgDirectExternal` (портал в цепочке не участвует) |
+
+Путь 6в появился 16.09.2026 под выключение портала: открытая линия B24 была
+ЕДИНСТВЕННЫМ способом ответить в Instagram, а канал самый крупный — 8 001
+сообщение за полгода против 5 218 у WhatsApp. Входящие выключение переживут
+(i2crm стучится к нам напрямую), исходящие — нет.
+
+**Зеркало в линию 18 путь 6в делает, пока портал жив.** Пока часть менеджеров
+работает в Битриксе, ответ, которого там не видно, означает второй ответ тому
+же клиенту. `chat.id` строго `i2crm_ig_<client_id>` — как у входящих.
+
+**`message_out` путь 6в эмитит сам**: обычно это делает `handleI2crmOutgoing`,
+через который он не идёт. Без этого ответ не появился бы в переписке дашборда,
+и менеджер решил бы, что сообщение не ушло.
+
+**Чего пока нет:** `message_delivery_status` для пути 6в не пишется — такие
+сообщения будут числиться зависшими в мониторинге исходящих дашборда
+(`queries/outgoing-pending.ts`).
 
 ---
 

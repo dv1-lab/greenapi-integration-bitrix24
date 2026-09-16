@@ -5,7 +5,7 @@
 (`ARCHITECTURE.md`, `INSTAGRAM_FLOW.md`, `OPEN_LINE_LIFECYCLE.md` и т.д.) —
 здесь компактный recipe, без «почему так».
 
-Последнее обновление: 2026-09-15 (основной Dockerfile — сборка с нуля, быстрый вариант — Dockerfile.donor, sha a2a0074). Ранее 2026-06-24 (read-only/admin эндпоинты `/webhooks/internal/connector-{status,set-active}` для аудита/вывода коннекторов, sha 8f01bfe+192bfe1; wa_tg_bridge деактивирован на всех 5 линиях). Ранее 2026-06-16: Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET.
+Последнее обновление: 2026-09-16 (`/webhooks/internal/send-ig` — ответ клиенту в Instagram Direct мимо портала, для дашборда; sha e26a670). Ранее 2026-09-15 (основной Dockerfile — сборка с нуля, быстрый вариант — Dockerfile.donor, sha a2a0074). Ранее 2026-06-24 (read-only/admin эндпоинты `/webhooks/internal/connector-{status,set-active}` для аудита/вывода коннекторов, sha 8f01bfe+192bfe1; wa_tg_bridge деактивирован на всех 5 линиях). Ранее 2026-06-16: Я.Метрика ClientID для new-client лидов + backfill-эндпоинты `/webhooks/internal/{backfill,set}-ya-cid`, sha f7a78f5+; ротирован BRIDGE_HINT_SECRET.
 
 ---
 
@@ -301,6 +301,7 @@ Restic → Я.Диск ежедневно 04:00 UTC.
 | `/webhooks/telegram` | POST | TG Bot updates @begovoy_bot |
 | `/webhooks/telegram-support` | POST | то же для @begovoy1support_bot |
 | `/webhooks/internal/i2crm-replay` | POST | manual replay pending событий из I2crmEventLog |
+| `/webhooks/internal/send-ig` | POST | ответ клиенту в IG Direct БЕЗ портала — для dv-dashboard. body: {clientId (числовой), text, operatorLabel, username?, dryRun?}. Auth `X-Hint-Secret`; **пустой секрет в env эндпоинт не открывает** (в отличие от i2crm-replay: там безобидно, здесь отправка клиентам). Шлёт в i2crm, зеркалит в линию 18 с `chat.id = i2crm_ig_<client_id>`, сам эмитит message_out с подписью «<имя> · из дашборда». sha e26a670 |
 | `/webhooks/internal/refresh-tg-bot-pinned` | POST | пересоздать pinned-карточку клиента в TG-зеркале |
 | `/webhooks/internal/backfill-ya-cid` | POST | разовый backfill UF_CRM_YA_CID из истории чатов (body: lineIds, sinceIso, dryRun, delayMs). См. ADR 2026-06-16-ym-clientid-orphan-lead |
 | `/webhooks/internal/set-ya-cid` | POST | точечная запись ClientID в лиды/сделки (body: items[{clientId, leadId\|chatId+channelLabel+sinceIso/untilIso}], dryRun) |
