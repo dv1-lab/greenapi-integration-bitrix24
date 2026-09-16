@@ -1381,6 +1381,9 @@ export class Bitrix24Service extends BaseAdapter<
 		// Имя резолвим здесь, а не у вызывающего, — эмиттер и так фоновый.
 		portalDomain?: string;
 		operatorUserId?: string;
+		// Готовая подпись, когда отправитель не оператор портала: ответ из
+		// дашборда резолвить в B24 не по чему, имя там своё.
+		operatorLabel?: string;
 	}): Promise<void> {
 		const fc = await this._csFindOrCreate("ig_client", opts.clientId, "adapter-ig");
 		const payload: Record<string, any> = {
@@ -1419,7 +1422,9 @@ export class Bitrix24Service extends BaseAdapter<
 		// и ни одного с оператором), и владелец не мог понять, кто из менеджеров
 		// разговаривал с клиентом. У WhatsApp имя приходит подсказкой в мост,
 		// здесь тот же портал под рукой — резолвим напрямую.
-		if (opts.direction === "out" && opts.portalDomain && opts.operatorUserId) {
+		if (opts.direction === "out" && opts.operatorLabel) {
+			body.operator = opts.operatorLabel;
+		} else if (opts.direction === "out" && opts.portalDomain && opts.operatorUserId) {
 			const who = await this.getOperatorName(opts.portalDomain, opts.operatorUserId);
 			if (who) body.operator = `${who} · из Bitrix24`;
 		}
@@ -1432,6 +1437,116 @@ export class Bitrix24Service extends BaseAdapter<
 			body.resolveAlias = { type: "ig_client", value: opts.clientId };
 		}
 		await this._eventsIngest(body);
+	}
+
+	/**
+	 * Ответ клиенту в Instagram Direct, начатый НЕ порталом (сейчас — дашборд).
+	 *
+	 * Зачем отдельный путь. Обычный ответ идёт так: менеджер пишет в открытую
+	 * линию Битрикса → портал зовёт коннектор → handleI2crmOutgoing → i2crm.
+	 * Портал мы выключаем, а Instagram — самый крупный канал переписки (8 001
+	 * сообщение за полгода против 5 218 у WhatsApp), и другого способа ответить
+	 * в него нет. Здесь тот же вызов i2crm, но без портала в цепочке.
+	 *
+	 * Резолв `@username` в client_id не делаем: он идёт через лиды портала, а
+	 * дашборд шлёт числовой client_id из своей же копии событий.
+	 *
+	 * **Зеркало в открытую линию делаем, пока портал жив.** Соблазн пропустить
+	 * его велик — мы же уходим с Битрикса, — но пока часть менеджеров сидит в
+	 * портале, ответ, которого там не видно, означает второй ответ тому же
+	 * клиенту. `chat.id` строго `i2crm_ig_<client_id>`, как у входящих: другой
+	 * префикс заведёт второго chat-user и второй диалог (CHECKLIST_WIDGET §2).
+	 * Зеркало best-effort: сообщение клиенту уже ушло, и падать из-за портала
+	 * значит показать ошибку там, где отправка удалась.
+	 *
+	 * Событие `message_out` пишем сами: его эмитит handleI2crmOutgoing, через
+	 * который мы не идём. Без этого ответ не появился бы в переписке дашборда,
+	 * и менеджер решил бы, что сообщение не ушло.
+	 */
+	async sendIgDirectExternal(input: {
+		clientId: string;
+		text: string;
+		operatorLabel: string;
+		username?: string;
+	}): Promise<{ idMessage: string }> {
+		const clientId = String(input.clientId || "").trim();
+		const text = String(input.text || "").trim();
+		if (!/^\d+$/.test(clientId)) {
+			throw new Error(`clientId должен быть числовым Instagram user_id, получено "${clientId.slice(0, 40)}"`);
+		}
+		if (!text) throw new Error("Текст пуст");
+
+		const apiBase = this.configService.get<string>("I2CRM_API_BASE") || "https://app.i2crm.ru/api_v1";
+		const targetKey = this.configService.get<string>("I2CRM_TARGET_KEY_PUBLICAPI");
+		const accountId = this.configService.get<string>("I2CRM_INSTAGRAM_ACCOUNT_ID");
+		if (!targetKey || !accountId) {
+			throw new Error("I2CRM не настроен (TARGET_KEY/ACCOUNT_ID)");
+		}
+
+		const body: Record<string, any> = {
+			domain: "instagram",
+			source: String(accountId),
+			client: clientId,
+			type: "direct",
+			text,
+		};
+		if (input.username) body.client_username = String(input.username).replace(/^@/, "");
+
+		const r = await axios.post(`${apiBase}/target/feedback`, body, {
+			params: { key: targetKey },
+			timeout: 15000,
+			validateStatus: () => true,
+		});
+		const result = r.data;
+		if (result?.error) {
+			const msg = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
+			throw new Error(`i2crm отказал: ${msg}`);
+		}
+		const idMessage = String(result?.data?.id || result?.data?.external_ids?.[0] || `i2crm_${Date.now()}`);
+
+		// Зеркало в открытую линию 18. Формат payload повторяет mirrorToBitrix
+		// виджета — тот же CONNECTOR, тот же ключ пользователя, тот же
+		// is_self_message. Расхождение здесь стоило проекту пяти регрессий
+		// «дубль chat-user» за полгода, поэтому копируем, а не сочиняем.
+		const lineDirect = Number(this.configService.get<string>("I2CRM_LINE_ID_IG_DIRECT"));
+		if (lineDirect) {
+			const userKey = `i2crm_ig_${clientId}`;
+			const shown = input.username && !/\s/.test(input.username)
+				? input.username.replace(/^@/, "")
+				: `IG ${clientId}`;
+			await this.sendImconnectorMessage(
+				this.configService.get<string>("BITRIX_PORTAL_DOMAIN") || "1begovoy.bitrix24.ru",
+				{
+					CONNECTOR: "social_connector",
+					LINE: lineDirect,
+					MESSAGES: [{
+						user: { id: userKey, name: shown },
+						message: { id: idMessage, date: Math.floor(Date.now() / 1000), text },
+						chat: { id: userKey, name: shown, url: null },
+						extra: { is_self_message: true },
+					}],
+				},
+			).catch((e: any) => {
+				this.logger.warn(`[ig-external] зеркало в открытую линию не прошло: ${e?.message || e}`);
+			});
+		}
+
+		// Best-effort, как и остальные эмиссии: сообщение клиенту уже ушло, и
+		// падать из-за ненаписанного события значило бы сообщить об ошибке там,
+		// где отправка удалась, — менеджер отправит второй раз.
+		await this._emitIgMessageEvent({
+			clientId,
+			username: input.username,
+			direction: "out",
+			text,
+			igChannel: "direct",
+			messageId: idMessage,
+			operatorLabel: input.operatorLabel,
+		}).catch((e: any) => {
+			this.logger.warn(`[ig-external] событие message_out не записано: ${e?.message || e}`);
+		});
+
+		return { idMessage };
 	}
 
 	/**

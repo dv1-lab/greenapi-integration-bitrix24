@@ -905,6 +905,51 @@ export class WebhooksController {
 		res.json({ started: true });
 	}
 
+	// Internal endpoint: ответ клиенту в Instagram Direct мимо портала.
+	// Нужен дашборду: открытая линия Битрикса — единственный сегодня способ
+	// ответить в Instagram, а портал выключается. Auth: X-Hint-Secret, как у
+	// соседнего i2crm-replay. Виджетная проверка (домен портала + Origin +
+	// формат authId) для серверного вызова не годится и подделывать её нельзя.
+	@Post("internal/send-ig")
+	@HttpCode(HttpStatus.OK)
+	async sendIgExternal(@Req() req: Request, @Res() res: Response): Promise<void> {
+		const expected = process.env.BRIDGE_HINT_SECRET || "";
+		const given = String(req.headers["x-hint-secret"] || "");
+		// Пустой секрет в окружении не должен открывать эндпоинт наружу:
+		// у i2crm-replay такое поведение безобидно, здесь — отправка клиентам.
+		if (!expected || given !== expected) {
+			res.status(HttpStatus.UNAUTHORIZED).json({ error: "unauthorized" });
+			return;
+		}
+		const body = (req.body || {}) as {
+			clientId?: string; text?: string; operatorLabel?: string;
+			username?: string; dryRun?: boolean;
+		};
+		if (!body.operatorLabel) {
+			res.status(HttpStatus.BAD_REQUEST).json({ error: "operatorLabel обязателен" });
+			return;
+		}
+		// Холостой прогон: проверить связность и разбор тела, ничего не отправляя.
+		// Без него единственный способ проверить эндпоинт — написать живому
+		// человеку бессмысленный текст.
+		if (body.dryRun === true) {
+			res.json({ ok: true, dryRun: true, clientId: body.clientId, len: (body.text || "").length });
+			return;
+		}
+		try {
+			const r = await this.bitrix24Service.sendIgDirectExternal({
+				clientId: String(body.clientId || ""),
+				text: String(body.text || ""),
+				operatorLabel: String(body.operatorLabel),
+				username: body.username,
+			});
+			res.json({ ok: true, ...r });
+		} catch (error: any) {
+			this.logger.error(`internal/send-ig failed: ${error.message}`);
+			res.status(HttpStatus.BAD_GATEWAY).json({ error: error.message });
+		}
+	}
+
 	// Internal endpoint: повторная доставка pending-событий i2crm в B24.
 	// Используется после восстановления B24 из OVERLOAD_LIMIT — webhook'и от i2crm
 	// уже сохранены в I2crmEventLog со status='pending', этот вызов берёт их
