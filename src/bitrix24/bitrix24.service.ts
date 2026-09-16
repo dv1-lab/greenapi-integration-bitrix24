@@ -1492,17 +1492,47 @@ export class Bitrix24Service extends BaseAdapter<
 		};
 		if (input.username) body.client_username = String(input.username).replace(/^@/, "");
 
-		const r = await axios.post(`${apiBase}/target/feedback`, body, {
-			params: { key: targetKey },
-			timeout: 15000,
-			validateStatus: () => true,
-		});
+		let r: any;
+		try {
+			r = await axios.post(`${apiBase}/target/feedback`, body, {
+				params: { key: targetKey },
+				timeout: 15000,
+				validateStatus: () => true,
+			});
+		} catch (e: any) {
+			// Отказ транспорта — тот же случай, что и отказ i2crm: сообщение не
+			// ушло. Пишем статус до того, как отдать ошибку наверх, иначе о
+			// неудаче знает только менеджер у экрана.
+			void this._emitMessageDeliveryEvent({
+				idMessage: `i2crm-ext-tx-${Date.now()}`,
+				status: "failed", source: "bridge_ig", channel: "IG",
+				connector: "i2crm", b24ChatId: `i2crm_ig_${clientId}`,
+				error: `transport: ${e?.message || e}`.slice(0, 200),
+			});
+			throw e;
+		}
 		const result = r.data;
 		if (result?.error) {
 			const msg = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
+			void this._emitMessageDeliveryEvent({
+				idMessage: `i2crm-ext-fail-${Date.now()}`,
+				status: "failed", source: "bridge_ig", channel: "IG",
+				connector: "i2crm", b24ChatId: `i2crm_ig_${clientId}`,
+				error: msg.slice(0, 200),
+			});
 			throw new Error(`i2crm отказал: ${msg}`);
 		}
 		const idMessage = String(result?.data?.id || result?.data?.external_ids?.[0] || `i2crm_${Date.now()}`);
+
+		// Подтверждение доставки. i2crm webhook'ов о доставке не присылает,
+		// единственный признак успеха — error=false в ответе; ровно так же
+		// делает handleI2crmOutgoing. Без этого события ответ из дашборда
+		// навсегда остался бы «зависшим» на /customer-360/outgoing-pending.
+		void this._emitMessageDeliveryEvent({
+			idMessage,
+			status: "sent", source: "bridge_ig", channel: "IG",
+			connector: "i2crm", b24ChatId: `i2crm_ig_${clientId}`,
+		});
 
 		// Зеркало в открытую линию 18. Формат payload повторяет mirrorToBitrix
 		// виджета — тот же CONNECTOR, тот же ключ пользователя, тот же
@@ -6663,6 +6693,10 @@ export class Bitrix24Service extends BaseAdapter<
 						source: "bridge_ig",
 						channel: "IG",
 						connector: "i2crm",
+						// Без customerUuid/b24ChatId событие не пишется вовсе: guard в
+						// _emitMessageDeliveryEvent выходит с warn'ом в лог, и страница
+						// «зависших» про Instagram не знает. Алиас берём из клиента.
+						b24ChatId: `i2crm_ig_${clientId}`,
 						error: typeof result.error === "string" ? result.error : "validation failed",
 					});
 					return { success: false, message: `i2crm: ${typeof result.error === "string" ? result.error : "validation failed"}` };
@@ -6679,6 +6713,7 @@ export class Bitrix24Service extends BaseAdapter<
 					source: "bridge_ig",
 					channel: "IG",
 					connector: "i2crm",
+					b24ChatId: `i2crm_ig_${clientId}`,
 					error: `transport: ${err.message}`.slice(0, 200),
 				});
 				return { success: false, message: `i2crm transport: ${err.message}` };
@@ -6711,6 +6746,7 @@ export class Bitrix24Service extends BaseAdapter<
 				source: "bridge_ig",
 				channel: "IG",
 				connector: "i2crm",
+				b24ChatId: `i2crm_ig_${clientId}`,
 			});
 		}
 
