@@ -32,6 +32,43 @@ export class WebhooksController {
 		private readonly prisma: PrismaService,
 	) {}
 
+	/**
+	 * Переслать событие i2crm в свою CRM (dv-dashboard).
+	 *
+	 * Зачем: портал Битрикс24 выключается, а i2crm стучится ТОЛЬКО сюда, при
+	 * этом Instagram — самый крупный канал обращений (840 входящих за 30 дней).
+	 * Пока портал жив, он остаётся основным адресатом, а CRM получает копию:
+	 * расхождение тогда видно сверкой, а не после выключения.
+	 *
+	 * Тело пересылаем КАК ПРИШЛО, без преобразований: разбор формата живёт на
+	 * стороне CRM, и менять этот код при изменениях формата не придётся.
+	 *
+	 * Адрес с ключом задаётся в OWN_CRM_INBOX_URL; пусто — пересылки нет, и это
+	 * законное состояние (например на тестовом стенде).
+	 */
+	private async mirrorToOwnCrm(body: unknown): Promise<void> {
+		const url = process.env.OWN_CRM_INBOX_URL || "";
+		if (!url) return;
+		try {
+			const res = await fetch(url, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+				// Таймаут обязателен: без него зависший приёмник держал бы
+				// соединения, а событий тут до сотни в день.
+				signal: AbortSignal.timeout(8000),
+			});
+			if (!res.ok) {
+				// Текст ответа в лог: «не доставлено» без причины потом нечем
+				// разбирать, а молчаливая потеря обращения — худшее из исходов.
+				const text = await res.text().catch(() => "");
+				this.logger.warn(`[own-crm] не принято: ${res.status} ${text.slice(0, 200)}`);
+			}
+		} catch (e: any) {
+			this.logger.warn(`[own-crm] отправка не удалась: ${e?.message || e}`);
+		}
+	}
+
 	@Post("green-api")
 	@HttpCode(HttpStatus.OK)
 	@ApiOperation({
@@ -161,6 +198,10 @@ export class WebhooksController {
 		this.logger.info("[i2crm webhook] payload", body);
 		// Сразу 200 чтобы i2crm не ретраил при долгой обработке
 		res.status(HttpStatus.OK).json({ success: true });
+		// Копия события в свою CRM (dv-dashboard). Портал остаётся основным
+		// адресатом: он выключается, но пока жив, и ломать ему поток нельзя.
+		// Отправка НЕ влияет на основной путь — только лог при отказе.
+		void this.mirrorToOwnCrm(body);
 		try {
 			const result = await this.bitrix24Service.handleI2crmIncoming(body);
 			if (!result.success) {
