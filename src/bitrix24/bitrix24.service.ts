@@ -4973,9 +4973,12 @@ export class Bitrix24Service extends BaseAdapter<
 			text: finalText,
 			igChannel: isComment ? "comment" : "direct",
 			messageId: String(messageId),
+			// Файл директа i2crm шлёт в `src` (замер 08.10.2026: type=image, src —
+			// ссылка selstorage); media_url/media.url не приходят. У комментария
+			// `src` — адрес поста, файлом его считать нельзя.
 			mediaUrl:
 				type !== "text"
-					? payload?.media_url || payload?.media?.url || undefined
+					? payload?.media_url || payload?.media?.url || (!isComment ? payload?.src : undefined) || undefined
 					: undefined,
 			mediaName: payload?.media?.file_name || undefined,
 			postUrl: igPostUrl || undefined,
